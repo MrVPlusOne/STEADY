@@ -362,7 +362,7 @@ uuid = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 
 [[Distributions]]
 deps = ["FillArrays", "LinearAlgebra", "PDMats", "Printf", "QuadGK", "Random", "SparseArrays", "SpecialFunctions", "Statistics", "StatsBase", "StatsFuns"]
-git-tree-sha1 = "3889f646423ce91dd1055a76317e9a1d3a23fff1"
+path = "/Users/jiayiwei/.julia/dev/Distributions"
 uuid = "31c24e10-a181-5473-b8eb-7969acd0382f"
 version = "0.25.11"
 

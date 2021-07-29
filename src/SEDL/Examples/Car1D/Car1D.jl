@@ -106,8 +106,8 @@ end
             states[:, i+1] = x̂
         end
     end
-    data = (; actions, odometry_readings, sensor_readings, speed_readings)
-    return (;states, wall_pos, data)
+    data = (;actions, odometry_readings, sensor_readings, speed_readings)
+    return (;times, states, wall_pos, data)
 end
 
 
