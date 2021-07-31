@@ -1,1 +1,1 @@
-include("../src/SEDL/SEDL.jl")
+include("../src/SEDL.jl")

@@ -1,5 +1,7 @@
 module Car1D
 
+# TODO: refactor using multiple dispatch
+
 using UnPack
 using Turing
 using OrdinaryDiffEq
@@ -10,14 +12,13 @@ new_state(;pos, vel) = [pos, vel]
 @inline dim_state() = 2
 @inline dim_action() = 1
 
-function dynamics(du, x, p, t)
+function dynamics!(du, x, p, t)
     @unpack f, drag, inv_mass = p
     v = x[Vel]
     du[Pos] = v
     du[Vel] = (f - drag * v) * inv_mass
 end
 
-specific_elems(xs) = identity.(xs)
 
 function mk_motion_model(; drag, mass)
     integrator = nothing
@@ -28,14 +29,38 @@ function mk_motion_model(; drag, mass)
         end
         params = (; f = u[1], drag, inv_mass=1.0/mass)
         if integrator === nothing
-            prob = ODEProblem(dynamics, x, (t, t1), params)
+            prob = ODEProblem(dynamics!, x, (t, t1), params)
             dt = (t1-t)/2
             # integrator = init(prob, BS3(); save_everystep=false, abstol=1e-3, dt)
-            integrator = init(prob, Tsit5(); save_everystep=false, dt)
+            integrator = init(
+                prob, BS3(),
+                dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
+                dt=dt, abstol=1e-3, save_everystep=false,
+            )
         end
         integrator.p = params
         step!(integrator, t1-t, true)
         integrator.u
+    end
+end
+
+function mk_motion_model_euler(; drag, mass)
+    (x, u, t0::Float64, t1::Float64) -> begin
+        if any(isnan.(x)) || any(isinf.(x))
+            error("Bad state value: $x")
+        end
+        params = (; f = u[1], drag, inv_mass=1.0/mass)
+        n_steps = ceil(Int, (t1-t0)/0.002)
+        dt = (t1-t0)/n_steps
+        t = t0
+        s = copy(x)
+        ds = zero(x)
+        for _ in 1:n_steps
+            dynamics!(ds, s, params, t)
+            s .+= ds .* dt
+            t += dt
+        end
+        s
     end
 end
 
@@ -68,6 +93,7 @@ end
 
 @model function data_process(
     times;
+    euler = false,
     drag=missing, mass=missing, wall_pos=missing,
     actions=missing, 
     odometry_readings=missing, sensor_readings=missing, speed_readings=missing, 
@@ -75,7 +101,12 @@ end
     drag ~ Uniform(0.0, 1.0)
     mass ~ Uniform(0.5, 5)
 
-    motion_model = mk_motion_model(; drag, mass)
+    if euler
+        motion_model = mk_motion_model_euler(; drag, mass)
+    else
+        motion_model = mk_motion_model(; drag, mass)
+    end
+    
 
     steps = length(times)-1
     no_actions = ismissing(actions)
@@ -110,5 +141,54 @@ end
     return (;times, states, wall_pos, data)
 end
 
+@model function infer_process(
+    times;
+    euler = false,
+    drag=missing, mass=missing, wall_pos=missing,
+    actions=missing, 
+    odometry_readings=missing, sensor_readings=missing, speed_readings=missing, 
+)
+    drag ~ Uniform(0.0, 1.0)
+    mass ~ Uniform(0.5, 5)
+
+    if euler
+        motion_model = mk_motion_model_euler(; drag, mass)
+    else
+        motion_model = mk_motion_model(; drag, mass)
+    end
+    
+
+    steps = length(times)-1
+    no_actions = ismissing(actions)
+
+    wall_pos ~ truncated(Normal(5.0, 5.0), 4.0, 50.)
+    Num = typeof(wall_pos)
+    ismissing(actions) && (actions = Matrix{Num}(undef, dim_action(), steps))
+    ismissing(odometry_readings) && (odometry_readings = Vector{Num}(undef, steps))
+    ismissing(sensor_readings) && (sensor_readings = Vector{Num}(undef, steps))
+    ismissing(speed_readings) && (speed_readings = Vector{Num}(undef, steps))
+        
+    states = Matrix{Num}(undef, 2, steps)
+    states[:, 1] = new_state(pos=0., vel=0.)
+    for i in 1:steps
+        x = states[:, i]
+        x_last = i == 1 ? x : states[:, i-1]
+
+        speed_readings[i] ~ speed_dist(x)
+        sensor_readings[i] ~ sensor_dist(x, wall_pos)
+        odometry_readings[i] ~ odometry_dist(x_last, x)
+
+        no_actions && (actions[:, i] .= controller(speed_readings[i], sensor_readings[i]))
+
+        t, t1 = times[i], times[i+1]
+        x̂ = motion_model(x, actions[:, i], t, t1)
+        if i < steps
+            # states[:, i+1] ~ motion_noise(x̂)
+            states[:, i+1] = x̂
+        end
+    end
+    data = (;actions, odometry_readings, sensor_readings, speed_readings)
+    return (;times, states, wall_pos, data)
+end
 
 end # module Car1D
