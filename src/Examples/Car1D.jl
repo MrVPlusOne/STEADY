@@ -19,26 +19,28 @@ function dynamics!(du, x, p, t)
     du[Vel] = (f - drag * v) * inv_mass
 end
 
-
-function mk_motion_model(; drag, mass)
-    integrator = nothing
-    
+const integrator_cache = Ref{Union{Any}}(nothing)
+function mk_motion_model(x0, u0, (t0, tf) ; drag, mass)
+    if integrator_cache[] === nothing
+        params = (; f = u0[1], drag, inv_mass=1.0/mass)
+        prob = ODEProblem(dynamics!, x0, (t0, tf), params)
+        # integrator = init(prob, BS3(); save_everystep=false, abstol=1e-3, dt)
+        integrator = init(
+            prob, BS3(),
+            dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
+            dt=0.1,
+            abstol=1e-3, save_everystep=false,
+        )
+        integrator_cache[] = integrator
+    else
+        integrator = integrator_cache[]
+        reinit!(integrator, x0)
+    end
     (x, u, t::Float64, t1::Float64) -> begin
         if any(isnan.(x)) || any(isinf.(x))
             error("Bad state value: $x")
         end
-        params = (; f = u[1], drag, inv_mass=1.0/mass)
-        if integrator === nothing
-            prob = ODEProblem(dynamics!, x, (t, t1), params)
-            dt = (t1-t)/2
-            # integrator = init(prob, BS3(); save_everystep=false, abstol=1e-3, dt)
-            integrator = init(
-                prob, BS3(),
-                dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
-                dt=dt, abstol=1e-3, save_everystep=false,
-            )
-        end
-        integrator.p = params
+        integrator.p = (; f = u[1], drag, inv_mass=1.0/mass)
         step!(integrator, t1-t, true)
         integrator.u
     end
@@ -57,7 +59,8 @@ function mk_motion_model_euler(; drag, mass)
         ds = zero(x)
         for _ in 1:n_steps
             dynamics!(ds, s, params, t)
-            s .+= ds .* dt
+            ds .*= dt
+            s .+= ds
             t += dt
         end
         s
@@ -101,13 +104,9 @@ end
     drag ~ Uniform(0.0, 1.0)
     mass ~ Uniform(0.5, 5)
 
-    if euler
-        motion_model = mk_motion_model_euler(; drag, mass)
-    else
-        motion_model = mk_motion_model(; drag, mass)
-    end
+    motion_model = 
+        euler ? mk_motion_model_euler(; drag, mass) : mk_motion_model(;drag, mass)
     
-
     steps = length(times)-1
     no_actions = ismissing(actions)
 
@@ -144,41 +143,23 @@ end
 @model function infer_process(
     times;
     euler = false,
-    drag=missing, mass=missing, wall_pos=missing,
-    actions=missing, 
-    odometry_readings=missing, sensor_readings=missing, speed_readings=missing, 
+    actions, odometry_readings, sensor_readings, speed_readings, 
 )
     drag ~ Uniform(0.0, 1.0)
     mass ~ Uniform(0.5, 5)
+    wall_pos ~ truncated(Normal(5.0, 5.0), 4.0, 50.)
 
-    if euler
-        motion_model = mk_motion_model_euler(; drag, mass)
-    else
-        motion_model = mk_motion_model(; drag, mass)
-    end
-    
+    motion_model = 
+        euler ? mk_motion_model_euler(; drag, mass) : mk_motion_model(;drag, mass)
 
     steps = length(times)-1
-    no_actions = ismissing(actions)
 
-    wall_pos ~ truncated(Normal(5.0, 5.0), 4.0, 50.)
     Num = typeof(wall_pos)
-    ismissing(actions) && (actions = Matrix{Num}(undef, dim_action(), steps))
-    ismissing(odometry_readings) && (odometry_readings = Vector{Num}(undef, steps))
-    ismissing(sensor_readings) && (sensor_readings = Vector{Num}(undef, steps))
-    ismissing(speed_readings) && (speed_readings = Vector{Num}(undef, steps))
         
     states = Matrix{Num}(undef, 2, steps)
     states[:, 1] = new_state(pos=0., vel=0.)
     for i in 1:steps
         x = states[:, i]
-        x_last = i == 1 ? x : states[:, i-1]
-
-        speed_readings[i] ~ speed_dist(x)
-        sensor_readings[i] ~ sensor_dist(x, wall_pos)
-        odometry_readings[i] ~ odometry_dist(x_last, x)
-
-        no_actions && (actions[:, i] .= controller(speed_readings[i], sensor_readings[i]))
 
         t, t1 = times[i], times[i+1]
         x̂ = motion_model(x, actions[:, i], t, t1)
@@ -187,8 +168,12 @@ end
             states[:, i+1] = x̂
         end
     end
-    data = (;actions, odometry_readings, sensor_readings, speed_readings)
-    return (;times, states, wall_pos, data)
+    cols = collect(eachcol(states))
+    speed_readings .~ speed_dist.(cols)
+    sensor_readings .~ sensor_dist.(cols, wall_pos)
+    odometry_readings[1] ~ odometry_dist(cols[1], cols[1])
+    odometry_readings[2:end] .~ odometry_dist.(cols[1:end-1], cols[2:end])
+    return nothing
 end
 
 end # module Car1D

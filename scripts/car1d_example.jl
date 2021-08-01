@@ -10,7 +10,7 @@ using Optim
 using UnPack
 
 # include("../src/SEDL/SEDL.jl")
-using .Car1D: data_process
+using .Car1D: data_process, infer_process
 
 """
 Plot the result returned by `Car1D.data_process`.
@@ -27,6 +27,7 @@ function plot_result(result)
     plot(p_state, p_action, p_obs, layout=(3,1), size=(600,600))
 end
 
+##
 Δt = 0.1
 tend = 10.0
 times = 0:Δt:tend
@@ -43,11 +44,19 @@ ill_prior() |> plot_result
 @benchmark for _ in 1:100 ill_prior() end
 Main.@profview sample(ill_prior, Prior(), 1000)
 sample(ill_prior, Prior(), 100)
+
 ##
-process_infer = data_process(times; prior_run.data...)
+process_infer_slow = data_process(times; euler=false, prior_run.data...)
+process_infer_fast = infer_process(times; euler=false, prior_run.data...)
 println("Performing MAP estimation...")
 optim_options = Optim.Options(x_abstol=1e-3)
-map_est = @time optimize(process_infer, MAP(), optim_options, autodiff=:forwarddiff)
+
+println("benchmarking process_infer_slow...")
+@benchmark optimize(process_infer_slow, MAP(), optim_options, autodiff=:forwarddiff)
+println("benchmarking process_infer_fast...")
+@benchmark optimize(process_infer_fast, MAP(), optim_options, autodiff=:forwarddiff)
+
+map_est = @time optimize(process_infer_slow, MAP(), optim_options, autodiff=:forwarddiff)
 
 ##
 map_params = [k => map_est.values[k] for k in [:drag, :mass, :wall_pos]]
@@ -62,7 +71,11 @@ plot_result(process_run_map)
 
 ##
 println("Sampling posterior...")
-@time chains = Turing.sample(process_infer, NUTS(), 500, init_theta=map_est)
+@benchmark chains = Turing.sample(process_infer_slow, MH(), 10_000, init_theta=map_est)
+println("Sampling from process_infer_fast...")
+@benchmark chains = Turing.sample(process_infer_fast, MH(), 10_000, init_theta=map_est)
+Main.@profview chains = Turing.sample(process_infer_fast, MH(), 10_000, init_theta=map_est)
+chains = Turing.sample(process_infer_slow, MH(), 10_000, init_theta=map_est)
 summarize(chains)
 plot(chains)
 
