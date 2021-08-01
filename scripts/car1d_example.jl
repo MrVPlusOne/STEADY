@@ -1,16 +1,21 @@
 # this script is supposed to be run inside the module SEDL
 
+##
+
 using DrWatson
 # @quickactivate "ProbPRL"
 
 using StatsPlots
 using BenchmarkTools
-using Turing
+using Turing, Zygote, ReverseDiff
 using Optim
+using GalacticOptim
+using GalacticOptim: AutoForwardDiff, AutoTracker, AutoZygote, AutoReverseDiff
 using UnPack
+using TransformVariables
 
 # include("../src/SEDL/SEDL.jl")
-using .Car1D: data_process, infer_process
+using .Car1D: data_process, infer_process, posterior_density
 
 """
 Plot the result returned by `Car1D.data_process`.
@@ -33,32 +38,53 @@ tend = 10.0
 times = 0:Δt:tend
 
 ##
+
 process_prior = data_process(times; euler = false, drag=0.2, mass=2.0, wall_pos=11.0)
 prior_run = process_prior() 
 plot_result(prior_run)
 
 ##
-ill_prior = data_process(times; euler=false, drag=10.0, mass=0.1, wall_pos=11.0)
-ill_prior() |> plot_result
-@benchmark sample(ill_prior, Prior(), 1000)
-@benchmark for _ in 1:100 ill_prior() end
-Main.@profview sample(ill_prior, Prior(), 1000)
-sample(ill_prior, Prior(), 100)
 
-##
-process_infer_slow = data_process(times; euler=false, prior_run.data...)
-process_infer_fast = infer_process(times; euler=false, prior_run.data...)
-println("Performing MAP estimation...")
+process_infer = data_process(times; euler=true, prior_run.data...)
+process_infer_fast = infer_process(times; euler=true, prior_run.data...)
 optim_options = Optim.Options(x_abstol=1e-3)
 
-println("benchmarking process_infer_slow...")
-@benchmark optimize(process_infer_slow, MAP(), optim_options, autodiff=:forwarddiff)
-println("benchmarking process_infer_fast...")
-@benchmark optimize(process_infer_fast, MAP(), optim_options, autodiff=:forwarddiff)
+##
 
-map_est = @time optimize(process_infer_slow, MAP(), optim_options, autodiff=:forwarddiff)
+println("Performing MAP estimation...")
+map_est = @time optimize(process_infer_fast, MAP(), optim_options)
+# map_est = @time optimize(process_infer, MAP(), optim_options, autodiff=:reversediff)
 
 ##
+# MAP estimation using handcrafted score
+function MAP_infer(times, data; euler, ad = AutoForwardDiff())
+    x_trans = as((
+        drag=as(Real, 0., 1.), 
+        mass=as(Real, 0.5, 5.0), 
+        wall_pos=as(Real, 0., 50.),
+        states=as(Array, 2, length(times)-1),
+    ))
+    function f(x, _)
+        -posterior_density(transform(x_trans, x), times, data; euler)
+    end
+    of = OptimizationFunction(f, ad)
+    states0 = zeros(2, length(times)-1)
+    x0 = (drag=0.1, mass=1.0, wall_pos=49.0, states=states0)
+    v0 = inverse(x_trans, x0)
+    prob = OptimizationProblem(of, v0)
+    sol = solve(prob, LBFGS(), x_abstol=1e-3, progress=true)
+    score = -f(sol, ())
+    transform(x_trans, sol), score
+end
+
+map_result, score = @time MAP_infer(times, prior_run.data, euler=false, ad=AutoReverseDiff())
+result_infered = (; map_result.states, times, map_result.wall_pos, prior_run.data)
+plot_result(result_infered)
+
+##
+
+prior_run.data
+
 map_params = [k => map_est.values[k] for k in [:drag, :mass, :wall_pos]]
 function check_lp(step::Int)
     process_map = data_process(times[1:step]; actions=prior_run.data.actions, map_params...)
@@ -71,12 +97,9 @@ plot_result(process_run_map)
 
 ##
 println("Sampling posterior...")
-@benchmark chains = Turing.sample(process_infer_slow, MH(), 10_000, init_theta=map_est)
-println("Sampling from process_infer_fast...")
-@benchmark chains = Turing.sample(process_infer_fast, MH(), 10_000, init_theta=map_est)
-Main.@profview chains = Turing.sample(process_infer_fast, MH(), 10_000, init_theta=map_est)
-chains = Turing.sample(process_infer_slow, MH(), 10_000, init_theta=map_est)
+Turing.setadbackend(:reversediff)
+chains = Turing.sample(process_infer_fast, NUTS(), 200, init_theta=map_est)
 summarize(chains)
-plot(chains)
+# plot(chains)
 
 ##
