@@ -5,33 +5,33 @@ module Car1D
 using UnPack
 using Turing
 using OrdinaryDiffEq
-using Zygote: Buffer
+# using DiffEqSensitivity
+# using Zygote: Buffer
 
-@enum StateIndices Pos Vel AccF
+@enum StateIndices Pos Vel
 Base.to_index(i::StateIndices) = Int(i)+1
 new_state(;pos, vel) = [pos, vel]
 @inline dim_state() = 2
 @inline dim_action() = 1
 new_action(;force) = [force]
 
+function dynamics(x::X, p, t)::X where X
+    f, drag, inv_mass = p
+    v = x[Vel]
+    d_pos = v
+    d_vel = (f - drag * v) * inv_mass
+    [d_pos, d_vel]
+end
+
 function dynamics!(du, x, p, t)
-    @unpack f, drag, inv_mass = p
+    f, drag, inv_mass = p
     v = x[Vel]
     du[Pos] = v
     du[Vel] = (f - drag * v) * inv_mass
 end
 
-function dynamics(x, p, t)
-    @unpack f, drag, inv_mass = p
-    v = x[Vel]
-    dPos = v
-    dVel = (f - drag * v) * inv_mass
-    [dPos, dVel]
-end
-
-const integrator_cache = Ref{Union{Any}}(nothing)
 function mk_motion_model(x0, u0, (t0, tf) ; drag, mass)
-    params = (; f = u0[1], drag, inv_mass=1.0/mass)
+    params = [u0[1], drag, 1.0/mass]
     prob = ODEProblem(dynamics!, x0, (t0, tf), params)
     integrator = init(
         prob, BS3(),
@@ -41,47 +41,36 @@ function mk_motion_model(x0, u0, (t0, tf) ; drag, mass)
     )
 
     (x, u, t::Float64, t1::Float64) -> begin
-        if any(isnan.(x)) || any(isinf.(x))
-            error("Bad state value: $x")
-        end
-        integrator.p = (; f = u[1], drag, inv_mass=1.0/mass)
+        integrator.p[1] = u[1]
         set_u!(integrator, x)
         step!(integrator, t1-t, true)
         integrator.u
     end
 end
 
+# using ..NumericalIntegration
+# function mk_motion_model(x0, u0, (t0, tf) ; drag, mass)
+#     (x, u, t::Float64, t1::Float64) -> begin
+#         params = [u[1], drag, 1.0/mass]
+#         integrate_forward(dynamics, x, params, (t, t1), Euler, 1)
+#     end
+# end
 
-function mk_motion_model_euler(; drag, mass)
-    (x, u, t0::Float64, t1::Float64) -> begin
-        if any(isnan.(x)) || any(isinf.(x))
-            error("Bad state value: $x")
-        end
-        params = (; f = u[1], drag, inv_mass=1.0/mass)
-        n_steps = ceil(Int, (t1-t0)/0.002)
-        dt = (t1-t0)/n_steps
-        t = t0
-        s = copy(x)
-        ds = zero(x)
-        for _ in 1:n_steps
-            dynamics!(ds, s, params, t)
-            ds .*= dt
-            s .+= ds
-            # ds = dynamics(s, params, t)
-            # s += ds * dt
-            # t += dt
-        end
-        s
-    end
+function wall_dist()
+    Uniform(0., 50.)
 end
 
-function motion_noise(x, Δt)
-    MvNormal(x, new_state(pos=0.25, vel=0.5) .* (0.1 + abs(x[Vel]) .* Δt ))
+function motion_noise(x::AbstractVector, Δt)
+    MvNormal(x, new_state(pos=0.1, vel=0.2) .* (0.1 + abs(x[Vel]) .* Δt ))
 end
 
 function sensor_dist(x, wall_pos)
     sensor_max_range = 5.0
-    truncated(Normal(wall_pos - x[Pos], 0.2), 0., sensor_max_range)
+    if 0 <= wall_pos - x[Pos] <= sensor_max_range
+        Normal(wall_pos - x[Pos], 0.2)
+    else
+        Normal(sensor_max_range + (wall_pos - x[Pos])*0.001, 0.1)
+    end
 end
 
 function speed_dist(x)
@@ -104,7 +93,8 @@ end
 
 @model function data_process(
     times;
-    euler = false,
+    dyn_disturbance::Bool,
+    s0=missing,
     drag=missing, mass=missing, wall_pos=missing,
     actions=missing, 
     odometry_readings=missing, sensor_readings=missing, speed_readings=missing, 
@@ -115,19 +105,18 @@ end
     steps = length(times)-1
     no_actions = ismissing(actions)
 
-    wall_pos ~ truncated(Normal(5.0, 5.0), 4.0, 50.)
+    wall_pos ~ wall_dist()
     Num = typeof(wall_pos)
     ismissing(actions) && (actions = Matrix{Num}(undef, dim_action(), steps))
     ismissing(odometry_readings) && (odometry_readings = Vector{Num}(undef, steps))
     ismissing(sensor_readings) && (sensor_readings = Vector{Num}(undef, steps))
     ismissing(speed_readings) && (speed_readings = Vector{Num}(undef, steps))
         
+    s0 ~ MvNormal([0., 0.], [1.0, 1.0])
     states = Matrix{Num}(undef, 2, steps)
     u0 = new_action(force=0.0)
-    states[:, 1] = new_state(pos=0., vel=0.)
-    motion_model = if euler
-        mk_motion_model_euler(; drag, mass)
-    else mk_motion_model(states[:, 1], u0, (times[1], times[end]) ;drag, mass) end
+    states[:, 1] .= s0
+    motion_model = mk_motion_model(s0, u0, (times[1], times[end]) ;drag, mass)
     for i in 1:steps
         x = states[:, i]
         x_last = i == 1 ? x : states[:, i-1]
@@ -141,71 +130,34 @@ end
         t, t1 = times[i], times[i+1]
         x̂ = motion_model(x, actions[:, i], t, t1)
         if i < steps
-            states[:, i+1] ~ motion_noise(x̂, t1-t)
-            # states[:, i+1] = x̂
+            if dyn_disturbance
+                states[:, i+1] ~ motion_noise(x̂, t1-t)
+            else
+                states[:, i+1] = x̂
+            end
         end
     end
     data = (;actions, odometry_readings, sensor_readings, speed_readings)
     return (;times, states, wall_pos, data)
 end
 
-@model function infer_process(
-    times;
-    euler = false,
-    actions, odometry_readings, sensor_readings, speed_readings, 
-)
-    drag ~ Uniform(0.0, 1.0)
-    mass ~ Uniform(0.5, 5)
-    wall_pos ~ truncated(Normal(5.0, 5.0), 4.0, 50.)
-
-    steps = length(times)-1
-    Num = typeof(wall_pos)
-        
-    # states = Matrix{Num}(undef, 2, steps)
-    states = Buffer([wall_pos], 2, steps)
-    motion_model = 
-        if euler; mk_motion_model_euler(; drag, mass)
-        else mk_motion_model(states[:, 1], u0, (times[1], times[end]) ;drag, mass) end
-
-    states[:, 1] = new_state(pos=0., vel=0.)
-    for i in 1:steps
-        x = states[:, i]
-
-        t, t1 = times[i], times[i+1]
-        x̂ = motion_model(x, actions[:, i], t, t1)
-        if i < steps
-            states[:, i+1] ~ motion_noise(x̂, t1-t)
-            # states[:, i+1] = x̂
-        end
-    end
-    cols = collect(eachcol(copy(states)))
-    speed_readings .~ speed_dist.(cols)
-    sensor_readings .~ sensor_dist.(cols, wall_pos)
-    odometry_readings[1:1] ~ odometry_dist(cols[1], cols[1])
-    odometry_readings[2:end] .~ odometry_dist.(cols[1:end-1], cols[2:end])
-    return nothing
-end
-
 function posterior_density(
     (drag, mass, wall_pos, states),
     times,
     (actions, odometry_readings, sensor_readings, speed_readings);
-    euler = false,
 )
-    Num = typeof(wall_pos)
-    score::Num = zero(drag)
+    score = 0.0
     ~(x, dist) = score += logpdf(dist, x)
 
     drag ~ Uniform(0.0, 1.0)
     mass ~ Uniform(0.5, 5)
-    wall_pos ~ truncated(Normal(5.0, 5.0), 0.0, 50.)
+    wall_pos ~ wall_dist()
     states[:, 1] ~ MvNormal(new_state(pos=0.0, vel=0.0), new_state(pos=0.1, vel=0.1))
 
     steps = length(times)-1
         
     motion_model = 
-        if euler; mk_motion_model_euler(; drag, mass)
-        else mk_motion_model(states[:, 1], actions[:, 1], (times[1], times[end]) ;drag, mass) end
+        mk_motion_model(states[:, 1], actions[:, 1], (times[1], times[end]) ;drag, mass)
 
     for i in 1:steps
         x = states[:, i]

@@ -4,6 +4,7 @@ Simultaneous state estimation and dynamics learning.
 module SEDL
 
 include("utils.jl")
+include("numerical_integration.jl")
 include("Examples/Car1D.jl")
 
 if false
