@@ -32,7 +32,7 @@ end
 
 function mk_motion_model(x0, u0, (t0, tf) ; drag, mass)
     params = [u0[1], drag, 1.0/mass]
-    prob = ODEProblem(dynamics!, x0, (t0, tf), params)
+    prob = ODEProblem{true}(dynamics!, x0, (t0, tf), params)
     integrator = init(
         prob, BS3(),
         dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
@@ -64,22 +64,23 @@ function motion_noise(x::AbstractVector, Δt)
     MvNormal(x, new_state(pos=0.1, vel=0.2) .* (0.1 + abs(x[Vel]) .* Δt ))
 end
 
-function sensor_dist(x, wall_pos)
+function sensor_dist(x, wall_pos; noise_scale)
     sensor_max_range = 5.0
-    if 0 <= wall_pos - x[Pos] <= sensor_max_range
-        Normal(wall_pos - x[Pos], 0.2)
-    else
-        Normal(sensor_max_range + (wall_pos - x[Pos])*0.001, 0.1)
-    end
+    d = if 0 <= wall_pos - x[Pos] <= sensor_max_range
+            wall_pos - x[Pos]
+        else
+            sensor_max_range + (wall_pos - x[Pos])*1e-4
+        end
+    Normal(d, 0.2noise_scale)
 end
 
-function speed_dist(x)
-    Normal(x[Vel], 0.2)
+function speed_dist(x; noise_scale)
+    Normal(x[Vel], 0.2noise_scale)
 end
 
-function odometry_dist(x, x1)
+function odometry_dist(x, x1; noise_scale)
     Δ = x1[Pos] - x[Pos]
-    Normal(Δ, 0.1+0.1*abs(Δ))
+    Normal(Δ, 0.1noise_scale * (1+abs(Δ)))
 end
 
 function controller(vel, sensor)
@@ -94,6 +95,8 @@ end
 @model function data_process(
     times;
     dyn_disturbance::Bool,
+    noise_scale::Float64=1.0,
+    s0_dist=MvNormal([0., 0.], [0.1, 0.1]),
     s0=missing,
     drag=missing, mass=missing, wall_pos=missing,
     actions=missing, 
@@ -112,7 +115,7 @@ end
     ismissing(sensor_readings) && (sensor_readings = Vector{Num}(undef, steps))
     ismissing(speed_readings) && (speed_readings = Vector{Num}(undef, steps))
         
-    s0 ~ MvNormal([0., 0.], [1.0, 1.0])
+    s0 ~ s0_dist
     states = Matrix{Num}(undef, 2, steps)
     u0 = new_action(force=0.0)
     states[:, 1] .= s0
@@ -121,9 +124,9 @@ end
         x = states[:, i]
         x_last = i == 1 ? x : states[:, i-1]
 
-        speed_readings[i] ~ speed_dist(x)
-        sensor_readings[i] ~ sensor_dist(x, wall_pos)
-        odometry_readings[i] ~ odometry_dist(x_last, x)
+        speed_readings[i] ~ speed_dist(x; noise_scale)
+        sensor_readings[i] ~ sensor_dist(x, wall_pos; noise_scale)
+        odometry_readings[i] ~ odometry_dist(x_last, x; noise_scale)
 
         no_actions && (actions[:, i] .= controller(speed_readings[i], sensor_readings[i]))
 

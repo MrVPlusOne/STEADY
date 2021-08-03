@@ -1,4 +1,4 @@
-# this script is supposed to be run inside the module SEDL
+# this script needs to be run inside the module SEDL
 
 ##
 
@@ -14,8 +14,9 @@ using GalacticOptim: AutoForwardDiff, AutoTracker, AutoZygote, AutoReverseDiff
 using UnPack
 using TransformVariables
 using StatsBase
+using ProgressLogging
+using DataFrames
 
-# include("../src/SEDL/SEDL.jl")
 using .Car1D: data_process, posterior_density
 
 """
@@ -33,6 +34,18 @@ function plot_result(result, name::String)
     plot(p_state, p_action, p_obs, layout=(3,1), size=(600,600))
 end
 
+function show_map_estimation(map_est)
+    println("Estimating uncertainty using information matrix...")
+    symbols = [:drag, :mass, :wall_pos, Symbol("s0[1]"), Symbol("s0[2]")]
+    cov_mat = @time informationmatrix(map_est)
+    rows = map(symbols) do s
+        v = map_est.values[s]
+        std = cov_mat[s, s]
+        (name=s, mean=v, std=std)
+    end
+    display(DataFrame(rows))
+end
+
 ##
 Δt = 0.1
 tend = 10.0
@@ -41,10 +54,11 @@ times = 0:Δt:tend
 ##
 # generate the data from the prior and plot
 
-true_params = (s0=[0., 0.5], drag=0.2, mass=2.0, wall_pos=11.0)
-process_prior = data_process(times; dyn_disturbance=true, true_params...)
+true_params = (s0=[0., 0.], drag=0.2, mass=2.0, wall_pos=11.0)
+s0_dist = MvNormal([0., 0.], [0.01, 0.01])
+process_prior = data_process(times; s0_dist, dyn_disturbance=false, noise_scale=0.01, true_params...)
 prior_run = process_prior() 
-process_infer = data_process(times; dyn_disturbance=false, prior_run.data...)
+process_infer = data_process(times; s0_dist, dyn_disturbance=false, noise_scale=0.01, prior_run.data...)
 plot_result(prior_run, "data")
 
 ##
@@ -54,29 +68,31 @@ Turing.setadbackend(:forwarddiff)
 println("Performing MAP estimation using Turing...")
 map_est = @time let 
     trials = 10
-    options = Optim.Options(x_abstol=1e-3)
+    options = Optim.Options(x_abstol=1e-3, allow_f_increases=true)
     sols = [optimize(process_infer, MAP(), options) for _ in 1:trials]
     scores = [s.lp for s in sols]
     _, i = findmax(scores)
     @show scores
     sols[i]
 end
-propertynames(map_est)
 map_values = map_est.values
 dis_to_wall = map_values[:wall_pos] - map_values[Symbol("s0[1]")]
 display(map_est)
 @show dis_to_wall
 
-println("Estimating uncertainty using information matrix...")
-display(@time informationmatrix(map_est))
+show_map_estimation(map_est)
 
 ##
 # Sampling full posterior
 println("Sampling from the full posterior...")
 chains = @time Turing.sample(
-    process_infer, NUTS(), MCMCThreads(), 200, 4, ϵ=0.01, init_theta=map_est)
+    process_infer, NUTS(), MCMCThreads(), 500, 8, ϵ=0.01, init_theta=map_est)
 summarize(chains)
 
+##
+# Other sampling methods
+chains = @time Turing.sample(
+    process_infer, HMC(0.001, 5), MCMCThreads(), 20_000, 8, init_theta=map_est)
 ##
 
 #------------ Outdated code below -------------
@@ -108,7 +124,7 @@ function MAP_infer(times, data; ad = AutoForwardDiff())
 end
 
 println("Performing MAP estimation using log density...")
-Main.@profview map_result, score = @time MAP_infer(times, prior_run.data, ad=AutoReverseDiff())
+map_result, score = @time MAP_infer(times, prior_run.data, ad=AutoReverseDiff())
 result_infered = (; map_result.states, times, map_result.wall_pos, prior_run.data)
 let
     @unpack wall_pos, drag, mass = map_result
