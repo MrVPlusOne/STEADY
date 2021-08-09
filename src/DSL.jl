@@ -112,8 +112,7 @@ struct Var <: TAST
 end
 
 Base.show(io::IO, v::Var) = begin
-    @unpack name, type = v
-    print(io, "$name::$type")
+    print(io, v.name)
 end
 
 @auto_hash_equals(

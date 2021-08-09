@@ -89,7 +89,7 @@ function components_scalar_arithmatic!(env::ComponentEnv)
 end
 square(x) = x^2
 
-function components_unary_funcs!(env::ComponentEnv)
+function components_transcendentals!(env::ComponentEnv)
     push_unitless!(env, :sin, sin)
     push_unitless!(env, :cos, cos)
     push_unitless!(env, :exp, exp)
@@ -102,7 +102,7 @@ function components_vec2!(env::ComponentEnv)
 
     push!(env, :plus_R2, (+), [ℝ2, ℝ2] => ℝ2, signature_all_same)
     push!(env, :minus_R2, (-), [ℝ2, ℝ2] => ℝ2, signature_all_same)
-    push!(env, :scale_R2, (*), [ℝ, ℝ2] => ℝ2, (+))
+    push!(env, :scale_R2, (*), [ℝ, ℝ2] => ℝ2, (*))
     push!(env, :rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing)
     push!(env, :neg_R2, (-), [ℝ2] => ℝ2, identity)
 end
