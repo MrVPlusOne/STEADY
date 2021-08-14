@@ -28,6 +28,8 @@ end
 
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
+derivative(v::Var, t::Var = Var(v.name, ℝ, :T => 1)) = 
+    Var(Symbol(v.name, "′"), PType(v.type.shape, v.type.unit / t.type.unit))
 
 """
 A environment that stores the set of component functions available for synthesis.

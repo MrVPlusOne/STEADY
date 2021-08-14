@@ -15,6 +15,15 @@ Base.getindex(r::EnumerationResult, shape::PShape) = let
     for p in d2)
 end
 
+
+Base.getindex(r::EnumerationResult, type::PType) = begin
+    @unpack shape, unit = type
+    d1 = get(r.programs, shape, Dict())
+    (p 
+    for size in sort(collect(keys(d1)))
+    for p in get(d1[size], unit, []))
+end
+
 function show_programs(io::IO, r::EnumerationResult; max_programs::Int=20)
     for s in keys(r.programs)
         println(io, "------- $(s.name) -------")
@@ -40,6 +49,11 @@ Base.show(io::IO, ::MIME"text/plain", r::EnumerationResult) = begin
     print(io, Dedent())
     println(io, "Found programs: ", Indent())
     show_programs(io, r)
+end
+
+Base.show(io::IO, r::EnumerationResult) = begin
+    stats = join(["$k: $v" for (k, v) in r.stats], ", ")
+    print(io, "EnumerationResult($stats)")
 end
 
 function bottom_up_enum(env::ComponentEnv, vars::Vector{Var}, max_size)::EnumerationResult
@@ -127,4 +141,66 @@ function size_combinations(n_args, sizes_for_arg, total_size)
         end
     end
     (reverse!(v) for v in rec(1, total_size))
+end
+
+const TimeSeries{T} = Vector{T}
+
+"""
+The robot dynamics are assumed to be of the form `f(state, action, params) -> next_state`.
+
+## Fields
+- `states`: maps each state variable (e.g. `position`) to the distribution of its initial 
+value and initial derivative (e.g. the distribution of `position` and `velocity`). 
+- `actions`: maps each action variable to its time-series data.
+- `dynamics_params`: maps each dynamics parameters to its prior distribution.
+- `others`: maps other random variables to their prior distributions. Unlike 
+`dynamics_params`, these variables cannot affect the state of the robot but 
+can still affect the observations. e.g., these can be (unknown) landmark locations or the 
+position of the camera.
+- `var_types`: maps each variable to their `PType`.
+"""
+Base.@kwdef(
+struct VariableData
+    states::Dict{Var, Tuple{Distribution, Distribution}}  
+    actions::Dict{Var, TimeSeries}
+    dynamics_params::Dict{Var, Distribution}
+    others::Dict{Var, Distribution}
+end)
+
+"""
+Perform Maximum a posteriori (MAP) synthesis to find the joint assignment of the motion 
+model *and* the trajecotry that maximizes the posterior probability.
+
+The system dynamics are assuemd to be 2nd-order.
+
+- `program_prior(prog::TAST) -> logp` should return the log piror probability of a given 
+dynamics program. 
+- `data_likelihood(trajectory::Dict{Var, TimeSeries}, other_vars::Dict{Var, Any}) -> logp` 
+should return the log probability density of the observation.
+- `max_size`: the maximal AST size of the program to consider.
+"""
+function map_synthesis(
+    env::ComponentEnv,
+    vdata::VariableData,
+    program_prior::Function,
+    data_likelihood::Function,
+    max_size:: Int;
+    t_var:: Var = Var(:t, ℝ, :T => 1),
+)
+    state_vars = keys(vdata.states) |> collect
+    state′_vars = derivative.(state_vars, Ref(t_var))
+    state′′_vars = derivative.(state′_vars, Ref(t_var))
+    action_vars = keys(vdata.actions) |> collect
+    param_vars = keys(vdata.dynamics_params) |> collect
+    dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
+    @show dyn_vars
+    enum_result = bottom_up_enum(env, dyn_vars, max_size)
+    @show enum_result
+    
+    output_types = [v.type for v in state′′_vars]
+    all_comps = Iterators.product((enum_result[ty] for ty in output_types)...)
+    # for comps in all_comps
+
+    # end
+    return collect(all_comps)
 end

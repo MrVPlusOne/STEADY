@@ -6,6 +6,7 @@ module SEDL
 using AutoHashEquals
 using StaticArrays
 using UnPack
+using Distributions
 include("IOIndents.jl")
 using .IOIndents
 
