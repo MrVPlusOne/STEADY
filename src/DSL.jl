@@ -134,3 +134,41 @@ Base.show(io::IO, v::Call) = begin
     print(io, "$f($arg_list)")
 end
 
+"""
+    traverse(f, e::TAST)
+
+recursively visit all subexpressions in `e` in depth-first order and applies `f` 
+to each of them.
+"""
+function traverse end
+
+traverse(f, v::Var) = f(v)
+function traverse(f, c::Call)
+    f(c)
+    foreach(c.args) do a; traverse(f, a) end
+end
+
+function ast_size(e::TAST)
+    s = 0
+    traverse(e -> s += 1, e)
+    s
+end
+
+struct ShapeEnv
+    impl_dict::Dict{PShape, Type}
+end
+
+Base.getindex(env::ShapeEnv, s::PShape) = env.impl_dict[s]
+Base.getindex(env::ShapeEnv, s::PType) = env[s.shape]
+
+## === Commonly used type definitions ===
+const ℝ = PShape(:ℝ)
+const ℝ2 = PShape(:ℝ²)
+
+ℝenv() = ShapeEnv(Dict(
+    ℝ => Real,
+    ℝ2 => (SVector{2, T} where {T <: Real}),
+))
+
+derivative(v::Var, t::Var = Var(v.name, ℝ, :T => 1)) = 
+    Var(Symbol(v.name, "′"), PType(v.type.shape, v.type.unit / t.type.unit))
