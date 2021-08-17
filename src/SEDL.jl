@@ -9,6 +9,7 @@ using UnPack
 using Distributions
 include("IOIndents.jl")
 using .IOIndents
+using Optim
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 

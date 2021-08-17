@@ -64,6 +64,33 @@ begin
     plot!(gen_traj(10_000), label="N=10_000")
 end
 ##
+# test map_estimate
+compute_solution(; only_prior::Bool, N=200) = begin
+    s = (x=Normal(1.0),)
+    s′ = (x′=Normal(0.0),)
+    params = (drag = Normal(0.0, 0.2),)
+    times = range(0, 10, length=N)
+    actions = map(_ -> (f=2.0,), times)
+    f_s′′= (x′′ = (args) -> (-args.x - args.drag * args.x′),)
+    function likelihood(traj)
+        if only_prior
+            0.0
+        else
+            -10((traj[1].x - 1)^2 + (5traj[end].x)^2 + (5traj[end].x′)^2)
+        end
+    end
+    map_trajectory(s, s′, f_s′′, params, times, actions, likelihood, Optim.Options())
+end
+
+let 
+    (prior_traj, prior_setting) = compute_solution(only_prior=true)
+    println("Prior setting: $prior_setting")
+    plot(prior_traj, label="Prior")
+    (post_traj, post_setting) = compute_solution(only_prior=false)
+    println("Posterior setting: $post_setting")
+    plot!(post_traj, label="Posterior")
+end
+##
 # test synthesis
 n_steps = 10
 vdata = VariableData(

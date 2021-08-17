@@ -205,6 +205,39 @@ function map_synthesis(
     return collect(all_comps)
 end
 
+function map_trajectory(
+    x₀_dist::NamedTuple{x_keys},
+    x′₀_dist::NamedTuple{x′_keys},
+    f_x′′::NamedTuple,
+    params_dist::NamedTuple{p_keys},
+    times::TimeSeries,
+    actions::TimeSeries{<:NamedTuple},
+    data_likelihood,
+    optim_options::Optim.Options,
+) where {x_keys, x′_keys, p_keys}
+    x_guess = map(rand, x₀_dist)
+    x′_guess = map(rand, x′₀_dist)
+    params_guess = map(rand, params_dist) 
+    x_size = n_numbers(x_guess)
+    function vec_to_traj(vec) 
+        local x = NamedTuple{x_keys}(tuple_from_vec(x_guess, vec))
+        local x′ = NamedTuple{x′_keys}(tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
+        local p = NamedTuple{p_keys}(tuple_from_vec(params_guess, @views vec[2x_size+1:end]))
+        simulate(x, x′, f_x′′, p, times, actions), (; x, x′, p)
+    end
+    function loss(vec)
+        traj, (x, x′, p) = vec_to_traj(vec)
+        prior = logpdf(x₀_dist, x) + logpdf(x′₀_dist, x′) + logpdf(params_dist, p)
+        -(prior + data_likelihood(traj))
+    end
+    vec_guess::Vector{Float64} = vcat(tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
+    sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
+    vec_to_traj(Optim.minimizer(sol))
+end
+
+function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real where ks
+    sum(logpdf.(values(dist), values(v)))
+end
 
 """
 Numerically integrate the trajecotry using 
@@ -247,7 +280,7 @@ function simulate(
         a = a1
         push!(result, to_named(x, x′))
     end
-    result
+    result::TimeSeries{<:NamedTuple}
 end
 
 ## === below are unused functions and may be removed in the future ===
@@ -295,7 +328,7 @@ function simulate_ode(
     end
 end
 
-function tuple_to_vec!(arr, v::Tuple)
+function tuple_to_vec!(arr, v::Union{Tuple, NamedTuple})
     i = Ref(0)
     function rec(r::Real)
         arr[i[]+=1] = r
@@ -310,37 +343,47 @@ function tuple_to_vec!(arr, v::Tuple)
     arr
 end
 
-function tuple_to_vec(v::Tuple)
-    n = sum(length.(v))
-    vec = Vector{Real}(undef, n)
+"""
+Count how many numbers there are in the given NamedTuple.
+
+```jldoctest
+julia> n_numbers((0.0, @SVector[0.0, 0.0]))
+3
+```
+"""
+function n_numbers(v::Union{Tuple, NamedTuple})
+    count(::Real) = 1
+    count(::SVector{n}) where n = n
+    sum(map(count, v))
+end
+
+
+function promote_numbers_type(v::Union{Tuple, NamedTuple})
+    types = typeof.(values(v))
+    Base.promote_eltype(types...)
+end
+
+function tuple_to_vec(v::Union{Tuple, NamedTuple})
+    T = promote_numbers_type(v)
+    vec = Vector{T}(undef, n_numbers(v))
     tuple_to_vec!(vec, v)
-    specific_elems(vec)
+    vec
 end
 
-function tuple_from_vec(t::Type{<:Tuple}, vec)
-    i = 0
-    read(::Type{<:Real}) = begin
+function tuple_from_vec(template::Tuple, vec)
+    i::Int = 0
+    read(::Real) = begin
         vec[i+=1]
     end
-    read(sv::Type{<:SVector}) = begin
-        n = length(sv)
+    read(::SVector{n}) where n = begin
         i+=1
-        vec[i:i+n-1]
+        SVector{n}(vec[i:i+n-1])
     end
-    tuple((read(t) for t in t.types)...)::t
+    read.(template)
 end
 
-function tuple_from_vec(t::Type{<:NamedTuple}, vec)
-    i = 0
-    read(::Type{<:Real}) = begin
-        vec[i+=1]
-    end
-    read(sv::Type{<:SVector}) = begin
-        n = length(sv)
-        i+=1
-        vec[i:i+n-1]
-    end
-    (; zip(t.names, read(t) for t in t.types)...)::t
+function tuple_from_vec(template::NamedTuple, vec)
+    NamedTuple{keys(template)}(tuple_from_vec(values(template), vec))
 end
 
 
