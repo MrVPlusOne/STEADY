@@ -13,7 +13,6 @@ using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
 include("utils.jl")
-include("numerical_integration.jl")
 include("DSL.jl")
 include("components.jl")
 include("compiler.jl")

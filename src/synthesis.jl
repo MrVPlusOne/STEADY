@@ -143,7 +143,7 @@ function size_combinations(n_args, sizes_for_arg, total_size)
     (reverse!(v) for v in rec(1, total_size))
 end
 
-const TimeSeries{T} = Vector{T}
+const TimeSeries{T} = AbstractVector{T}
 
 """
 The robot dynamics are assumed to be of the form `f(state, action, params) -> next_state`.
@@ -199,8 +199,151 @@ function map_synthesis(
     
     output_types = [v.type for v in state′′_vars]
     all_comps = Iterators.product((enum_result[ty] for ty in output_types)...)
-    # for comps in all_comps
+    for comps in all_comps
 
-    # end
+    end
     return collect(all_comps)
+end
+
+
+"""
+Numerically integrate the trajecotry using 
+[Leapfrog integration](https://en.wikipedia.org/wiki/Leapfrog_integration).
+
+Returns a vector of named tuples containing the next state for each time step.
+
+# Arguments
+- `x::NamedTuple`: the initial pose.
+- `x′::NamedTuple`: the initial velocity.
+- `f_x′′::NamedTuple`: the acceleration represented as [`CompiledFunc`](@ref)s.
+- `params::NamedTuple`: the dynamics parameters.
+- `times::TimeSeries`: the time steps.
+- `actions::TimeSeries{<:NamedTuple}`: The actions for each time step.
+"""
+function simulate(
+    x₀::NamedTuple{x_keys, X},
+    x′₀::NamedTuple{x′_keys, X},
+    f_x′′::NamedTuple,
+    params::NamedTuple,
+    times::TimeSeries,
+    actions::TimeSeries{<:NamedTuple},
+) where {x_keys, x′_keys, X}    
+    acc(x, x′, action) = begin
+        input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
+        map(f -> f(input), values(f_x′′))
+    end
+    to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
+
+    x = values(x₀)
+    x′ = values(x′₀)
+    a = acc(x, x′, actions[1])
+    result = [to_named(x, x′)]
+    for t in 1:length(times)-1
+        Δt = times[t+1]-times[t]
+        v_half = @. x′ + (Δt/2) * a 
+        x = @. x + Δt * v_half
+        a1 = acc(x, @.(v_half + (Δt/2) * a), actions[t+1])
+        x′ = @. x′ + (Δt/2) * (a + a1)
+        a = a1
+        push!(result, to_named(x, x′))
+    end
+    result
+end
+
+## === below are unused functions and may be removed in the future ===
+using OrdinaryDiffEq
+
+function simulate_ode(
+    x::NamedTuple{x_keys, X},
+    x′::NamedTuple{x′_keys, X},
+    f_x′′::NamedTuple,
+    params::NamedTuple,
+    times::TimeSeries,
+    actions::TimeSeries{<:NamedTuple},
+) where {x_keys, x′_keys, X}
+    u_keys = (x_keys..., x′_keys...)
+    n = sum(length(z) for z in values(x))
+    p = (params=params, action=actions[1])
+    u0_tuple = merge(x, x′)
+    state_types = typeof(u0_tuple)
+    u0 = tuple_to_vec(values(u0_tuple))
+    function dynamics!(du, u, p, t)
+        s = tuple_from_vec(NamedTuple{x_keys, X}, @views u[1:n])
+        s′ = tuple_from_vec(NamedTuple{x′_keys, X}, @views u[n+1:2n])
+        # input = (s, s′, p.action, p.params)
+        du[1:n] .= u[n+1:end]
+        tuple_to_vec!(@views(u[n+1:2n]), map(f -> f(s, s′, p.action, p.params), values(f_x′′)))
+    end
+
+    prob = ODEProblem{true}(dynamics!, u0, (times[1], times[end]), p)
+    integrator = init(
+        prob, BS3(),
+        dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
+        dt=0.1,
+        abstol=1e-3, save_everystep=false,
+    )
+
+    map(0:length(times)-1) do t
+        if t != 0
+            Δt = times[t+1]-times[t]
+            p = (params=params, action=actions[t])
+            integrator.p = p
+            step!(integrator, Δt, true)
+        end
+        integrator.u
+        # NamedTuple{u_keys}(tuple_from_vec(state_types, integrator.u))
+    end
+end
+
+function tuple_to_vec!(arr, v::Tuple)
+    i = Ref(0)
+    function rec(r::Real)
+        arr[i[]+=1] = r
+        nothing
+    end
+    function rec(v::AbstractVector)
+        j = i[]+=1
+        arr[j:j+length(v)-1] .= v
+        nothing
+    end
+    foreach(rec, v)
+    arr
+end
+
+function tuple_to_vec(v::Tuple)
+    n = sum(length.(v))
+    vec = Vector{Real}(undef, n)
+    tuple_to_vec!(vec, v)
+    specific_elems(vec)
+end
+
+function tuple_from_vec(t::Type{<:Tuple}, vec)
+    i = 0
+    read(::Type{<:Real}) = begin
+        vec[i+=1]
+    end
+    read(sv::Type{<:SVector}) = begin
+        n = length(sv)
+        i+=1
+        vec[i:i+n-1]
+    end
+    tuple((read(t) for t in t.types)...)::t
+end
+
+function tuple_from_vec(t::Type{<:NamedTuple}, vec)
+    i = 0
+    read(::Type{<:Real}) = begin
+        vec[i+=1]
+    end
+    read(sv::Type{<:SVector}) = begin
+        n = length(sv)
+        i+=1
+        vec[i:i+n-1]
+    end
+    (; zip(t.names, read(t) for t in t.types)...)::t
+end
+
+
+function to_named_tuple(var_dict)::NamedTuple
+    (; (k.name => v for (k, v) in var_dict)...)
 end

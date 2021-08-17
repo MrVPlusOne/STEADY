@@ -113,6 +113,9 @@ end
 
 Var(name::Symbol, shape::PShape, unit::Pair...) = Var(name, PType(shape, PUnit(unit...)))
 
+Base.hash(v::Var, h::UInt) = hash(v.name, h)
+Base.:(==)(v1::Var, v2::Var) = v1.name === v2.name
+
 Base.show(io::IO, v::Var) = begin
     print(io, v.name)
 end

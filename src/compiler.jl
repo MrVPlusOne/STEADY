@@ -30,7 +30,7 @@ Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile(
     prog::TAST, args::Vector{Var}, shape_env::ShapeEnv, comp_env::ComponentEnv
-)#::CompiledFunc
+)::CompiledFunc
     function compile_body(v::Var)
         Expr(:(.), :args, QuoteNode(v.name))
     end

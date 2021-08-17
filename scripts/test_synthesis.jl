@@ -25,6 +25,7 @@ f_comp($((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 # test compilation speed
 using DataFrames
 using StatsPlots
+using BenchmarkTools
 programs = collect(Iterators.take(result[ℝ], 500))
 stats = map(programs) do p
     size = ast_size(p)
@@ -36,6 +37,32 @@ stats = map(programs) do p
 end |> DataFrame
 time_vs_size = combine(groupby(stats, :size), :compile_time => mean => :compile_time)
 @df time_vs_size plot(:size, :compile_time)
+##
+# test simulation
+@time let
+    s = (x=1.0,)
+    s′ = (x′=0.0,)
+    params = (a = 1.0,)
+    times = range(0, 10, length=100)
+    actions = map(_ -> (f=2.0,), times)
+    f_s′′= (x′′ = (args) -> (-1 * args.a * args.x),)
+    Main.@code_warntype simulate(s, s′, f_s′′, params, times, actions)
+end
+
+gen_traj(N) = begin
+    s = (x=1.0,)
+    s′ = (x′=0.0,)
+    params = (a = 1.0,)
+    times = range(0, 10, length=N)
+    actions = map(_ -> (f=2.0,), times)
+    f_s′′= (x′′ = (args) -> (-args.a * args.x - 0.1 * args.x′),)
+    simulate(s, s′, f_s′′, params, times, actions)
+end
+
+begin
+    plot(gen_traj(100), label="N=100")
+    plot!(gen_traj(10_000), label="N=10_000")
+end
 ##
 # test synthesis
 n_steps = 10
