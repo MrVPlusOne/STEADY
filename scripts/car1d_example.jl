@@ -17,7 +17,7 @@ using StatsBase
 using ProgressLogging
 using DataFrames
 
-using .Car1D: data_process, posterior_density
+using .Car1D_old: data_process, posterior_density
 
 """
 Plot the result returned by `Car1D.data_process`.

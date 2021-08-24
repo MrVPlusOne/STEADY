@@ -6,6 +6,7 @@ module SEDL
 using AutoHashEquals
 using StaticArrays
 using UnPack
+using ProgressLogging
 using Distributions
 include("IOIndents.jl")
 using .IOIndents
@@ -18,6 +19,7 @@ include("DSL.jl")
 include("components.jl")
 include("compiler.jl")
 include("synthesis.jl")
+include("Examples/Car1D_new.jl")
 include("Examples/Car1D.jl")
 
 if false

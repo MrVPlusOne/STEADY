@@ -1,5 +1,6 @@
 # The DSL for physical dimenion-informed expressions. 
 
+export PShape
 """
 The shape of a type. e.g. Scalar or Vector.
 """
@@ -8,6 +9,7 @@ struct PShape
 end
 
 
+export PUnit, isunitless
 """
 A physical unit of the form `l1^p1 l2^p2 ...` where `l`s are unit labels 
 and `p`s are rational powers.
@@ -41,8 +43,8 @@ struct PUnit
 end)
 PUnit(pairs::Pair...) = PUnit(Dict(pairs...))
 
-isunitless(u::PUnit) = isempty(u.impl)
 const unitless = PUnit()
+isunitless(u::PUnit) = isempty(u.impl)
 
 print_pretty_rational(io::IO, x::Rational) = begin
     show(io, numerator(x))
@@ -88,6 +90,23 @@ function Base.:^(u1::PUnit, n::Rational)
 end
 Base.:^(u1::PUnit, n::Integer)=u1^Rational(n, 1)
 
+export PUnits
+module PUnits
+    using ..SEDL: PUnit, unitless
+    
+    const Length = PUnit(:L => 1)
+    const Time = PUnit(:T => 1)
+    const Mass = PUnit(:M => 1)
+
+    const Speed = Length / Time
+    const Acceleration = Length / Time^2
+    const Force = Mass * Acceleration
+
+    const Angle = unitless
+    const AngularSpeed = Angle / Time
+end
+
+export PType
 """
 A physical type with both a name and a unit.
 """
@@ -101,6 +120,7 @@ Base.show(io::IO, v::PType) = begin
     print(io, "$(shape.name){$unit}")
 end
 
+export TAST, Var, Call
 """
 Typed AST for numerical expressions.
 """
@@ -111,7 +131,8 @@ struct Var <: TAST
     type::PType
 end
 
-Var(name::Symbol, shape::PShape, unit::Pair...) = Var(name, PType(shape, PUnit(unit...)))
+Var(name::Symbol, shape::PShape, unit::Pair...) = Var(name, shape, PUnit(unit...))
+Var(name::Symbol, shape::PShape, unit::PUnit) = Var(name, PType(shape, unit))
 
 Base.hash(v::Var, h::UInt) = hash(v.name, h)
 Base.:(==)(v1::Var, v2::Var) = v1.name === v2.name
@@ -157,6 +178,7 @@ function ast_size(e::TAST)
     s
 end
 
+export ShapeEnv
 struct ShapeEnv
     impl_dict::Dict{PShape, Type}
 end
@@ -164,6 +186,7 @@ end
 Base.getindex(env::ShapeEnv, s::PShape) = env.impl_dict[s]
 Base.getindex(env::ShapeEnv, s::PType) = env[s.shape]
 
+export ℝ, ℝ2, ℝenv, derivative
 ## === Commonly used type definitions ===
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
@@ -173,5 +196,6 @@ const ℝ2 = PShape(:ℝ²)
     ℝ2 => (SVector{2, T} where {T <: Real}),
 ))
 
-derivative(v::Var, t::Var = Var(v.name, ℝ, :T => 1)) = 
-    Var(Symbol(v.name, "′"), PType(v.type.shape, v.type.unit / t.type.unit))
+derivative(v:: Symbol) = Symbol(v, "′")
+derivative(v::Var, t::PUnit = PUnits.Time) = 
+    Var(derivative(v.name), PType(v.type.shape, v.type.unit / t))

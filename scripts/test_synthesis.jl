@@ -1,28 +1,26 @@
 # this script needs to be run inside the module SEDL
 ##
+shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
 components_vec2!(env)
 components_transcendentals!(env)
-env
 
-l = Var(:l, ℝ, :L => 1)
-x = Var(:x, ℝ2, :L => 1)
-v = Var(:v, ℝ2, :L => 1, :T => -1)
-θ = Var(:θ, ℝ)
-steer = Var(:steer, ℝ, :T => -1)
-wall_x = Var(:wall_x, ℝ, :L => 1)
+l = Var(:l, ℝ, PUnits.Length)
+x = Var(:x, ℝ2, PUnits.Length)
+v = Var(:v, ℝ2, PUnits.Speed)
+θ = Var(:θ, ℝ, PUnits.Angle)
+steer = Var(:steer, ℝ, PUnits.AngularSpeed)
+wall_x = Var(:wall_x, ℝ, PUnits.Length)
 
 derivative(x)
 
 result = bottom_up_enum(env, [x, l, θ], 7)
-##
-# test compilation
+## test compilation
 prog = Iterators.drop(result[ℝ2], 10) |> first
-f_comp = compile(prog, [x, l, θ], ℝenv(), env)
-f_comp($((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
-##
-# test compilation speed
+f_comp = compile(prog, [x, l, θ], shape_env, env)
+f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
+## test compilation speed
 using DataFrames
 using StatsPlots
 using BenchmarkTools
@@ -30,7 +28,7 @@ programs = collect(Iterators.take(result[ℝ], 500))
 stats = map(programs) do p
     size = ast_size(p)
     compile_time = @elapsed let
-        f_comp = compile(p, [x, l, θ], ℝenv(), env)
+        f_comp = compile(p, [x, l, θ], shape_env, env)
         f_comp((x=@SVector[1.0, 2.0], l=1.4, θ=2.1))
     end
     (;size, compile_time)
@@ -45,18 +43,18 @@ time_vs_size = combine(groupby(stats, :size), :compile_time => mean => :compile_
     params = (a = 1.0,)
     times = range(0, 10, length=100)
     actions = map(_ -> (f=2.0,), times)
-    f_s′′= (x′′ = (args) -> (-1 * args.a * args.x),)
-    Main.@code_warntype simulate(s, s′, f_s′′, params, times, actions)
+    f_s′′= ((args) -> (-1 * args.a * args.x),)
+    simulate(s, s′, f_s′′, params, times, actions)
 end
 
 gen_traj(N) = begin
     s = (x=1.0,)
     s′ = (x′=0.0,)
     params = (a = 1.0,)
-    times = range(0, 10, length=N)
+    times = range(0, 10, length=N) |> collect
     actions = map(_ -> (f=2.0,), times)
-    f_s′′= (x′′ = (args) -> (-args.a * args.x - 0.1 * args.x′),)
-    simulate(s, s′, f_s′′, params, times, actions)
+    f_s′′= ((args) -> (-args.a * args.x - 0.1 * args.x′),)
+    simulate(s, s′, f_s′′, params, times, actions) |> specific_elems
 end
 
 begin
@@ -71,8 +69,8 @@ compute_solution(; only_prior::Bool, N=200) = begin
     params = (drag = Normal(0.0, 0.2),)
     times = range(0, 10, length=N)
     actions = map(_ -> (f=2.0,), times)
-    f_s′′= (x′′ = (args) -> (-args.x - args.drag * args.x′),)
-    function likelihood(traj)
+    f_s′′= ((args) -> (-args.x - args.drag * args.x′),)
+    function likelihood(traj, p)
         if only_prior
             0.0
         else
@@ -83,30 +81,41 @@ compute_solution(; only_prior::Bool, N=200) = begin
 end
 
 let 
-    (prior_traj, prior_setting) = compute_solution(only_prior=true)
-    println("Prior setting: $prior_setting")
-    plot(prior_traj, label="Prior")
-    (post_traj, post_setting) = compute_solution(only_prior=false)
-    println("Posterior setting: $post_setting")
-    plot!(post_traj, label="Posterior")
+    result_priror = compute_solution(only_prior=true)
+    println("Prior params: $(result_priror.params)")
+    plot(specific_elems(result_priror.traj), label="Prior")
+    result_post = compute_solution(only_prior=false)
+    println("Posterior params: $(result_post.params)")
+    plot!(specific_elems(result_post.traj), label="Posterior")
 end
-##
-# test synthesis
-n_steps = 10
-vdata = VariableData(
-    states = Dict([
-        x => (MvNormal(zeros(2), ones(2)*0.1), MvNormal(zeros(2), ones(2))),
-        θ => (Normal(pi/2, 0.1), Normal(0.0, 0.5)),
-    ]),
-    actions = Dict([
-        steer => fill(1.0, n_steps),
-    ]),
-    dynamics_params = Dict([
-        l => Uniform(0.0, 2.0),
-    ]),
-    others = Dict([
-        wall_x => Uniform(0.0, 50.0)
-    ]),
-)
-map_synthesis(env, vdata, identity, identity, 4)
+## example synthesis problem
+noise_scale = 1.0
+times = collect(range(0.0, 5.0, length=50))
+params = (drag=0.1, mass=1.5)
+others = (wall=7.0,)
+x₀ = (pos=0.0,)
+x₀′ = (pos′=0.5,)
+ex_data = Car1D.generate_data(x₀, x₀′, (Car1D.acceleration_f,), params, others, times; noise_scale)
+Car1D.plot_data(ex_data, "Truth")
+## run synthesis
+shape_env = ℝenv()
+env = ComponentEnv()
+components_scalar_arithmatic!(env)
+components_transcendentals!(env)
+
+vdata = Car1D.variable_data()
+prog_logp(comps) = 0.9^sum(ast_size.(comps))  # weakly penealize larger programs
+
+syn_result = @time let 
+    observations = ex_data.observations
+    map_synthesis(
+        shape_env, env, vdata, Car1D.action_vars(),
+        ex_data.actions, ex_data.times, 
+        prog_logp, 
+        (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
+        max_size=7,
+        evals_per_program=10,
+        optim_options = Optim.Options(x_abstol=1e-3),
+    )
+end
 ##

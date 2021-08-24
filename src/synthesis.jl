@@ -143,8 +143,9 @@ function size_combinations(n_args, sizes_for_arg, total_size)
     (reverse!(v) for v in rec(1, total_size))
 end
 
-const TimeSeries{T} = AbstractVector{T}
+const TimeSeries{T} = Vector{T}
 
+export VariableData, map_synthesis
 """
 The robot dynamics are assumed to be of the form `f(state, action, params) -> next_state`.
 
@@ -162,10 +163,18 @@ position of the camera.
 Base.@kwdef(
 struct VariableData
     states::Dict{Var, Tuple{Distribution, Distribution}}  
-    actions::Dict{Var, TimeSeries}
     dynamics_params::Dict{Var, Distribution}
     others::Dict{Var, Distribution}
+    t_unit:: PUnit = PUnits.Time
 end)
+
+Base.rand(vdata::VariableData) = begin
+    x₀ = (;(v.name => rand(dist) for (v, (dist, _)) in vdata.states)...)
+    x′₀ = (;(derivative(v.name) => rand(dist) for (v, (_, dist)) in vdata.states)...)
+    params = (;(v.name => rand(dist) for (v, dist) in vdata.dynamics_params)...)
+    others = (;(v.name => rand(dist) for (v, dist) in vdata.others)...)
+    (; x₀, x′₀, params, others)
+end
 
 """
 Perform Maximum a posteriori (MAP) synthesis to find the joint assignment of the motion 
@@ -173,44 +182,74 @@ model *and* the trajecotry that maximizes the posterior probability.
 
 The system dynamics are assuemd to be 2nd-order.
 
-- `program_prior(prog::TAST) -> logp` should return the log piror probability of a given 
+- `program_logp(prog::TAST) -> logp` should return the log piror probability of a given 
 dynamics program. 
 - `data_likelihood(trajectory::Dict{Var, TimeSeries}, other_vars::Dict{Var, Any}) -> logp` 
 should return the log probability density of the observation.
-- `max_size`: the maximal AST size of the program to consider.
+- `max_size`: the maximal AST size of each component program to consider.
 """
 function map_synthesis(
-    env::ComponentEnv,
+    shape_env::ShapeEnv,
+    comp_env::ComponentEnv,
     vdata::VariableData,
-    program_prior::Function,
-    data_likelihood::Function,
-    max_size:: Int;
-    t_var:: Var = Var(:t, ℝ, :T => 1),
+    action_vars::Vector{Var},
+    actions::TimeSeries{<:NamedTuple},
+    times::AbstractVector,
+    program_logp::Function,
+    data_likelihood::Function;
+    max_size::Int,
+    evals_per_program::Int = 10,
+    optim_options = Optim.Options(),
 )
+    @unpack t_unit = vdata
     state_vars = keys(vdata.states) |> collect
-    state′_vars = derivative.(state_vars, Ref(t_var))
-    state′′_vars = derivative.(state′_vars, Ref(t_var))
-    action_vars = keys(vdata.actions) |> collect
+    state′_vars = derivative.(state_vars, Ref(t_unit))
+    state′′_vars = derivative.(state′_vars, Ref(t_unit))
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    @show dyn_vars
-    enum_result = bottom_up_enum(env, dyn_vars, max_size)
-    @show enum_result
+    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size)
     
     output_types = [v.type for v in state′′_vars]
-    all_comps = Iterators.product((enum_result[ty] for ty in output_types)...)
-    for comps in all_comps
-
+    all_comps = Iterators.product((enum_result[ty] for ty in output_types)...) |> collect
+    @info "number of programs: $(length(all_comps))"
+    x₀_dist = (;(s.name => vdata.states[s][1] for s in state_vars)...)
+    x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
+    params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
+    others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
+    best_prog = missing
+    @progress for comps in all_comps
+        f_x′′ = map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)::Tuple
+        sols = [map_trajectory(
+            x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
+            times, actions, data_likelihood, 
+            optim_options,
+        ) for _ in 1:evals_per_program]
+        _, s_id = findmax([s.logp for s in sols])
+        sol = sols[s_id]
+        logp = sol.logp + program_logp(comps)
+        if best_prog === missing || best_prog.logp < logp
+            best_prog = (; logp, f_x′′, sol)
+        end
     end
-    return collect(all_comps)
+    best_prog
 end
 
+function transpose_series(
+    len::Int, vars, series_comps::Dict{Var, TimeSeries}
+)::TimeSeries{<:NamedTuple}
+    collect(let 
+        as = (a.name => series_comps[a][t] for a in vars)
+        (; as...)
+    end for t in 1:len)
+end
+
+export map_trajectory
 function map_trajectory(
     x₀_dist::NamedTuple{x_keys},
     x′₀_dist::NamedTuple{x′_keys},
-    f_x′′::NamedTuple,
+    f_x′′::Tuple,
     params_dist::NamedTuple{p_keys},
-    times::TimeSeries,
+    times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
     data_likelihood,
     optim_options::Optim.Options,
@@ -220,19 +259,21 @@ function map_trajectory(
     params_guess = map(rand, params_dist) 
     x_size = n_numbers(x_guess)
     function vec_to_traj(vec) 
-        local x = NamedTuple{x_keys}(tuple_from_vec(x_guess, vec))
-        local x′ = NamedTuple{x′_keys}(tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
+        local x₀ = NamedTuple{x_keys}(tuple_from_vec(x_guess, vec))
+        local x′₀ = NamedTuple{x′_keys}(tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
         local p = NamedTuple{p_keys}(tuple_from_vec(params_guess, @views vec[2x_size+1:end]))
-        simulate(x, x′, f_x′′, p, times, actions), (; x, x′, p)
+        simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
     end
     function loss(vec)
-        traj, (x, x′, p) = vec_to_traj(vec)
-        prior = logpdf(x₀_dist, x) + logpdf(x′₀_dist, x′) + logpdf(params_dist, p)
-        -(prior + data_likelihood(traj))
+        traj, (x₀, x′₀, p) = vec_to_traj(vec)
+        prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
+        -(prior + data_likelihood(traj, p))
     end
     vec_guess::Vector{Float64} = vcat(tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
     sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
-    vec_to_traj(Optim.minimizer(sol))
+    traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
+    logp = -Optim.minimum(sol)
+    (;params, traj, x₀, x′₀, logp)
 end
 
 function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real where ks
@@ -246,41 +287,85 @@ Numerically integrate the trajecotry using
 Returns a vector of named tuples containing the next state for each time step.
 
 # Arguments
-- `x::NamedTuple`: the initial pose.
-- `x′::NamedTuple`: the initial velocity.
-- `f_x′′::NamedTuple`: the acceleration represented as [`CompiledFunc`](@ref)s.
+- `x::NamedTuple`: the initial pose ``(s_1=v_1, s_2=v_2,...,s_n=v_n)``.
+- `x′::NamedTuple`: the initial velocity ``(s′_1=v_1, s′_2=v_2,...,s′_n=v_n)``.
+- `f_x′′::Tuple{Vararg{Function}}`: the acceleration tuple ``(s′′_1, s′′_2,...,s′′_n)``.
 - `params::NamedTuple`: the dynamics parameters.
-- `times::TimeSeries`: the time steps.
+- `times::AbstractVector`: the time steps.
 - `actions::TimeSeries{<:NamedTuple}`: The actions for each time step.
 """
 function simulate(
     x₀::NamedTuple{x_keys, X},
     x′₀::NamedTuple{x′_keys, X},
-    f_x′′::NamedTuple,
+    f_x′′::Tuple{Vararg{Function}},
     params::NamedTuple,
-    times::TimeSeries,
+    times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
-) where {x_keys, x′_keys, X}    
+) where {x_keys, x′_keys, X}
+    i_ref = Ref(1)
+    next_time_action!() = begin
+        i = i_ref[]
+        i_ref[] += 1
+        times[i], actions[i]
+    end
+    should_stop() = i_ref[] > length(times)
+
+    result = NamedTuple[]
+    record_state!(s) = begin
+        push!(result, s)
+    end
+
+    simulate(x₀, x′₀, f_x′′, params, should_stop, next_time_action!, record_state!)
+    return result
+end
+
+"""
+# Arguments
+- `should_stop() -> bool`: whether to continue the simulation to the next time step.
+- `next_time_action!() -> (t, act)`: return the time and action of the next time step.
+- `record_state!(::NamedTuple)`: callback to handle the current state.
+"""
+function simulate(
+    x₀::NamedTuple{x_keys, X},
+    x′₀::NamedTuple{x′_keys, X},
+    f_x′′::Tuple{Vararg{Function}},
+    params::NamedTuple,
+    should_stop::Function,
+    next_time_action!::Function,
+    record_state!::Function,
+)::Nothing where {x_keys, x′_keys, X}
+    common_keys = intersect(x_keys, x′_keys)
+    @assert isempty(common_keys) "overlapping keys: $common_keys"
+
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        map(f -> f(input), values(f_x′′))
+        map(f -> f(input), f_x′′)
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 
     x = values(x₀)
     x′ = values(x′₀)
-    a = acc(x, x′, actions[1])
-    result = [to_named(x, x′)]
-    for t in 1:length(times)-1
-        Δt = times[t+1]-times[t]
-        v_half = @. x′ + (Δt/2) * a 
-        x = @. x + Δt * v_half
-        a1 = acc(x, @.(v_half + (Δt/2) * a), actions[t+1])
-        x′ = @. x′ + (Δt/2) * (a + a1)
-        a = a1
-        push!(result, to_named(x, x′))
+    should_stop() && return
+    t_act = next_time_action!()::Tuple{Float64, NamedTuple}
+    a = acc(x, x′, t_act[2])
+    t = t_act[1]
+    record_state!(to_named(x, x′))
+
+    while !should_stop()
+        (t1, act) = next_time_action!()
+        Δt = t1 - t
+        t = t1
+        x, x′, a = leap_frog_step((x, x′, a), (x, x′) -> acc(x, x′, act), Δt)
+        record_state!(to_named(x, x′))
     end
-    result::TimeSeries{<:NamedTuple}
+end
+
+function leap_frog_step((x, v, a), a_f, Δt)
+    v_half = @. v + (Δt/2) * a 
+    x1 = @. x + Δt * v_half
+    a1 = a_f(x1, @.(v_half + (Δt/2) * a))
+    v1 = @. v + (Δt/2) * (a + a1)
+    (x1, v1, a1)
 end
 
 ## === below are unused functions and may be removed in the future ===

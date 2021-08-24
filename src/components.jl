@@ -23,7 +23,7 @@ Arguments and the result should all be of the same unit.
 """
 signature_all_same(arg_units::PUnit...) = begin
     u = arg_units[1]
-    any(u != x for u in arg_units) ? nothing : u
+    any(u != x for x in arg_units) ? nothing : u
 end
 
 
