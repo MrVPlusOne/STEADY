@@ -207,23 +207,33 @@ function map_synthesis(
     state′′_vars = derivative.(state′_vars, Ref(t_unit))
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size)
     
+    enum_start_t = time()
+    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size)
     output_types = [v.type for v in state′′_vars]
-    all_comps = Iterators.product((enum_result[ty] for ty in output_types)...) |> collect
+    all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
+    prog_enum_time = time() - enum_start_t
     @info "number of programs: $(length(all_comps))"
+
     x₀_dist = (;(s.name => vdata.states[s][1] for s in state_vars)...)
     x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
     others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
     best_prog = missing
+    opt_times, max_opt_times, min_opt_times = Float64[], Float64[], Float64[]
     @progress for comps in all_comps
         f_x′′ = map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)::Tuple
-        sols = [map_trajectory(
+        local rs = [@timed(map_trajectory(
             x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
             times, actions, data_likelihood, 
             optim_options,
-        ) for _ in 1:evals_per_program]
+        )) for _ in 1:evals_per_program]
+        let ots = (t -> t.time).(rs)
+            push!(max_opt_times, maximum(ots))
+            push!(min_opt_times, minimum(ots))
+            append!(opt_times, ots)
+        end
+        sols = (t -> t.value).(rs)
         _, s_id = findmax([s.logp for s in sols])
         sol = sols[s_id]
         logp = sol.logp + program_logp(comps)
@@ -231,7 +241,11 @@ function map_synthesis(
             best_prog = (; logp, f_x′′, sol)
         end
     end
-    best_prog
+    stats = (; prog_enum_time, 
+        max_opt_time=to_measurement(max_opt_times), 
+        mean_opt_time=to_measurement(opt_times), 
+        min_opt_time=to_measurement(min_opt_times))
+    best_prog, stats
 end
 
 function transpose_series(
@@ -247,7 +261,7 @@ export map_trajectory
 function map_trajectory(
     x₀_dist::NamedTuple{x_keys},
     x′₀_dist::NamedTuple{x′_keys},
-    f_x′′::Tuple,
+    @nospecialize(f_x′′::Tuple),
     params_dist::NamedTuple{p_keys},
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
@@ -328,7 +342,7 @@ end
 function simulate(
     x₀::NamedTuple{x_keys, X},
     x′₀::NamedTuple{x′_keys, X},
-    f_x′′::Tuple{Vararg{Function}},
+    @nospecialize(f_x′′::Tuple{Vararg{Function}}),
     params::NamedTuple,
     should_stop::Function,
     next_time_action!::Function,

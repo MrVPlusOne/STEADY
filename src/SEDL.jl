@@ -10,6 +10,8 @@ using ProgressLogging
 using Distributions
 include("IOIndents.jl")
 using .IOIndents
+using Statistics
+using Measurements
 using Optim
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)

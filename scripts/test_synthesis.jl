@@ -24,17 +24,20 @@ f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 using DataFrames
 using StatsPlots
 using BenchmarkTools
-programs = collect(Iterators.take(result[ℝ], 500))
-stats = map(programs) do p
-    size = ast_size(p)
-    compile_time = @elapsed let
-        f_comp = compile(p, [x, l, θ], shape_env, env)
-        f_comp((x=@SVector[1.0, 2.0], l=1.4, θ=2.1))
-    end
-    (;size, compile_time)
-end |> DataFrame
-time_vs_size = combine(groupby(stats, :size), :compile_time => mean => :compile_time)
-@df time_vs_size plot(:size, :compile_time)
+let
+    result = bottom_up_enum(env, [x, l, θ], 5)
+    programs = collect(Iterators.take(result[ℝ], 500))
+    stats = map(programs) do p
+        size = ast_size(p)
+        compile_time = @elapsed let
+            f_comp = compile(p, [x, l, θ], shape_env, env)
+            f_comp((x=@SVector[1.0, 2.0], l=1.4, θ=2.1))
+        end
+        (;size, compile_time)
+    end |> DataFrame
+    time_vs_size = combine(groupby(stats, :size), :compile_time => mean => :compile_time)
+    @df time_vs_size plot(:size, :compile_time)
+end
 ##
 # test simulation
 @time let
@@ -106,16 +109,17 @@ components_transcendentals!(env)
 vdata = Car1D.variable_data()
 prog_logp(comps) = 0.9^sum(ast_size.(comps))  # weakly penealize larger programs
 
-syn_result = @time let 
+syn_result, stats = @time let 
     observations = ex_data.observations
     map_synthesis(
         shape_env, env, vdata, Car1D.action_vars(),
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
-        max_size=7,
+        max_size=4,
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
     )
 end
+stats
 ##

@@ -7,3 +7,9 @@ specific_elems(xs) = identity.(xs)
 )
 
 rotate2d(θ, v) = rotation2D(θ) * v
+
+to_measurement(values) = begin
+    μ = mean(values)
+    σ = std(values)
+    μ ± σ
+end
