@@ -1,7 +1,7 @@
-struct CompiledFunc{F<:Function} <: Function
+struct CompiledFunc <: Function
     ast::TAST
     julia::Expr
-    f::F
+    f::Function
 end
 
 (cf::CompiledFunc)(args::NamedTuple) = cf.f(args)

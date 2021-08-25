@@ -13,3 +13,9 @@ to_measurement(values) = begin
     σ = std(values)
     μ ± σ
 end
+
+maxby(f) = xs -> begin
+    ys = map(f, xs)
+    _, i = findmax(ys)
+    xs[i]
+end

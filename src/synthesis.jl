@@ -176,6 +176,31 @@ Base.rand(vdata::VariableData) = begin
     (; x₀, x′₀, params, others)
 end
 
+struct MapSynthesisResult{R}
+    best_result::R
+    stats::NamedTuple
+    errored_programs::Vector
+end
+
+Base.show(io::IO, r::MapSynthesisResult) =
+    print(io, "MapSynthesisResult(best=$(r.best_result))")
+
+Base.show(io::IO, ::MIME"text/plain", r::MapSynthesisResult) = begin
+    io = IOIndents.IOIndent(io)
+    println(io, "==== MAP synthesis result ====")
+    println(io, "Stats:", Indent())
+    for (k, v) in pairs(r.stats)
+        println(io, "$k: $v")
+    end
+    print(io, Dedent())
+    println(io, "Best estimation found:", Indent())
+    for (k, v) in pairs(r.best_result)
+        println(io, "$k: $v")
+    end
+end
+
+Base.size(v::Transducers.ProgressLoggingFoldable) = size(v.foldable)
+
 """
 Perform Maximum a posteriori (MAP) synthesis to find the joint assignment of the motion 
 model *and* the trajecotry that maximizes the posterior probability.
@@ -200,7 +225,7 @@ function map_synthesis(
     max_size::Int,
     evals_per_program::Int = 10,
     optim_options = Optim.Options(),
-)
+)::MapSynthesisResult
     @unpack t_unit = vdata
     state_vars = keys(vdata.states) |> collect
     state′_vars = derivative.(state_vars, Ref(t_unit))
@@ -219,33 +244,37 @@ function map_synthesis(
     x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
     others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
-    best_prog = missing
-    opt_times, max_opt_times, min_opt_times = Float64[], Float64[], Float64[]
-    @progress for comps in all_comps
+
+    ntasks=Threads.nthreads()÷2
+    results = ThreadsX.mapi(withprogress(all_comps; interval=0.1); ntasks) do comps
         f_x′′ = map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)::Tuple
-        local rs = [@timed(map_trajectory(
-            x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
-            times, actions, data_likelihood, 
-            optim_options,
-        )) for _ in 1:evals_per_program]
-        let ots = (t -> t.time).(rs)
-            push!(max_opt_times, maximum(ots))
-            push!(min_opt_times, minimum(ots))
-            append!(opt_times, ots)
-        end
-        sols = (t -> t.value).(rs)
-        _, s_id = findmax([s.logp for s in sols])
-        sol = sols[s_id]
-        logp = sol.logp + program_logp(comps)
-        if best_prog === missing || best_prog.logp < logp
-            best_prog = (; logp, f_x′′, sol)
+        try
+            local rs = [@timed(map_trajectory(
+                x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
+                times, actions, data_likelihood, 
+                optim_options,
+            )) for _ in 1:evals_per_program]
+
+            sol = (t -> t.value).(rs) |> maxby(s->s.logp)
+            logp = sol.logp + program_logp(comps)
+            (status= :success,
+                result = (; logp, f_x′′, sol),
+                times = (t -> t.time).(rs))
+        catch err
+            (status= :errored, program=comps, error=err)
         end
     end
-    stats = (; prog_enum_time, 
-        max_opt_time=to_measurement(max_opt_times), 
-        mean_opt_time=to_measurement(opt_times), 
-        min_opt_time=to_measurement(min_opt_times))
-    best_prog, stats
+    succeeded = filter(r -> r.status == :success, results)
+    best_result = map(r -> r.result, succeeded) |> maxby(s -> s.logp)
+    err_progs = results |> Filter(r -> r.status == :errored) |> collect
+
+    all_times = succeeded |> Map(r -> r.times) |> collect
+    max_opt_time, mean_opt_time, min_opt_time = 
+        (f.(all_times) |> to_measurement for f in (maximum, mean, minimum))
+
+    stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
+        prog_enum_time, max_opt_time, mean_opt_time, min_opt_time)
+    MapSynthesisResult(best_result, stats, err_progs)
 end
 
 function transpose_series(
@@ -261,7 +290,7 @@ export map_trajectory
 function map_trajectory(
     x₀_dist::NamedTuple{x_keys},
     x′₀_dist::NamedTuple{x′_keys},
-    @nospecialize(f_x′′::Tuple),
+    f_x′′::Tuple,
     params_dist::NamedTuple{p_keys},
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
@@ -342,7 +371,7 @@ end
 function simulate(
     x₀::NamedTuple{x_keys, X},
     x′₀::NamedTuple{x′_keys, X},
-    @nospecialize(f_x′′::Tuple{Vararg{Function}}),
+    f_x′′::Tuple{Vararg{Function}},
     params::NamedTuple,
     should_stop::Function,
     next_time_action!::Function,
@@ -353,7 +382,7 @@ function simulate(
 
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        map(f -> f(input), f_x′′)
+        map(f -> f(input), f_x′′)::X
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 
@@ -374,11 +403,11 @@ function simulate(
     end
 end
 
-function leap_frog_step((x, v, a), a_f, Δt)
+function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
     v_half = @. v + (Δt/2) * a 
-    x1 = @. x + Δt * v_half
-    a1 = a_f(x1, @.(v_half + (Δt/2) * a))
-    v1 = @. v + (Δt/2) * (a + a1)
+    x1 = @.(x + Δt * v_half)::X
+    a1 = a_f(x1, @.(v_half + (Δt/2) * a))::X
+    v1 = @.(v + (Δt/2) * (a + a1))::X
     (x1, v1, a1)
 end
 

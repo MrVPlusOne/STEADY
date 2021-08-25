@@ -1,5 +1,9 @@
 # this script needs to be run inside the module SEDL
 ##
+using DataFrames
+using StatsPlots
+using BenchmarkTools
+##
 shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
@@ -21,9 +25,6 @@ prog = Iterators.drop(result[ℝ2], 10) |> first
 f_comp = compile(prog, [x, l, θ], shape_env, env)
 f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 ## test compilation speed
-using DataFrames
-using StatsPlots
-using BenchmarkTools
 let
     result = bottom_up_enum(env, [x, l, θ], 5)
     programs = collect(Iterators.take(result[ℝ], 500))
@@ -56,9 +57,13 @@ gen_traj(N) = begin
     params = (a = 1.0,)
     times = range(0, 10, length=N) |> collect
     actions = map(_ -> (f=2.0,), times)
-    f_s′′= ((args) -> (-args.a * args.x - 0.1 * args.x′),)
+    acc = CompiledFunc(x, :(1+1), (args) -> (-args.a * args.x - 0.1 * args.x′))
+    f_s′′= (acc,)
     simulate(s, s′, f_s′′, params, times, actions) |> specific_elems
 end
+
+gen_traj(10)
+# @benchmark gen_traj(100)
 
 begin
     plot(gen_traj(100), label="N=100")
@@ -109,17 +114,16 @@ components_transcendentals!(env)
 vdata = Car1D.variable_data()
 prog_logp(comps) = 0.9^sum(ast_size.(comps))  # weakly penealize larger programs
 
-syn_result, stats = @time let 
+syn_result = @time let 
     observations = ex_data.observations
     map_synthesis(
         shape_env, env, vdata, Car1D.action_vars(),
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
-        max_size=4,
+        max_size=7,
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
     )
 end
-stats
 ##
