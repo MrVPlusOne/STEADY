@@ -56,3 +56,18 @@ macro ltimed(ex)
         (time=time()-t0, value=v)
     end
 end
+
+function optimize_no_tag(loss, x₀, optim_options)
+    # drop tag to reduce JIT compilation time and avoid tag checking
+    cfg = ForwardDiff.GradientConfig(nothing, x₀) 
+    function fg!(F, G, x)
+        (G === nothing) && return loss(x)
+
+        gr = ForwardDiff.DiffResult(first(x), (G,))
+        ForwardDiff.gradient!(gr, loss, x, cfg)
+        if F !== nothing
+            return gr.value
+        end
+    end
+    Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
+end

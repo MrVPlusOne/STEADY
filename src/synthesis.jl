@@ -259,15 +259,20 @@ function map_synthesis(
     others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
 
     function evaluate((comps, f_x′′))
+        prior_dists = merge(params_dist, others_dist)
         rs = try
             [(@ltimed map_trajectory(
-                x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
+                x₀_dist, x′₀_dist, f_x′′, prior_dists, 
                 times, actions, data_likelihood, 
                 optim_options,
             )) for _ in 1:evals_per_program]
         catch err
-            (err isa MethodError) && rethrow()
-            return (status= :errored, program=comps, error=err)
+            if err isa ArgumentError
+                return (status= :errored, program=comps, error=err)
+            else
+                @error "f_x′′ = $(f_x′′)" 
+                rethrow()
+            end
         end
 
         sol = (t -> t.value).(rs) |> maxby(s->s.logp)
@@ -285,8 +290,12 @@ function map_synthesis(
 
     blas_threads = BLAS.get_num_threads()
     BLAS.set_num_threads(1)
-    results = ThreadsX.mapi(evaluate, 
-        withprogress(zip(all_comps, compiled); interval=0.1); ntasks=n_threads)
+    to_eval = withprogress(zip(all_comps, compiled); interval=0.1)
+    results = if n_threads > 1
+        ThreadsX.mapi(evaluate, to_eval; ntasks=n_threads)
+    else
+        to_eval |> Map(evaluate) |> collect
+    end
     BLAS.set_num_threads(blas_threads)
 
     err_progs = results |> Filter(r -> r.status == :errored) |> collect
@@ -345,7 +354,8 @@ function map_trajectory(
     end
     vec_guess::Vector{Float64} = vcat(
         tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
-    sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
+    # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
+    sol = optimize_no_tag(loss, vec_guess, optim_options)
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
     logp = -Optim.minimum(sol)
     (;params, traj, x₀, x′₀, logp)
@@ -414,7 +424,8 @@ function simulate(
 
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        map(f -> f(input), f_x′′)::X
+        # map(f -> f(input), f_x′′)::X
+        ntuple(i -> call_T(f_x′′[i], input, typeof(x[i])), length(x))::X
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 

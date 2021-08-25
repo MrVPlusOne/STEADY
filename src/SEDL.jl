@@ -13,6 +13,7 @@ using .IOIndents
 using Statistics
 using Measurements
 using Optim
+import ForwardDiff
 using ThreadsX
 using Transducers
 using Bijectors
