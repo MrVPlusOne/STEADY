@@ -124,6 +124,7 @@ syn_result = @time let
         max_size=7,
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
+        n_threads=6,
     )
 end
 ##

@@ -97,7 +97,7 @@ function bottom_up_enum(env::ComponentEnv, vars::Vector{Var}, max_size)::Enumera
                 arg_candidates = (d[u] for (u, d) in zip(arg_units, arg_dicts))
                 # iterate over all argument AST combinations
                 for args in Iterators.product(arg_candidates...)
-                    prog = Call(f, collect(args), PType(sig.result_shape, runit::PUnit))
+                    prog = Call(f, args, PType(sig.result_shape, runit::PUnit))
                     insert_prog!(size, prog)
                 end
             end
@@ -202,6 +202,8 @@ end
 
 Base.size(v::Transducers.ProgressLoggingFoldable) = size(v.foldable)
 
+import LinearAlgebra.BLAS
+
 """
 Perform Maximum a posteriori (MAP) synthesis to find the joint assignment of the motion 
 model *and* the trajecotry that maximizes the posterior probability.
@@ -226,6 +228,7 @@ function map_synthesis(
     max_size::Int,
     evals_per_program::Int = 10,
     optim_options = Optim.Options(),
+    n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
 )::MapSynthesisResult
     @unpack t_unit = vdata
     state_vars = keys(vdata.states) |> collect
@@ -234,27 +237,36 @@ function map_synthesis(
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
     
-    enum_start_t = time()
-    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size)
-    output_types = [v.type for v in state′′_vars]
-    all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
-    prog_enum_time = time() - enum_start_t
+    prog_enum_time = @elapsed begin
+        enum_result = bottom_up_enum(comp_env, dyn_vars, max_size)
+        output_types = [v.type for v in state′′_vars]
+        all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
+    end
+    local cache
     @info "number of programs: $(length(all_comps))"
+    prog_compile_time = @elapsed begin
+        cache = Dict{TAST, CompiledFunc}()
+        compiled = map(all_comps) do comps
+            map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)
+            # map(comp -> compile_cached!(comp, dyn_vars, shape_env, comp_env, cache), comps)
+            # map(comp -> compile_interpreted(comp, dyn_vars, shape_env, comp_env), comps)
+        end
+    end
 
     x₀_dist = (;(s.name => vdata.states[s][1] for s in state_vars)...)
     x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
     others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
 
-    function evaluate(comps)
-        f_x′′ = map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)::Tuple
+    function evaluate((comps, f_x′′))
         rs = try
-            [@timed(map_trajectory(
+            [(@ltimed map_trajectory(
                 x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
                 times, actions, data_likelihood, 
                 optim_options,
             )) for _ in 1:evals_per_program]
         catch err
+            (err isa MethodError) && rethrow()
             return (status= :errored, program=comps, error=err)
         end
 
@@ -266,26 +278,29 @@ function map_synthesis(
             logp=sol.logp,
         )
         logp = sol.logp + program_logp(comps)
-        (status= :success,
+        (; status= :success,
             result = (; logp, f_x′′, MAP_est),
             optimize_times = (t -> t.time).(rs))
     end
 
-    ntasks = Threads.nthreads()÷2
-    basesize = ntasks
-    results = ThreadsX.mapi(evaluate, withprogress(all_comps; interval=0.1); ntasks, basesize)
+    blas_threads = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    results = ThreadsX.mapi(evaluate, 
+        withprogress(zip(all_comps, compiled); interval=0.1); ntasks=n_threads)
+    BLAS.set_num_threads(blas_threads)
 
-    succeeded = filter(r -> r.status == :success, results)
-    best_result = if isempty(succeeded) missing 
-        else map(r -> r.result, succeeded) |> maxby(s -> s.logp) end
     err_progs = results |> Filter(r -> r.status == :errored) |> collect
+    succeeded = filter(r -> r.status == :success, results)
+    isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
+        "First 5 errored programs: $(Iterators.take(err_progs, 5) |> collect)")
+    best_result = map(r -> r.result, succeeded) |> maxby(s -> s.logp)
 
     all_times = succeeded |> Map(r -> r.optimize_times) |> collect
-    max_opt_time, mean_opt_time, min_opt_time = 
-        (f.(all_times) |> to_measurement for f in (maximum, mean, minimum))
+    first_opt_time, mean_opt_time = 
+        (f.(all_times) |> to_measurement for f in (first, mean))
 
     stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
-        prog_enum_time, max_opt_time, mean_opt_time, min_opt_time)
+        prog_enum_time, prog_compile_time, first_opt_time, mean_opt_time)
     MapSynthesisResult(best_result, stats, err_progs, succeeded)
 end
 

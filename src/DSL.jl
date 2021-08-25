@@ -148,14 +148,17 @@ end
 @auto_hash_equals(
 struct Call <: TAST
     f::Symbol
-    args::Vector{TAST}
+    args::Tuple{Vararg{TAST}}
     type::PType
 end)
 
 Base.show(io::IO, v::Call) = begin
-    @unpack f, args = v
-    arg_list = join(args, ", ")
-    print(io, "$f($arg_list)")
+    print(io, string(julia_expr(v)))
+end
+
+julia_expr(v::Var) = v.name
+julia_expr(c::Call) = begin 
+    Expr(:call, c.f, julia_expr.(c.args)...)
 end
 
 """

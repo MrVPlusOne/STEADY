@@ -45,3 +45,14 @@ end
 subtuple(xs::NamedTuple, keys::Tuple) = begin
     NamedTuple{keys}(map(k -> getfield(xs, k), keys))
 end
+
+"""
+Lightweight version of @timed.
+"""
+macro ltimed(ex)
+    quote
+        t0 = time()
+        v = $(esc(ex))
+        (time=time()-t0, value=v)
+    end
+end
