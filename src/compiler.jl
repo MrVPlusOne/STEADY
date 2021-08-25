@@ -49,5 +49,5 @@ function compile(
     body_ex = compile_body(prog)
     f_ex = :($args_ex -> $body_ex)
     f = @RuntimeGeneratedFunction f_ex
-    CompiledFunc(prog, f_ex, f)
+    CompiledFunc(prog, body_ex, f)
 end

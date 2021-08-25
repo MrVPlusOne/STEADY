@@ -180,6 +180,7 @@ struct MapSynthesisResult{R}
     best_result::R
     stats::NamedTuple
     errored_programs::Vector
+    all_results::Vector
 end
 
 Base.show(io::IO, r::MapSynthesisResult) =
@@ -245,36 +246,47 @@ function map_synthesis(
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
     others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
 
-    ntasks=Threads.nthreads()÷2
-    results = ThreadsX.mapi(withprogress(all_comps; interval=0.1); ntasks) do comps
+    function evaluate(comps)
         f_x′′ = map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)::Tuple
-        try
-            local rs = [@timed(map_trajectory(
+        rs = try
+            [@timed(map_trajectory(
                 x₀_dist, x′₀_dist, f_x′′, merge(params_dist, others_dist), 
                 times, actions, data_likelihood, 
                 optim_options,
             )) for _ in 1:evals_per_program]
-
-            sol = (t -> t.value).(rs) |> maxby(s->s.logp)
-            logp = sol.logp + program_logp(comps)
-            (status= :success,
-                result = (; logp, f_x′′, sol),
-                times = (t -> t.time).(rs))
         catch err
-            (status= :errored, program=comps, error=err)
+            return (status= :errored, program=comps, error=err)
         end
+
+        sol = (t -> t.value).(rs) |> maxby(s->s.logp)
+        MAP_est = (
+            params=subtuple(sol.params, keys(params_dist)),
+            others=subtuple(sol.params, keys(others_dist)),
+            states=sol.traj,
+            logp=sol.logp,
+        )
+        logp = sol.logp + program_logp(comps)
+        (status= :success,
+            result = (; logp, f_x′′, MAP_est),
+            optimize_times = (t -> t.time).(rs))
     end
+
+    ntasks = Threads.nthreads()÷2
+    basesize = ntasks
+    results = ThreadsX.mapi(evaluate, withprogress(all_comps; interval=0.1); ntasks, basesize)
+
     succeeded = filter(r -> r.status == :success, results)
-    best_result = map(r -> r.result, succeeded) |> maxby(s -> s.logp)
+    best_result = if isempty(succeeded) missing 
+        else map(r -> r.result, succeeded) |> maxby(s -> s.logp) end
     err_progs = results |> Filter(r -> r.status == :errored) |> collect
 
-    all_times = succeeded |> Map(r -> r.times) |> collect
+    all_times = succeeded |> Map(r -> r.optimize_times) |> collect
     max_opt_time, mean_opt_time, min_opt_time = 
         (f.(all_times) |> to_measurement for f in (maximum, mean, minimum))
 
     stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
         prog_enum_time, max_opt_time, mean_opt_time, min_opt_time)
-    MapSynthesisResult(best_result, stats, err_progs)
+    MapSynthesisResult(best_result, stats, err_progs, succeeded)
 end
 
 function transpose_series(
@@ -288,23 +300,27 @@ end
 
 export map_trajectory
 function map_trajectory(
-    x₀_dist::NamedTuple{x_keys},
-    x′₀_dist::NamedTuple{x′_keys},
+    x₀_dist::NamedTuple,
+    x′₀_dist::NamedTuple,
     f_x′′::Tuple,
-    params_dist::NamedTuple{p_keys},
+    params_dist::NamedTuple,
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
     data_likelihood,
     optim_options::Optim.Options,
-) where {x_keys, x′_keys, p_keys}
-    x_guess = map(rand, x₀_dist)
-    x′_guess = map(rand, x′₀_dist)
-    params_guess = map(rand, params_dist) 
+)
+    x_bj, x′_bj, p_bj = (ds -> map(bijector, values(ds))).((x₀_dist, x′₀_dist, params_dist))
+    x_inv, x′_inv, p_inv = (bs -> map(inv, bs)).((x_bj, x′_bj, p_bj))
+
+    x_guess = zipmap(x_bj, map(rand, x₀_dist))
+    x′_guess = zipmap(x′_bj, map(rand, x′₀_dist))
+    params_guess = zipmap(p_bj, map(rand, params_dist))
+    
     x_size = n_numbers(x_guess)
     function vec_to_traj(vec) 
-        local x₀ = NamedTuple{x_keys}(tuple_from_vec(x_guess, vec))
-        local x′₀ = NamedTuple{x′_keys}(tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
-        local p = NamedTuple{p_keys}(tuple_from_vec(params_guess, @views vec[2x_size+1:end]))
+        local x₀ = zipmap(x_inv, tuple_from_vec(x_guess, vec))
+        local x′₀ = zipmap(x′_inv, tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
+        local p = zipmap(p_inv, tuple_from_vec(params_guess, @views vec[2x_size+1:end]))
         simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
     end
     function loss(vec)
@@ -312,7 +328,8 @@ function map_trajectory(
         prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
         -(prior + data_likelihood(traj, p))
     end
-    vec_guess::Vector{Float64} = vcat(tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
+    vec_guess::Vector{Float64} = vcat(
+        tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
     sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
     logp = -Optim.minimum(sol)
@@ -411,51 +428,6 @@ function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
     (x1, v1, a1)
 end
 
-## === below are unused functions and may be removed in the future ===
-using OrdinaryDiffEq
-
-function simulate_ode(
-    x::NamedTuple{x_keys, X},
-    x′::NamedTuple{x′_keys, X},
-    f_x′′::NamedTuple,
-    params::NamedTuple,
-    times::TimeSeries,
-    actions::TimeSeries{<:NamedTuple},
-) where {x_keys, x′_keys, X}
-    u_keys = (x_keys..., x′_keys...)
-    n = sum(length(z) for z in values(x))
-    p = (params=params, action=actions[1])
-    u0_tuple = merge(x, x′)
-    state_types = typeof(u0_tuple)
-    u0 = tuple_to_vec(values(u0_tuple))
-    function dynamics!(du, u, p, t)
-        s = tuple_from_vec(NamedTuple{x_keys, X}, @views u[1:n])
-        s′ = tuple_from_vec(NamedTuple{x′_keys, X}, @views u[n+1:2n])
-        # input = (s, s′, p.action, p.params)
-        du[1:n] .= u[n+1:end]
-        tuple_to_vec!(@views(u[n+1:2n]), map(f -> f(s, s′, p.action, p.params), values(f_x′′)))
-    end
-
-    prob = ODEProblem{true}(dynamics!, u0, (times[1], times[end]), p)
-    integrator = init(
-        prob, BS3(),
-        dtmin=0.01, force_dtmin=true, # we want to guarantee good solver speed
-        dt=0.1,
-        abstol=1e-3, save_everystep=false,
-    )
-
-    map(0:length(times)-1) do t
-        if t != 0
-            Δt = times[t+1]-times[t]
-            p = (params=params, action=actions[t])
-            integrator.p = p
-            step!(integrator, Δt, true)
-        end
-        integrator.u
-        # NamedTuple{u_keys}(tuple_from_vec(state_types, integrator.u))
-    end
-end
-
 function tuple_to_vec!(arr, v::Union{Tuple, NamedTuple})
     i = Ref(0)
     function rec(r::Real)
@@ -512,9 +484,4 @@ end
 
 function tuple_from_vec(template::NamedTuple, vec)
     NamedTuple{keys(template)}(tuple_from_vec(values(template), vec))
-end
-
-
-function to_named_tuple(var_dict)::NamedTuple
-    (; (k.name => v for (k, v) in var_dict)...)
 end

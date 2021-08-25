@@ -74,7 +74,7 @@ end
 compute_solution(; only_prior::Bool, N=200) = begin
     s = (x=Normal(1.0),)
     s′ = (x′=Normal(0.0),)
-    params = (drag = Normal(0.0, 0.2),)
+    params = (drag = Uniform(0.0, 0.5),)
     times = range(0, 10, length=N)
     actions = map(_ -> (f=2.0,), times)
     f_s′′= ((args) -> (-args.x - args.drag * args.x′),)
@@ -125,5 +125,11 @@ syn_result = @time let
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
     )
+end
+##
+let 
+    @unpack observations, actions, times = ex_data
+    post_data = merge(syn_result.best_result.MAP_est, (;observations, actions, times))
+    Car1D.plot_data(post_data, "MAP")
 end
 ##

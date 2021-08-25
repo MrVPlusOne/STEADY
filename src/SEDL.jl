@@ -15,6 +15,7 @@ using Measurements
 using Optim
 using ThreadsX
 using Transducers
+using Bijectors
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
