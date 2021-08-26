@@ -1,9 +1,9 @@
 # this script needs to be run inside the module SEDL
-##
+## imports
 using DataFrames
 using StatsPlots
 using BenchmarkTools
-##
+## test enumeration
 shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
@@ -17,9 +17,25 @@ v = Var(:v, ℝ2, PUnits.Speed)
 steer = Var(:steer, ℝ, PUnits.AngularSpeed)
 wall_x = Var(:wall_x, ℝ, PUnits.Length)
 
-derivative(x)
-
 result = bottom_up_enum(env, [x, l, θ], 6)
+## test pruning
+display(env.rules)
+before = collect(result[l.type])
+after, pruned, report = let 
+    n = length(before)
+    params = SaturationParams(
+        scheduler=Metatheory.Schedulers.SimpleScheduler,
+        # scheduler=Metatheory.Schedulers.ScoredScheduler,
+        # schedulerparams=(n, 5),
+        timeout=30, eclasslimit=10n, enodelimit=30n, matchlimit=100n)
+    pstate = PruningState{TAST}()
+    prune_redundant!(pstate, env.rules, before, params)
+end
+report
+##
+length(before)
+DataFrame(pruned)
+after
 ## test compilation
 prog = Iterators.drop(result[ℝ2], 10) |> first
 f_comp = compile(prog, shape_env, env)
@@ -135,4 +151,3 @@ let
     Car1D.plot_data(post_data, "MAP")
 end
 ##
-compile_cache
