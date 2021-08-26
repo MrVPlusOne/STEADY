@@ -256,7 +256,7 @@ function map_synthesis(
     prog_compile_time = @elapsed begin
         cache = Dict{TAST, CompiledFunc}()
         compiled = map(all_comps) do comps
-            map(comp -> compile(comp, dyn_vars, shape_env, comp_env), comps)
+            map(comp -> compile(comp, shape_env, comp_env), comps)
             # map(comp -> compile_cached!(comp, dyn_vars, shape_env, comp_env, cache), comps)
             # map(comp -> compile_interpreted(comp, dyn_vars, shape_env, comp_env), comps)
         end

@@ -19,10 +19,10 @@ wall_x = Var(:wall_x, ℝ, PUnits.Length)
 
 derivative(x)
 
-result = bottom_up_enum(env, [x, l, θ], 7)
+result = bottom_up_enum(env, [x, l, θ], 6)
 ## test compilation
 prog = Iterators.drop(result[ℝ2], 10) |> first
-f_comp = compile(prog, [x, l, θ], shape_env, env)
+f_comp = compile(prog, shape_env, env)
 f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 ## test compilation speed
 let
@@ -31,7 +31,7 @@ let
     stats = map(programs) do p
         size = ast_size(p)
         compile_time = @elapsed let
-            f_comp = compile(p, [x, l, θ], shape_env, env)
+            f_comp = compile(p, shape_env, env)
             f_comp((x=@SVector[1.0, 2.0], l=1.4, θ=2.1))
         end
         (;size, compile_time)
@@ -121,7 +121,7 @@ syn_result = @time let
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
-        max_size=7,
+        max_size=6,
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
         n_threads=6,
@@ -135,3 +135,4 @@ let
     Car1D.plot_data(post_data, "MAP")
 end
 ##
+compile_cache

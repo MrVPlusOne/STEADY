@@ -12,7 +12,7 @@ This is equivalent to `f(x)::T` but can be more efficient when f is a
 [`CompiledFunc`](@ref).
 """
 call_T(f::F, x, ::Type{T}) where {F, T} = f(x)::T
-call_T(cf::CompiledFunc, x, T) = call_T(cf.f, x, T)
+call_T(cf::CompiledFunc, x, ::Type{T}) where T = call_T(cf.f, x, T)
 
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
@@ -32,16 +32,24 @@ function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFun
 end
 
 """
+Used to cache the compilation result to speed up synthesis and avoid memory leak 
+when synthesis is run multiple times.
+"""
+const compile_cache = Dict{Expr, CompiledFunc}()
+const compile_cache_lock = ReentrantLock()
+"""
 Compiles a `TAST` expression into the corresponding julia function that can be 
 efficiently executed.
 
 Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile(
-    prog::TAST, args::Vector{Var}, shape_env::ShapeEnv, comp_env::ComponentEnv
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv
 )::CompiledFunc
     function compile_body(v::Var)
-        Expr(:(.), :args, QuoteNode(v.name))
+        e = Expr(:(.), :args, QuoteNode(v.name))
+        rtype = shape_env[v.type]
+        :($e::$rtype)
     end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
@@ -51,14 +59,16 @@ function compile(
         :($r::$rtype)
     end
 
-    names = tuple((a.name for a in args)...)
-    types = Tuple{(shape_env[a.type] for a in args)...}
-    args_type = NamedTuple{names, types}
-    args_ex = :(args::$args_type)
-    body_ex = compile_body(prog)
-    f_ex = :($args_ex -> $body_ex)
-    f = @RuntimeGeneratedFunction f_ex
-    CompiledFunc(prog, body_ex, f)
+    body_ex = compile_body(prog)::Expr
+    prev_result = lock(compile_cache_lock) do
+        get(compile_cache, body_ex, nothing)
+    end
+    (prev_result !== nothing) && return prev_result
+    f_ex = :(args -> $body_ex)
+    cf = CompiledFunc(prog, body_ex, @RuntimeGeneratedFunction(f_ex))
+    lock(compile_cache_lock) do
+        compile_cache[body_ex] = cf
+    end
 end
 
 """
@@ -68,11 +78,13 @@ efficiently executed.
 Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile_cached!(
-    prog::TAST, args::Vector{Var}, shape_env::ShapeEnv, comp_env::ComponentEnv, 
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv, 
     cache::Dict{TAST, CompiledFunc},
 )::CompiledFunc
     function compile_body(v::Var)
-        Expr(:(.), :args, QuoteNode(v.name))
+        e = Expr(:(.), :args, QuoteNode(v.name))
+        rtype = shape_env[v.type]
+        :($e::$rtype)
     end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
@@ -80,7 +92,7 @@ function compile_cached!(
             if arg isa Var
                 compile_body(arg)
             else
-                cf = compile_cached!(arg, args, shape_env, comp_env, cache)
+                cf = compile_cached!(arg, shape_env, comp_env, cache)
                 Expr(:call, cf.f, :args)
             end
         end
@@ -90,19 +102,15 @@ function compile_cached!(
     end
 
     get!(cache, prog) do
-        names = tuple((a.name for a in args)...)
-        types = Tuple{(shape_env[a.type] for a in args)...}
-        args_type = NamedTuple{names, types}
-        args_ex = :(args::$args_type)
         body_ex = compile_body(prog)
-        f_ex = :($args_ex -> $body_ex)
+        f_ex = :(args -> $body_ex)
         f = @RuntimeGeneratedFunction f_ex
         CompiledFunc(prog, body_ex, f)
     end
 end
 
 function compile_interpreted(
-    prog::TAST, arg_vars::Vector{Var}, shape_env::ShapeEnv, comp_env::ComponentEnv
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv
 )::CompiledFunc
     function execute(ast::TAST, args::NamedTuple)
         rec(v::Var) = getfield(args, v.name)
