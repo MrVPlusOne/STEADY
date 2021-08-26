@@ -14,11 +14,13 @@ to_measurement(values) = begin
     μ ± σ
 end
 
-maxby(f) = xs -> begin
+max_by(f) = xs -> begin
     ys = map(f, xs)
     _, i = findmax(ys)
     xs[i]
 end
+
+sort_by(f) = xs -> sort(xs, by=f)
 
 """
 Apply a tuple of functions to a tuple of corresponding arguments. The result is also a 

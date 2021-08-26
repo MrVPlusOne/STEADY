@@ -180,7 +180,16 @@ struct MapSynthesisResult{R}
     best_result::R
     stats::NamedTuple
     errored_programs::Vector
-    all_results::Vector
+    sorted_results::Vector
+end
+
+show_top_results(r::MapSynthesisResult, top_k::Int)::Nothing = begin
+    rows = map(Iterators.take(r.sorted_results, top_k)) do e
+        @unpack logp, f_x′′, MAP_est = e
+        @unpack params, others = MAP_est
+        (; logp, f_x′′=(x -> x.ast).(f_x′′) , params, others)
+    end
+    display(DataFrame(rows))
 end
 
 Base.show(io::IO, r::MapSynthesisResult) =
@@ -275,7 +284,7 @@ function map_synthesis(
             end
         end
 
-        sol = (t -> t.value).(rs) |> maxby(s->s.logp)
+        sol = (t -> t.value).(rs) |> max_by(s->s.logp)
         MAP_est = (
             params=subtuple(sol.params, keys(params_dist)),
             others=subtuple(sol.params, keys(others_dist)),
@@ -291,18 +300,19 @@ function map_synthesis(
     blas_threads = BLAS.get_num_threads()
     BLAS.set_num_threads(1)
     to_eval = withprogress(zip(all_comps, compiled); interval=0.1)
-    results = if n_threads > 1
+    eval_results = if n_threads > 1
         ThreadsX.mapi(evaluate, to_eval; ntasks=n_threads)
     else
         to_eval |> Map(evaluate) |> collect
     end
     BLAS.set_num_threads(blas_threads)
 
-    err_progs = results |> Filter(r -> r.status == :errored) |> collect
-    succeeded = filter(r -> r.status == :success, results)
+    err_progs = eval_results |> Filter(r -> r.status == :errored) |> collect
+    succeeded = filter(r -> r.status == :success, eval_results)
     isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
         "First 5 errored programs: $(Iterators.take(err_progs, 5) |> collect)")
-    best_result = map(r -> r.result, succeeded) |> maxby(s -> s.logp)
+    sorted_results = map(r -> r.result, succeeded) |> sort_by(r -> -r.logp)
+    best_result = sorted_results[1]
 
     all_times = succeeded |> Map(r -> r.optimize_times) |> collect
     first_opt_time, mean_opt_time = 
@@ -310,7 +320,7 @@ function map_synthesis(
 
     stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
         prog_enum_time, prog_compile_time, first_opt_time, mean_opt_time)
-    MapSynthesisResult(best_result, stats, err_progs, succeeded)
+    MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
 function transpose_series(

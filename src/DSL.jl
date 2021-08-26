@@ -194,10 +194,12 @@ export ℝ, ℝ2, ℝenv, derivative
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
 
-ℝenv() = ShapeEnv(Dict(
-    ℝ => Real,
-    ℝ2 => (SVector{2, T} where {T <: Real}),
-))
+ℝenv(num_type::Type=Real) = begin 
+    ShapeEnv(Dict(
+        ℝ => num_type,
+        ℝ2 => isconcretetype(num_type) ? SVector{2, num_type} : (SVector{2, <: num_type}),
+    ))
+end
 
 derivative(v:: Symbol) = Symbol(v, "′")
 derivative(v::Var, t::PUnit = PUnits.Time) = 

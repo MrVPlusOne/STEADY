@@ -112,7 +112,7 @@ components_scalar_arithmatic!(env)
 components_transcendentals!(env)
 
 vdata = Car1D.variable_data()
-prog_logp(comps) = 0.9^sum(ast_size.(comps))  # weakly penealize larger programs
+prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
 syn_result = @time let 
     observations = ex_data.observations
@@ -128,6 +128,7 @@ syn_result = @time let
     )
 end
 ##
+show_top_results(syn_result, 5)
 let 
     @unpack observations, actions, times = ex_data
     post_data = merge(syn_result.best_result.MAP_est, (;observations, actions, times))
