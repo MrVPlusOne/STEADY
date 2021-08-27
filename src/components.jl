@@ -98,22 +98,22 @@ function scalar_arithmatic_rules()
     others = @theory begin
         neg(a) == 0 - a
         neg(neg(a)) => a
-        a + neg(a) => 0
+        a - a => 0
         a + neg(b) == a - b 
         neg(a) + neg(b) == neg(a + b)
         neg(a) * b == neg(a * b)
 
+        a / a => 1
         reciprocal(a) == 1 / a
         reciprocal(reciprocal(a)) => a
-        a * reciprocal(a) => 1
         a * reciprocal(b) == a / b
         reciprocal(a) * reciprocal(b) == reciprocal(a * b)
 
-        a * (b + c) == a * b + a * c
+        a * b + a * c => a * (b + c)
 
-        abs(abs(a)) => a
-        abs(neg(a)) => a
-        abs(a) * abs(b) => abs(a * b)
+        abs(abs(a)) => abs(a)
+        abs(neg(a)) => abs(a)
+        abs(a) * abs(b) == abs(a * b)
         sqrt(a) * sqrt(b) == sqrt(a * b)
         x * x == square(x)
         sqrt(square(x)) => abs(x)
@@ -156,18 +156,18 @@ vec2_rules() = begin
     others = @theory begin
         neg_R2(a) == minus_R2(:R2_0, a)
         neg_R2(neg_R2(a)) => a
-        plus_R2(a, neg_R2(a)) => :R2_0
+        minus_R2(a, a) => :R2_0
         plus_R2(a, neg_R2(b)) == minus_R2(a, b)
-        neg_R2(a) + neg_R2(b) == neg_R2(a + b)
+        plus_R2(neg_R2(a), neg_R2(b)) == neg_R2(plus_R2(a, b))
         scale_R2(s, neg_R2(a)) == scale_R2(neg(s), a)
         scale_R2(s, neg_R2(a)) == neg_R2(scale_R2(s, a))
         neg_R2(R2(a, b)) == R2(neg(a), neg(b))
 
-        rotate_R2(b, rotate_R2(a, v)) => rotate_R2(a+b, v)
+        # rotate_R2(b, rotate_R2(a, v)) => rotate_R2(a+b, v)
         rotate_R2(θ, neg_R2(a)) == neg_R2(rotate_R2(θ, a))
 
-        norm_R2(neg_R2(v)) => v
-        norm_R2(rotate_R2(θ, v)) => v
+        norm_R2(neg_R2(v)) => norm_R2(v)
+        norm_R2(rotate_R2(θ, v)) => norm_R2(v)
         norm_R2(scale_R2(s, v)) => s * norm_R2(v)
     end
     monoids ∪ others

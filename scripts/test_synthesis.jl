@@ -3,12 +3,12 @@
 using DataFrames
 using StatsPlots
 using BenchmarkTools
-## test enumeration
+## test enumeration and pruning
 shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
-components_vec2!(env)
-components_transcendentals!(env)
+# components_vec2!(env)
+# components_transcendentals!(env)
 
 l = Var(:l, ℝ, PUnits.Length)
 x = Var(:x, ℝ2, PUnits.Length)
@@ -17,27 +17,17 @@ v = Var(:v, ℝ2, PUnits.Speed)
 steer = Var(:steer, ℝ, PUnits.AngularSpeed)
 wall_x = Var(:wall_x, ℝ, PUnits.Length)
 
-result = bottom_up_enum(env, [x, l, θ], 6)
-## test pruning
-display(env.rules)
-before = collect(result[l.type])
-after, pruned, report = let 
-    n = length(before)
-    params = SaturationParams(
-        scheduler=Metatheory.Schedulers.SimpleScheduler,
-        # scheduler=Metatheory.Schedulers.ScoredScheduler,
-        # schedulerparams=(n, 5),
-        timeout=30, eclasslimit=10n, enodelimit=30n, matchlimit=100n)
-    pstate = PruningState{TAST}()
-    prune_redundant!(pstate, env.rules, before, params)
-end
-report
+max_prog_size = 7
+result1 = bottom_up_enum(env, [x, l, θ], max_prog_size)
+pruner2 = RebootPruner(; env.rules, only_postprocess=false)
+result2 = bottom_up_enum(env, [x, l, θ], max_prog_size, pruner2)
+display(result1)
+display(result2)
 ##
-length(before)
-DataFrame(pruned)
-after
+display(DataFrame(result2.pruned))
+display(last(pruner2.reports))
 ## test compilation
-prog = Iterators.drop(result[ℝ2], 10) |> first
+prog = Iterators.drop(result1[ℝ2], 10) |> first
 f_comp = compile(prog, shape_env, env)
 f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 ## test compilation speed
@@ -130,20 +120,26 @@ components_transcendentals!(env)
 vdata = Car1D.variable_data()
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
+senum = synthesis_enumeration(
+    vdata, Car1D.action_vars(), 
+    max_size=7, pruner=RebootPruner(rules=env.rules))
+display(senum)
+
 syn_result = @time let 
     observations = ex_data.observations
     map_synthesis(
-        shape_env, env, vdata, Car1D.action_vars(),
+        senum,
+        shape_env,
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
-        max_size=6,
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
         n_threads=6,
     )
 end
 ##
+DataFrame(senum.enum_result.pruned)
 show_top_results(syn_result, 5)
 let 
     (; observations, actions, times) = ex_data

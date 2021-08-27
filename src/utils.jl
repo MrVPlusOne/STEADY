@@ -22,6 +22,8 @@ end
 
 sort_by(f) = xs -> sort(xs, by=f)
 
+pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
+
 """
 Apply a tuple of functions to a tuple of corresponding arguments. The result is also a 
 tuple.

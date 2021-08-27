@@ -3,7 +3,9 @@ Simultaneous state estimation and dynamics learning.
 """
 module SEDL
 
+using Base: @kwdef
 using AutoHashEquals
+using Formatting: format
 using StaticArrays
 using UnPack
 using ProgressLogging
@@ -29,7 +31,7 @@ Metatheory.@metatheory_init()
 include("utils.jl")
 include("DSL.jl")
 include("components.jl")
-include("prunning.jl")
+include("enumeration.jl")
 include("compiler.jl")
 include("synthesis.jl")
 include("Examples/Car1D_new.jl")
