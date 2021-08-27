@@ -24,7 +24,7 @@ using Metatheory: EGraph, EClassId, SaturationParams, AbstractRule
 using Metatheory: addexpr!, saturate!, @theory
 using Metatheory.Library: commutative_monoid
 
-Metatheory.@metatheory_init ()
+Metatheory.@metatheory_init()
 
 include("utils.jl")
 include("DSL.jl")
@@ -33,7 +33,6 @@ include("prunning.jl")
 include("compiler.jl")
 include("synthesis.jl")
 include("Examples/Car1D_new.jl")
-include("Examples/Car1D.jl")
 
 if false
     include("../scripts/car1d_example.jl")

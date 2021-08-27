@@ -42,7 +42,6 @@ ThreadPools = "b189fb0b-2eb5-4ed4-bc0c-d34c51242431"
 ThreadsX = "ac1d9e8a-700a-412c-b207-f0111f4b6c0d"
 Transducers = "28d57a85-8fef-5791-bfe6-a80928e7c999"
 TransformVariables = "84d833dd-6860-57f9-a1a7-6da5db126cff"
-Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 UnPack = "3a884ed6-31ef-47d7-9d2a-63182c4928ed"
 
 [compat]

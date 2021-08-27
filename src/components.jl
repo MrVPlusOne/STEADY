@@ -113,7 +113,7 @@ function scalar_arithmatic_rules()
 
         abs(abs(a)) => a
         abs(neg(a)) => a
-        abs(a) * abs(b) == abs(a * b)
+        abs(a) * abs(b) => abs(a * b)
         sqrt(a) * sqrt(b) == sqrt(a * b)
         x * x == square(x)
         sqrt(square(x)) => abs(x)
