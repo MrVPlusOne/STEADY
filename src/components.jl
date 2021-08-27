@@ -13,7 +13,7 @@ FuncSignature(shape_sig::Pair{Vector{PShape}, PShape}, unit_sig::Function) =
     FuncSignature(shape_sig[1], shape_sig[2], unit_sig)
 
 Base.show(io::IO, env::FuncSignature) = begin
-    @unpack arg_shapes, result_shape, result_unit = env
+    (; arg_shapes, result_shape, result_unit) = env
     shape_sig = (s -> s.name).(arg_shapes) => result_shape.name
     print(io, "(shape=$(shape_sig)), unit=$result_unit)")
 end

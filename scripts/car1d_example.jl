@@ -22,8 +22,7 @@ using .Car1D_old: data_process, posterior_density
 """
 Plot the result returned by `Car1D.data_process`.
 """
-function plot_result(result, name::String)
-    @unpack states, times, wall_pos, data = result
+function plot_result((; states, times, wall_pos, data), name::String)
     xs = times[1:end-1]
     p_state = plot(xs, states', label=["x" "v"], title="States ($name)")
     hline!(p_state, [wall_pos], label="wall_x")
@@ -127,7 +126,7 @@ println("Performing MAP estimation using log density...")
 map_result, score = @time MAP_infer(times, prior_run.data, ad=AutoReverseDiff())
 result_infered = (; map_result.states, times, map_result.wall_pos, prior_run.data)
 let
-    @unpack wall_pos, drag, mass = map_result
+    (; wall_pos, drag, mass) = map_result
     @show wall_pos
     @show drag
     @show mass

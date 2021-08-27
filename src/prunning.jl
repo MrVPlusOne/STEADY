@@ -9,7 +9,7 @@ PruningState{M}() where M = PruningState{M}(EGraph(), Dict())
 function prune_redundant!(
     state::PruningState{TAST}, rules, progs::Vector{TAST}, params::SaturationParams
 )
-    @unpack graph, club_members = state
+    (; graph, club_members) = state
     nodes = map(progs) do p
         _, enode = addexpr!(graph, to_expr(p))
         enode

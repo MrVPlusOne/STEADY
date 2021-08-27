@@ -16,13 +16,13 @@ call_T(cf::CompiledFunc, x, ::Type{T}) where T = call_T(cf.f, x, T)
 
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
-    @unpack ast, julia = cf
+    (; ast, julia) = cf
     print(io, "CompiledFunction(ast=:($ast), julia=:($julia))")
 end
 
 function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFunc) 
     io = IOIndents.IOIndent(io)
-    @unpack ast, julia = cf
+    (; ast, julia) = cf
     println(io, "--- CompiledFunction ---")
     println(io, "AST:", Indent())
     println(io, ast, Dedent())

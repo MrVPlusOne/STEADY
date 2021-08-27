@@ -30,8 +30,7 @@ variable_data() = VariableData(
     ),
 )
 
-acceleration_f(args) = begin
-    @unpack f, drag, mass, pos′ = args
+acceleration_f((; f, drag, mass, pos′)) = begin
     (f - drag * pos′) / mass
 end
 
@@ -49,8 +48,7 @@ function odometry_dist(s, s1; noise_scale)
     Normal(Δ, 0.1noise_scale * (1+abs(Δ)))
 end
 
-function controller(obs)
-    @unpack speed, sensor = obs
+function controller((; speed, sensor))
     stop_dis = 2.0
     max_force = 10.0
     is_stopping = sensor < stop_dis
@@ -76,7 +74,7 @@ function observe_logp(obs, s, s_prev, others; noise_scale)
 end
 
 function generate_data(vdata::VariableData, times::TimeSeries; noise_scale)
-    @unpack x₀, x′₀, params, others = rand(vdata)
+    (; x₀, x′₀, params, others) = rand(vdata)
     f_x′′ = (acceleration_f,)
     generate_data(x₀, x′₀, f_x′′, params, others, times; noise_scale)
 end
@@ -132,8 +130,7 @@ end
 """
 Plot the result returned by `generate_data`.
 """
-function plot_data(data, name::String)
-    @unpack params, others, states, observations, actions, times = data
+function plot_data((; others, states, observations, actions, times), name::String)
     xs = times
     p_state = @df DataFrame(states) plot(xs, [:pos :pos′], title="States ($name)")
     hline!(p_state, [others.wall], label="wall_x")

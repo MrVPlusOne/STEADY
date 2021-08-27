@@ -116,7 +116,7 @@ struct PType
 end
 
 Base.show(io::IO, v::PType) = begin
-    @unpack shape, unit = v
+    (; shape, unit) = v
     print(io, "$(shape.name){$unit}")
 end
 

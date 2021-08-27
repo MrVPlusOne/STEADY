@@ -16,8 +16,7 @@ Base.getindex(r::EnumerationResult, shape::PShape) = let
 end
 
 
-Base.getindex(r::EnumerationResult, type::PType) = begin
-    @unpack shape, unit = type
+Base.getindex(r::EnumerationResult, (; shape, unit)::PType) = begin
     d1 = get(r.programs, shape, Dict())
     (p 
     for size in sort(collect(keys(d1)))
@@ -70,7 +69,7 @@ function bottom_up_enum(env::ComponentEnv, vars::Vector{Var}, max_size)::Enumera
     end
 
     function insert_prog!(size, prog::TAST)
-        @unpack shape, unit = prog.type
+        (; shape, unit) = prog.type
         ps = get_progs!(shape, size, unit)
         push!(ps, prog)
         n_found += 1
@@ -184,9 +183,8 @@ struct MapSynthesisResult{R}
 end
 
 show_top_results(r::MapSynthesisResult, top_k::Int)::Nothing = begin
-    rows = map(Iterators.take(r.sorted_results, top_k)) do e
-        @unpack logp, f_x′′, MAP_est = e
-        @unpack params, others = MAP_est
+    rows = map(Iterators.take(r.sorted_results, top_k)) do (; logp, f_x′′, MAP_est)
+        (; params, others) = MAP_est
         (; logp, f_x′′=(x -> x.ast).(f_x′′) , params, others)
     end
     display(DataFrame(rows))
@@ -239,7 +237,7 @@ function map_synthesis(
     optim_options = Optim.Options(),
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
 )::MapSynthesisResult
-    @unpack t_unit = vdata
+    (; t_unit) = vdata
     state_vars = keys(vdata.states) |> collect
     state′_vars = derivative.(state_vars, Ref(t_unit))
     state′′_vars = derivative.(state′_vars, Ref(t_unit))

@@ -146,7 +146,7 @@ end
 ##
 show_top_results(syn_result, 5)
 let 
-    @unpack observations, actions, times = ex_data
+    (; observations, actions, times) = ex_data
     post_data = merge(syn_result.best_result.MAP_est, (;observations, actions, times))
     Car1D.plot_data(post_data, "MAP")
 end
