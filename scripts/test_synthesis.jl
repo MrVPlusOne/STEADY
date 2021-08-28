@@ -20,6 +20,7 @@ wall_x = Var(:wall_x, ℝ, PUnits.Length)
 max_prog_size = 7
 result1 = bottom_up_enum(env, [x, l, θ], max_prog_size)
 pruner2 = RebootPruner(; env.rules, only_postprocess=false)
+# pruner2 = IndividualPruner(; env.rules)
 result2 = bottom_up_enum(env, [x, l, θ], max_prog_size, pruner2)
 display(result1)
 display(result2)
@@ -45,8 +46,7 @@ let
     time_vs_size = combine(groupby(stats, :size), :compile_time => mean => :compile_time)
     @df time_vs_size plot(:size, :compile_time)
 end
-##
-# test simulation
+## test simulation
 @time let
     s = (x=1.0,)
     s′ = (x′=0.0,)
@@ -146,4 +146,6 @@ let
     post_data = merge(syn_result.best_result.MAP_est, (;observations, actions, times))
     Car1D.plot_data(post_data, "MAP")
 end
+## test prunning correctness
+example_pruning_check()
 ##

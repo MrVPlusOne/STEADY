@@ -140,6 +140,7 @@ function bottom_up_enum(
     @progress name="bottom_up_enum" for size in 2:max_size 
         for (f, sig) in signatures
             arg_shapes = sig.arg_shapes
+            any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
             sizes_for_arg = [keys(found[s]) for s in arg_shapes]
             # iterate over all possible size combinations s.t. the sum = size-1
             for arg_sizes in size_combinations(length(arg_shapes), sizes_for_arg, size-1)
@@ -319,11 +320,41 @@ prune_iteration!(pruner::RebootPruner, result::EnumerationResult, size; is_last)
         TAST[]
     end
 
+"""
+Prune expressions of each different type individually.
+"""
+@kwdef(
+struct IndividualPruner{NtoS<:Function} <: AbstractPruner
+    rules::Vector{AbstractRule}
+    compute_saturation_params::NtoS=default_saturation_params
+    reports::Vector=[]
+end)
+
+
+prune_iteration!(pruner::IndividualPruner, result::EnumerationResult, size; is_last) = 
+    if !is_last
+        (; rules, compute_saturation_params, reports) = pruner
+        new_members = collect(TAST, result[])
+        pruned_list=[]
+        for elems in values(groupby(p -> p.type, new_members))
+            kept, pruned, report = prune_redundant(
+                collect(TAST, elems), rules, compute_saturation_params)
+            push!(reports, report)
+            push!(pruned_list, pruned)
+        end
+
+        pruned_list |> Iterators.flatten |> collect
+    else
+        TAST[]
+    end
+
 default_saturation_params(egraph_size) = begin
     n = max(egraph_size, 500)
+    # SaturationParams(
+    #     scheduler=Metatheory.Schedulers.BackoffScheduler,
+    #     schedulerparams=(n, 5),
+    #     timeout=8, eclasslimit=n, enodelimit=4n, matchlimit=4n)
     SaturationParams(
         scheduler=Metatheory.Schedulers.SimpleScheduler,
-        # scheduler=Metatheory.Schedulers.BackoffScheduler,
-        # schedulerparams=(n, 2),
-        timeout=8, eclasslimit=4n, enodelimit=10n, matchlimit=10n)
+        timeout=2, eclasslimit=100n, enodelimit=100n, matchlimit=100n)
 end

@@ -168,7 +168,8 @@ vec2_rules() = begin
 
         norm_R2(neg_R2(v)) => norm_R2(v)
         norm_R2(rotate_R2(θ, v)) => norm_R2(v)
-        norm_R2(scale_R2(s, v)) => s * norm_R2(v)
+        abs(s) * norm_R2(v) => norm_R2(scale_R2(s, v))
+        abs(norm_R2(v)) => norm_R2(v)
     end
     monoids ∪ others
 end

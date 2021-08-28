@@ -19,6 +19,7 @@ import ForwardDiff
 using ThreadsX
 using Transducers
 using Bijectors
+using SplitApplyCombine: group as groupby
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 import Metatheory
@@ -35,6 +36,7 @@ include("enumeration.jl")
 include("compiler.jl")
 include("synthesis.jl")
 include("Examples/Car1D_new.jl")
+include("tests.jl")
 
 if false
     include("../scripts/car1d_example.jl")

@@ -201,6 +201,10 @@ const ℝ2 = PShape(:ℝ²)
     ))
 end
 
+convert_svector(v::AbstractVector) = SVector{length(v)}(v)
+convert_svector(x::Real) = x
+convert_svector(args::NamedTuple) = map(convert_svector, args)
+
 derivative(v:: Symbol) = Symbol(v, "′")
 derivative(v::Var, t::PUnit = PUnits.Time) = 
     Var(derivative(v.name), PType(v.type.shape, v.type.unit / t))

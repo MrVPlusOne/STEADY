@@ -235,10 +235,10 @@ function map_trajectory(
 )
     x_bj, x′_bj, p_bj = (ds -> map(bijector, values(ds))).((x₀_dist, x′₀_dist, params_dist))
     x_inv, x′_inv, p_inv = (bs -> map(inv, bs)).((x_bj, x′_bj, p_bj))
-
-    x_guess = zipmap(x_bj, map(rand, x₀_dist))
-    x′_guess = zipmap(x′_bj, map(rand, x′₀_dist))
-    params_guess = zipmap(p_bj, map(rand, params_dist))
+    
+    x_guess = zipmap(x_bj, map(convert_svector ∘ rand, x₀_dist))
+    x′_guess = zipmap(x′_bj, map(convert_svector ∘ rand, x′₀_dist))
+    params_guess = zipmap(p_bj, map(convert_svector ∘ rand, params_dist))
     
     x_size = n_numbers(x_guess)
     function vec_to_traj(vec) 
