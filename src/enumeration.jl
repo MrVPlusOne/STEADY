@@ -5,12 +5,15 @@ of the given [`PShape`](@ref).
 @kwdef(
 mutable struct EnumerationResult
     programs::Dict{PShape, Dict{Int, Dict{PUnit, Set{TAST}}}}
-    pruned::Vector{@NamedTuple{pruned::TAST, by::TAST}}
+    pruned::Vector{@NamedTuple{pruned::TAST, by::TAST, explain::Any}}
     n_created::Int
     n_deleted::Int
     total_time::Float64
     pruning_time::Float64
 end)
+
+get_stats(er::EnumerationResult) = 
+    (; er.n_created, er.n_deleted, er.total_time, er.pruning_time)
 
 Base.getindex(r::EnumerationResult) =
     Iterators.flatten(r[shape] for shape in keys(r.programs))
@@ -52,7 +55,7 @@ Base.insert!(r::EnumerationResult, prog::TAST, size=ast_size(prog)) = begin
     r
 end
 
-Base.delete!(r::EnumerationResult, (; pruned, by)) = begin
+prune!(r::EnumerationResult, (; pruned, by)) = begin
     p = pruned
     (; shape, unit) = p.type
     unit_map = r.programs[shape][ast_size(p)]
@@ -86,7 +89,7 @@ Base.show(io::IO, ::MIME"text/plain", r::EnumerationResult) = begin
     println(io, "=== Enumeration result ===")
     println(io, "Stats:", Indent())
     println(io, "n_total: ", pretty_number(r.n_created-r.n_deleted))
-    for (k, v) in pairs((; r.n_created, r.n_deleted, r.total_time, r.pruning_time))
+    for (k, v) in pairs(get_stats(r))
         println(io, "$k: ", pretty_number(v))
     end
     print(io, Dedent())
@@ -95,7 +98,7 @@ Base.show(io::IO, ::MIME"text/plain", r::EnumerationResult) = begin
 end
 
 Base.show(io::IO, r::EnumerationResult) = begin
-    stats = join(["$k: $v" for (k, v) in pairs(r.stats)], ", ")
+    stats = join(["$k: $v" for (k, v) in pairs(get_stats(r))], ", ")
     print(io, "EnumerationResult($stats)")
 end
 
@@ -108,8 +111,10 @@ abstract type AbstractPruner end
 
 
 """
-    prune_iteration!(::AbstractPruner, ::EnumerationResult, current_size; is_last) -> to_prune
+    prune_iteration!(::AbstractPruner, ::EnumerationResult, types_to_prune, current_size; is_last) -> to_prune
 prune programs by directly mutating the given `result`.
+
+If `types_to_prune` is empty, will prune expressions of all types.
 """
 function prune_iteration! end
 
@@ -120,7 +125,7 @@ Perform bottom-up program enumeration.
 - `max_size::Integer`: programs with [`ast_size`](@ref) up to this value will be returned.
 """
 function bottom_up_enum(
-    env::ComponentEnv, vars::Vector{Var}, max_size, pruner::AbstractPruner=NoPruner(),
+    env::ComponentEnv, vars::Vector{Var}, max_size; types_to_prune=Set(), pruner::AbstractPruner=NoPruner(),
 )::EnumerationResult
     @assert allunique(vars) "Duplicate variables in the input."
 
@@ -159,15 +164,15 @@ function bottom_up_enum(
             end
         end
         result.pruning_time += @elapsed begin
-            for x in prune_iteration!(pruner, result, size, is_last=false)
-                delete!(result, x) 
+            for x in prune_iteration!(pruner, result, types_to_prune, size, is_last=false)
+                prune!(result, x) 
             end
         end
     end
 
     result.pruning_time += @elapsed begin 
-        for x in prune_iteration!(pruner, result, max_size, is_last=true)
-            delete!(result, x) 
+        for x in prune_iteration!(pruner, result, types_to_prune, max_size, is_last=true)
+            prune!(result, x) 
         end
     end
     result.total_time += time() - start_time
@@ -224,29 +229,34 @@ mutable struct PruningClub{Member, GID, F, G}
     groups::Dict{GID, Dict{EClassId, Member}}
 end
 
-PruningClub{M, GID}(; to_expr::F, to_group::G) where {M, GID, F, G} = 
-    PruningClub{M, GID, F, G}(to_expr, to_group, EGraph(:dummy), Dict()) 
+PruningClub{M, GID}(; to_expr::F, to_group::G, explain_merges::Bool) where {M, GID, F, G} = 
+    let
+        graph = EGraph(; record_merges = explain_merges)
+        PruningClub{M, GID, F, G}(to_expr, to_group, graph, Dict()) 
+    end
 
 function admit_members!(
     club::PruningClub{M, I}, new_members::AbstractVector{M},
     rules, compute_saturation_params,
 ) where {M, I}
+    @assert !isempty(new_members)
     (; graph, groups, to_expr, to_group) = club
     member_classes = Dict(map(new_members) do m
         eclass, enode = addexpr!(graph, to_expr(m))
         m => eclass.id
     end)
     params = compute_saturation_params(graph.numclasses)
-    report = saturate!(graph, rules, params)
+    iter_callback((; egraph, iter)) = begin
+        @info "euqality saturation callback" iter egraph.numclasses
+    end
+    report = saturate!(graph, rules, params; iter_callback)
     
     kept = M[]
     pruned = @NamedTuple{pruned::M, by::M}[]
+    pruned_ids = Tuple{EClassId, EClassId}[]
     
 
-    for (gid, group) in collect(keys(groups))
-        for (cid, e) in group
-            @assert Metatheory.find(graph, cid) == cid "failed as expected"
-        end
+    for (gid, group) in groups
         groups[gid] = Dict(Metatheory.find(graph, cid) => e for (cid, e) in group)
     end
 
@@ -264,16 +274,29 @@ function admit_members!(
         else
             # pruned!
             push!(pruned, (pruned=m, by=exist_m))
+            # TODO: this only works when exist_m ∈ new_members
+            exist_id = member_classes[exist_m]
+            push!(pruned_ids, (id, exist_id))
+            @assert Metatheory.find(graph, exist_id) == Metatheory.find(graph, id)
         end
     end
-    (; kept, pruned, report)
+    explains = if graph.merge_records !== nothing
+        Metatheory.EGraphs.explain_equality(graph, pruned_ids)
+    else
+        fill(nothing, length(pruned))
+    end
+    pruned_explain = map(zip(pruned, explains)) do (p, e)
+        (; p.pruned, p.by, explain=e)
+    end
+    (; kept, pruned_explain, report)
 end
 
 
 function prune_redundant(
-    progs::AbstractVector{TAST}, rules, compute_saturation_params,
+    progs::AbstractVector{TAST}, rules, compute_saturation_params; explain_merges,
 )
-    club = PruningClub{TAST, PType}(; to_expr = to_expr, to_group = p -> p.type)
+    club = PruningClub{TAST, PType}(; 
+        to_expr = to_expr, to_group = p -> p.type, explain_merges)
     admit_members!(club, progs, rules, compute_saturation_params)
 end
 
@@ -293,7 +316,7 @@ end
 ## --- pruners ---
 
 struct NoPruner <: AbstractPruner end
-prune_iteration!(::NoPruner, ::EnumerationResult, size; is_last) = []
+prune_iteration!(::NoPruner, ::EnumerationResult, types_to_prune, size; is_last) = []
 
 
 """
@@ -302,18 +325,26 @@ Build a new e-graph at every iteration.
 @kwdef(
 struct RebootPruner{NtoS<:Function} <: AbstractPruner
     rules::Vector{AbstractRule}
+    "will prune all types if empty"
     compute_saturation_params::NtoS=default_saturation_params
     reports::Vector=[]
+    explain_merges::Bool=true
     only_postprocess::Bool=false
 end)
 
-prune_iteration!(pruner::RebootPruner, result::EnumerationResult, size; is_last) = 
+prune_iteration!(pruner::RebootPruner, result::EnumerationResult, types_to_prune, size; is_last) = 
     if pruner.only_postprocess == is_last 
-        (; rules, compute_saturation_params, reports) = pruner
-        new_members = Iterators.flatten(result[s] for s in 1:size)
-
+        (; rules, compute_saturation_params, reports, explain_merges) = pruner
+        members = 
+            if isempty(types_to_prune)
+                result[]
+            else
+                Iterators.flatten(result[ty] for ty in types_to_prune)
+            end
+        sorted = collect(TAST, members) |> sort_by(ast_size)
+        isempty(sorted) && return TAST[]
         kept, pruned, report = prune_redundant(
-            collect(TAST, new_members), rules, compute_saturation_params)
+            sorted, rules, compute_saturation_params; explain_merges)
         push!(reports, report)
         pruned
     else
@@ -321,32 +352,41 @@ prune_iteration!(pruner::RebootPruner, result::EnumerationResult, size; is_last)
     end
 
 """
-Prune expressions of each different type individually.
+Rereuse e-graphs across iterations. 
+This works best if the rules does not grow the size of the egraph.
 """
 @kwdef(
-struct IndividualPruner{NtoS<:Function} <: AbstractPruner
+struct IncrementalPruner{NtoS<:Function} <: AbstractPruner
     rules::Vector{AbstractRule}
     compute_saturation_params::NtoS=default_saturation_params
     reports::Vector=[]
+    club::PruningClub = PruningClub{TAST, PType}(; to_expr = to_expr, to_group = p -> p.type)
 end)
 
+prune_iteration!(pruner::IncrementalPruner, result::EnumerationResult, types_to_prune, size; is_last) = begin
+    is_last && return TAST[]
 
-prune_iteration!(pruner::IndividualPruner, result::EnumerationResult, size; is_last) = 
-    if !is_last
-        (; rules, compute_saturation_params, reports) = pruner
-        new_members = collect(TAST, result[])
-        pruned_list=[]
-        for elems in values(groupby(p -> p.type, new_members))
-            kept, pruned, report = prune_redundant(
-                collect(TAST, elems), rules, compute_saturation_params)
-            push!(reports, report)
-            push!(pruned_list, pruned)
+    # TODO implement types_to_prune
+    (; rules, compute_saturation_params, reports, club) = pruner
+
+    if size == 1
+        for special in [0, 1, :R2_0]
+            addexpr!(club.graph, special)
         end
-
-        pruned_list |> Iterators.flatten |> collect
-    else
-        TAST[]
     end
+
+    new_members = collect(TAST, result[size])
+
+    kept, pruned, report = admit_members!(
+        club, new_members, rules, compute_saturation_params)
+    push!(reports, report)
+    pruned
+end
+
+total_time_report(reports) = begin
+    tos = (r -> r.to).(reports)
+    reduce(merge, tos)
+end
 
 default_saturation_params(egraph_size) = begin
     n = max(egraph_size, 500)
@@ -355,6 +395,8 @@ default_saturation_params(egraph_size) = begin
     #     schedulerparams=(n, 5),
     #     timeout=8, eclasslimit=n, enodelimit=4n, matchlimit=4n)
     SaturationParams(
+        threaded=true,
         scheduler=Metatheory.Schedulers.SimpleScheduler,
-        timeout=2, eclasslimit=100n, enodelimit=100n, matchlimit=100n)
+        timeout=2, eclasslimit=0, enodelimit=0, matchlimit=0,
+    )
 end

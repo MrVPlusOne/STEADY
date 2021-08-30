@@ -75,3 +75,5 @@ function optimize_no_tag(loss, x₀, optim_options)
     end
     Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
 end
+
+count_len(iters) = count(_ -> true, iters)

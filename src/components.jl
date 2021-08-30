@@ -76,7 +76,7 @@ function push_unitless!(
     push!(env, name, impl, shape_sig, unitless_sig)
 end
 
-function components_scalar_arithmatic!(env::ComponentEnv)
+function components_scalar_arithmatic!(env::ComponentEnv, can_grow=true)
     push!(env, :(+), (+), [ℝ, ℝ] => ℝ, signature_all_same)
     push!(env, :(-), (-), [ℝ, ℝ] => ℝ, signature_all_same)
     push!(env, :(*), (*), [ℝ, ℝ] => ℝ, (*))
@@ -87,58 +87,80 @@ function components_scalar_arithmatic!(env::ComponentEnv)
     push!(env, :square, square, [ℝ] => ℝ, u -> u^2)
     push!(env, :sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2))
 
-    append!(env.rules, scalar_arithmatic_rules())
+    scalar_arithmatic_rules!(env.rules, can_grow)
 end
 square(x) = x^2
 
 Metatheory.Library.commutative_group
 
-function scalar_arithmatic_rules()
-    monoids = commutative_monoid(:(*), 1) ∪ commutative_monoid(:(+), 0)
-    others = @theory begin
-        neg(a) == 0 - a
+function scalar_arithmatic_rules!(rules, can_grow)
+    append!(rules, commutative_monoid(:(*), 1))
+    append!(rules, commutative_monoid(:(+), 0))
+
+    # TODO: automatically check non-growness
+    non_grow = @theory begin
+        0 - a => neg(a) 
         neg(neg(a)) => a
         a - a => 0
-        a + neg(b) == a - b 
-        neg(a) + neg(b) == neg(a + b)
+        a + neg(b) => a - b 
+        neg(a) + neg(b) => neg(a + b)
         neg(a) * b == neg(a * b)
 
         a / a => 1
-        reciprocal(a) == 1 / a
+        1 / a => reciprocal(a)
         reciprocal(reciprocal(a)) => a
-        a * reciprocal(b) == a / b
-        reciprocal(a) * reciprocal(b) == reciprocal(a * b)
+        a * reciprocal(b) => a / b
+        reciprocal(a) * reciprocal(b) => reciprocal(a * b)
 
         a * b + a * c => a * (b + c)
 
+        abs(0) => 0
         abs(abs(a)) => abs(a)
         abs(neg(a)) => abs(a)
-        abs(a) * abs(b) == abs(a * b)
-        sqrt(a) * sqrt(b) == sqrt(a * b)
-        x * x == square(x)
+        abs(a) * abs(b) => abs(a * b)
+        sqrt(a) * sqrt(b) => sqrt(a * b)
+        x * x => square(x)
         sqrt(square(x)) => abs(x)
         square(sqrt(x)) => abs(x)
         sqrt(abs(x)) => sqrt(x)
     end
-    monoids ∪ others
+    append!(rules, non_grow)
+
+    grow = @theory begin
+        neg(a) => 0 - a
+        a - b => a + neg(b)
+        neg(a + b) => neg(a) + neg(b)
+        reciprocal(a) => 1 / a
+        a / b => a * reciprocal(b)
+        reciprocal(a * b) => reciprocal(a) * reciprocal(b)
+        abs(a * b) => abs(a) * abs(b)
+        sqrt(a * b) => sqrt(a) * sqrt(b)
+        square(x) => x * x
+    end
+
+    can_grow && append!(rules, grow)
 end
 
-function components_transcendentals!(env::ComponentEnv)
+function components_transcendentals!(env::ComponentEnv, can_grow=true)
     push_unitless!(env, :sin, sin)
     push_unitless!(env, :cos, cos)
     push_unitless!(env, :exp, exp)
     push_unitless!(env, :tanh, tanh)
 
-    rules = @theory begin
-        sin(neg(x)) => neg(sin(x))
+    non_grow = @theory begin
+        sin(neg(x)) == neg(sin(x))
         cos(neg(x)) => cos(x)
         exp(a) * exp(b) => exp(a + b)
-        tanh(neg(x)) => neg(tanh(x))
+        tanh(neg(x)) == neg(tanh(x))
     end
-    append!(env.rules, rules)
+    grow = @theory begin
+        exp(a + b) => exp(a) * exp(b)
+    end
+    append!(env.rules, non_grow)
+    can_grow && append!(env.rules, grow)
 end
 
-function components_vec2!(env::ComponentEnv)
+function components_vec2!(env::ComponentEnv, can_grow=true)
     push!(env, :R2, (mk_R2), [ℝ, ℝ] => ℝ2, signature_all_same) # constructor
     push!(env, :norm_R2, norm_R2, [ℝ2] => ℝ, identity)
 
@@ -148,30 +170,40 @@ function components_vec2!(env::ComponentEnv)
     push!(env, :rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing)
     push!(env, :neg_R2, (-), [ℝ2] => ℝ2, identity)
 
-    append!(env.rules, vec2_rules())
+    vec2_rules!(env.rules, can_grow)
 end
 
-vec2_rules() = begin
-    monoids = commutative_monoid(:plus_R2, :R2_0)
-    others = @theory begin
-        neg_R2(a) == minus_R2(:R2_0, a)
+vec2_rules!(rules, can_grow) = begin
+    append!(rules, commutative_monoid(:plus_R2, :R2_0))
+    non_grows = @theory begin
+        minus_R2(:R2_0, a) => neg_R2(a)
         neg_R2(neg_R2(a)) => a
         minus_R2(a, a) => :R2_0
-        plus_R2(a, neg_R2(b)) == minus_R2(a, b)
-        plus_R2(neg_R2(a), neg_R2(b)) == neg_R2(plus_R2(a, b))
+        plus_R2(a, neg_R2(b)) => minus_R2(a, b)
+        plus_R2(neg_R2(a), neg_R2(b)) => neg_R2(plus_R2(a, b))
         scale_R2(s, neg_R2(a)) == scale_R2(neg(s), a)
         scale_R2(s, neg_R2(a)) == neg_R2(scale_R2(s, a))
-        neg_R2(R2(a, b)) == R2(neg(a), neg(b))
+        R2(neg(a), neg(b)) => neg_R2(R2(a, b))
 
         # rotate_R2(b, rotate_R2(a, v)) => rotate_R2(a+b, v)
         rotate_R2(θ, neg_R2(a)) == neg_R2(rotate_R2(θ, a))
+        rotate_R2(0, a) => a
 
+        norm_R2(:R2_0) => 0
         norm_R2(neg_R2(v)) => norm_R2(v)
         norm_R2(rotate_R2(θ, v)) => norm_R2(v)
         abs(s) * norm_R2(v) => norm_R2(scale_R2(s, v))
         abs(norm_R2(v)) => norm_R2(v)
     end
-    monoids ∪ others
+    grow = @theory begin
+        neg_R2(a) => minus_R2(:R2_0, a) 
+        neg_R2(R2(a, b)) => R2(neg(a), neg(b)) 
+        minus_R2(a, b) => plus_R2(a, neg_R2(b)) 
+        neg_R2(plus_R2(a, b)) => plus_R2(neg_R2(a), neg_R2(b)) 
+    end
+
+    append!(rules, non_grows)
+    can_grow && append!(rules, grow)
 end
 
 mk_R2(x, y) = @SVector [x, y]

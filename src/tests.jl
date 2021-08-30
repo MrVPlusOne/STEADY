@@ -24,11 +24,12 @@ end
 
 function check_pruning_soundness(
     var_dists::Dict{Var, <:Distribution}; 
-    comp_env, max_size, pruner, 
+    comp_env, max_size, pruner, types_to_prune,
     shape_env = ℝenv(), n_samples=20,
 )
     arg_dists = (; (v.name => dist for (v, dist) in var_dists)...)
-    eresult = bottom_up_enum(comp_env, collect(keys(var_dists)), max_size, pruner)
+    eresult = bottom_up_enum(comp_env, collect(keys(var_dists)), max_size; 
+        types_to_prune, pruner)
     failed = []
     n_passed = 0
     @progress name="check pruned" for (; pruned, by) in eresult.pruned
@@ -45,8 +46,12 @@ function check_pruning_soundness(
 end
 
 function example_pruning_check()
-    scalars = [Var(n, ℝ, unitless) => Normal() for n in [:a, :b, :c]]
-    vectors = [Var(n, ℝ2, unitless) => MvNormal([0.0, 0.0], 1.0) for n in [:v1, :v2, :v3]]
+    scalars = [
+        Var(:l, ℝ, PUnits.Length) => Normal(), 
+        Var(:v, ℝ, PUnits.Speed) => Normal(), 
+        Var(:a, ℝ, PUnits.Acceleration) => Normal(), 
+    ]
+    vectors = [Var(n, ℝ2, PUnits.Length) => MvNormal([0.0, 0.0], 1.0) for n in [:v1, :v2, :v3]]
     var_dists = Dict([scalars; vectors])
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env)
@@ -55,7 +60,9 @@ function example_pruning_check()
 
     max_size = 5
     pruner = RebootPruner(; comp_env.rules, only_postprocess=false)
-    (; n_passed, failed) = check_pruning_soundness(var_dists; comp_env, max_size, pruner)
+    types_to_prune = Set([PType(ℝ, PUnits.Speed)])
+    (; n_passed, failed) = check_pruning_soundness(var_dists; 
+        comp_env, max_size, pruner, types_to_prune)
     @show n_passed
     println("Failed: ")
     display(DataFrame(failed))

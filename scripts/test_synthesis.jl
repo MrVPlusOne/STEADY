@@ -7,8 +7,8 @@ using BenchmarkTools
 shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
-# components_vec2!(env)
-# components_transcendentals!(env)
+components_vec2!(env)
+components_transcendentals!(env)
 
 l = Var(:l, ℝ, PUnits.Length)
 x = Var(:x, ℝ2, PUnits.Length)
@@ -18,17 +18,22 @@ steer = Var(:steer, ℝ, PUnits.AngularSpeed)
 wall_x = Var(:wall_x, ℝ, PUnits.Length)
 
 max_prog_size = 7
-result1 = bottom_up_enum(env, [x, l, θ], max_prog_size)
-pruner2 = RebootPruner(; env.rules, only_postprocess=false)
-# pruner2 = IndividualPruner(; env.rules)
-result2 = bottom_up_enum(env, [x, l, θ], max_prog_size, pruner2)
-display(result1)
-display(result2)
-##
-display(DataFrame(result2.pruned))
-display(last(pruner2.reports))
+pruners = [
+    NoPruner(), 
+    RebootPruner(; env.rules, only_postprocess=false), 
+    # IncrementalPruner(; env.rules),
+]
+results_timed = map(pruners) do pruner
+    @timed bottom_up_enum(env, [x, l, θ], max_prog_size, pruner)
+end
+results = (v -> v.value).(results_timed)
+for (p, (;value, time)) in zip(pruners, results_timed)
+    println("** $(typeof(p)) took $(time)s.")
+    println("n_programs with type ℝ: ", count(_ -> true, value[ℝ]))
+    display(value)
+end
 ## test compilation
-prog = Iterators.drop(result1[ℝ2], 10) |> first
+prog = Iterators.drop(results[1][ℝ2], 10) |> first
 f_comp = compile(prog, shape_env, env)
 f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 ## test compilation speed
@@ -111,20 +116,25 @@ x₀ = (pos=0.0,)
 x₀′ = (pos′=0.5,)
 ex_data = Car1D.generate_data(x₀, x₀′, (Car1D.acceleration_f,), params, others, times; noise_scale)
 Car1D.plot_data(ex_data, "Truth")
-## run synthesis
+## perform enumeration for synthesis
 shape_env = ℝenv()
-env = ComponentEnv()
-components_scalar_arithmatic!(env)
-components_transcendentals!(env)
+comp_env = ComponentEnv()
+components_scalar_arithmatic!(comp_env)
+components_transcendentals!(comp_env)
 
 vdata = Car1D.variable_data()
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
+pruner = RebootPruner(rules=comp_env.rules)
+# pruner = NoPruner()
 senum = synthesis_enumeration(
-    vdata, Car1D.action_vars(), 
-    max_size=7, pruner=RebootPruner(rules=env.rules))
+    vdata, Car1D.action_vars(), comp_env, 6, pruner)
+if :reports in propertynames(pruner)
+    display(total_time_report(pruner.reports))
+end
+show(DataFrame(senum.enum_result.pruned), truncate=100)
 display(senum)
-
+## perform MAP sythesis
 syn_result = @time let 
     observations = ex_data.observations
     map_synthesis(
@@ -139,7 +149,7 @@ syn_result = @time let
     )
 end
 ##
-DataFrame(senum.enum_result.pruned)
+display(DataFrame(senum.enum_result.pruned))
 show_top_results(syn_result, 5)
 let 
     (; observations, actions, times) = ex_data
@@ -149,3 +159,13 @@ end
 ## test prunning correctness
 example_pruning_check()
 ##
+
+Metatheory.areequal(
+    comp_env.rules, 
+    :((f + abs(abs(f))) / mass), :(abs(sqrt(abs(square(f)))) / mass);
+    params=SaturationParams(
+        threaded=true,
+        scheduler=Metatheory.Schedulers.SimpleScheduler,
+        timeout=10, eclasslimit=0, enodelimit=0, matchlimit=0,
+    ),
+)

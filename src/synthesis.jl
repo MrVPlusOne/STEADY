@@ -47,12 +47,17 @@ struct SynthesisEnumerationResult
 end)
 
 Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
-    (; comp_env, state_vars, action_vars, param_vars, enum_result) = r
+    (; comp_env, state_vars, state′′_vars, action_vars, param_vars, enum_result) = r
+
+    comp_types = Set(v.type for v in state′′_vars)
+    n_interest = prod(count_len(enum_result[ty]) for ty in comp_types)
+
     println(io, "===== Synthesis enumeration result =====")
+    println(io, "search_space: $n_interest")
     println(io, "n_components: ", length(comp_env.signatures))
-    println(io, "states: ", state_vars)
-    println(io, "actions: ", action_vars)
-    println(io, "params: ", param_vars)
+    println(io, "states: $state_vars")
+    println(io, "actions: $action_vars")
+    println(io, "params: $param_vars")
     show(io, mime, enum_result)
 end
 
@@ -66,9 +71,11 @@ function synthesis_enumeration(
     state′′_vars = derivative.(state′_vars, Ref(t_unit))
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size, pruner)
+    types_to_prune = Set(v.type for v in state′′_vars)
+    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size; types_to_prune, pruner)
     SynthesisEnumerationResult(;
         vdata,
+        comp_env,
         state_vars,
         state′_vars,
         state′′_vars,
@@ -137,7 +144,7 @@ function map_synthesis(
     optim_options = Optim.Options(),
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
 )::MapSynthesisResult
-    (; vdata, comp_env, enum_result, state_vars, state′′_vars, dyn_vars) = senum
+    (; vdata, comp_env, enum_result, state_vars, state′′_vars, param_vars) = senum
     
     output_types = [v.type for v in state′′_vars]
     all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
@@ -147,8 +154,6 @@ function map_synthesis(
         # cache = Dict{TAST, CompiledFunc}()
         compiled = map(all_comps) do comps
             map(comp -> compile(comp, shape_env, comp_env), comps)
-            # map(comp -> compile_cached!(comp, dyn_vars, shape_env, comp_env, cache), comps)
-            # map(comp -> compile_interpreted(comp, dyn_vars, shape_env, comp_env), comps)
         end
     end
 
