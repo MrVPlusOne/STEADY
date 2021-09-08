@@ -35,7 +35,7 @@ include("components.jl")
 include("enumeration.jl")
 include("compiler.jl")
 include("synthesis.jl")
-include("Examples/Car1D_new.jl")
+include("Examples/Car1D.jl")
 include("tests.jl")
 
 if false
