@@ -119,8 +119,8 @@ Car1D.plot_data(ex_data, "Truth")
 ## perform enumeration for synthesis
 shape_env = ℝenv()
 comp_env = ComponentEnv()
-components_scalar_arithmatic!(comp_env)
-components_transcendentals!(comp_env)
+components_scalar_arithmatic!(comp_env, can_grow=false)
+# components_transcendentals!(comp_env)
 
 vdata = Car1D.variable_data()
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
@@ -128,11 +128,16 @@ prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger p
 pruner = RebootPruner(rules=comp_env.rules)
 # pruner = NoPruner()
 senum = synthesis_enumeration(
-    vdata, Car1D.action_vars(), comp_env, 6, pruner)
+    vdata, Car1D.action_vars(), comp_env, 7, pruner)
 if :reports in propertynames(pruner)
     display(total_time_report(pruner.reports))
 end
-show(DataFrame(senum.enum_result.pruned), truncate=100)
+let rows = map(senum.enum_result.pruned) do r
+        (; r.pruned, r.by)#, explain=join(r.explain, " ; "))
+    end
+    show(DataFrame(rows), truncate=100)
+    println()
+end
 display(senum)
 ## perform MAP sythesis
 syn_result = @time let 
@@ -148,9 +153,9 @@ syn_result = @time let
         n_threads=6,
     )
 end
-##
-display(DataFrame(senum.enum_result.pruned))
+display(syn_result)
 show_top_results(syn_result, 5)
+##
 let 
     (; observations, actions, times) = ex_data
     post_data = merge(syn_result.best_result.MAP_est, (;observations, actions, times))
@@ -159,13 +164,3 @@ end
 ## test prunning correctness
 example_pruning_check()
 ##
-
-Metatheory.areequal(
-    comp_env.rules, 
-    :((f + abs(abs(f))) / mass), :(abs(sqrt(abs(square(f)))) / mass);
-    params=SaturationParams(
-        threaded=true,
-        scheduler=Metatheory.Schedulers.SimpleScheduler,
-        timeout=10, eclasslimit=0, enodelimit=0, matchlimit=0,
-    ),
-)

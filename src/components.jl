@@ -76,7 +76,7 @@ function push_unitless!(
     push!(env, name, impl, shape_sig, unitless_sig)
 end
 
-function components_scalar_arithmatic!(env::ComponentEnv, can_grow=true)
+function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
     push!(env, :(+), (+), [ℝ, ℝ] => ℝ, signature_all_same)
     push!(env, :(-), (-), [ℝ, ℝ] => ℝ, signature_all_same)
     push!(env, :(*), (*), [ℝ, ℝ] => ℝ, (*))
@@ -93,7 +93,7 @@ square(x) = x^2
 
 Metatheory.Library.commutative_group
 
-function scalar_arithmatic_rules!(rules, can_grow)
+function scalar_arithmatic_rules!(rules; can_grow)
     append!(rules, commutative_monoid(:(*), 1))
     append!(rules, commutative_monoid(:(+), 0))
 
@@ -139,9 +139,10 @@ function scalar_arithmatic_rules!(rules, can_grow)
     end
 
     can_grow && append!(rules, grow)
+    rules
 end
 
-function components_transcendentals!(env::ComponentEnv, can_grow=true)
+function components_transcendentals!(env::ComponentEnv; can_grow=true)
     push_unitless!(env, :sin, sin)
     push_unitless!(env, :cos, cos)
     push_unitless!(env, :exp, exp)
