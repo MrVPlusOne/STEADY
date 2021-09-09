@@ -231,7 +231,7 @@ end
 
 PruningClub{M, GID}(; to_expr::F, to_group::G, explain_merges::Bool) where {M, GID, F, G} = 
     let
-        graph = EGraph(; record_proofs = explain_merges)
+        graph = EGraph()
         PruningClub{M, GID, F, G}(to_expr, to_group, graph, Dict()) 
     end
 
@@ -249,10 +249,11 @@ function admit_members!(
         m => eclass.id
     end)
     params = compute_saturation_params(graph.numclasses)
-    iter_callback((; egraph, iter)) = begin
-        @info "euqality saturation callback" iter egraph.numclasses
-    end
-    report = saturate!(graph, rules, params; iter_callback)
+    # iter_callback((; egraph, iter)) = begin
+    #     @info "euqality saturation callback" iter egraph.numclasses
+    # end
+    # report = saturate!(graph, rules, params; iter_callback)
+    report = saturate!(graph, rules, params)
     
     kept = M[]
     pruned = @NamedTuple{pruned::M, by::M}[]
@@ -295,7 +296,7 @@ function admit_members!(
     end
     pruned_explain = 
         map(zip(pruned, pruned_classes)) do ((; pruned, by), (a, b))
-            e = if graph.proof_forest !== nothing
+            e = if hasfield(typeof(graph), :proof_forest) && graph.proof_forest !== nothing
                 Metatheory.EGraphs.explain_equality(graph.proof_forest, a, b)
             else
                 nothing

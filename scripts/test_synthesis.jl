@@ -24,7 +24,7 @@ pruners = [
     # IncrementalPruner(; env.rules),
 ]
 results_timed = map(pruners) do pruner
-    @timed bottom_up_enum(env, [x, l, θ], max_prog_size, pruner)
+    @timed bottom_up_enum(env, [x, l, θ], max_prog_size; pruner)
 end
 results = (v -> v.value).(results_timed)
 for (p, (;value, time)) in zip(pruners, results_timed)

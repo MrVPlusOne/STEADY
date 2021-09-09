@@ -1,3 +1,5 @@
+export specific_elems, count_len, DistrIterator
+export max_by, sort_by
 
 specific_elems(xs) = identity.(xs)
 
@@ -77,3 +79,48 @@ function optimize_no_tag(loss, x₀, optim_options)
 end
 
 count_len(iters) = count(_ -> true, iters)
+
+"""
+A wrapper of a sequence of distributions. This can be used to sample or compute
+the corresponding logpdf of a sequence of values.
+
+The type parameter `Iter` should be an iterators of distributions, e.g., 
+`Vector{Normal}` or `Tuple{Uniform, MvNormal}`.
+
+## Examples
+```julia
+julia> di = DistrIterator(fill(Normal(), 4))
+Main.SEDL.DistrIterator{Vector{Distributions.Normal{Float64}}}(...)
+
+julia> xs = rand(di)
+4-element Vector{Float64}:
+ -0.49010706913108426
+  0.04667852819261214
+  1.4516555944579874
+ -1.3288896894564055
+
+julia> logpdf(di, xs)
+-5.733571930754293
+
+julia> nested = DistrIterator((di, di));
+julia> rand(nested)
+([-0.3008128094801595, 0.7595305727349723, 0.0731633860379036, -0.15532821730030588], [-0.5856011152398879, -1.3111512044326252, 1.1532299087076099, 1.5392183048453147])
+
+julia> logpdf(nested, rand(nested))
+-13.87393093934596
+```
+"""
+struct DistrIterator{Iter}
+    distributions::Iter
+
+    DistrIterator(distributions::Iter) where Iter = begin
+        @assert all(map(d -> d isa Distribution || d isa DistrIterator, distributions)) "\
+            Expect an iterators of distributions, but got $distributions."
+        new{Iter}(distributions)
+    end
+end
+
+Distributions.rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
+    map(d -> rand(rng, d), diter.distributions)
+Distributions.logpdf(diter::DistrIterator, xs) = 
+    sum(logpdf(d, x) for (d, x) in zip(diter.distributions, xs))

@@ -1,6 +1,5 @@
 module Car1D
 
-using UnPack
 using Distributions
 using ..SEDL
 using ..SEDL: TimeSeries
@@ -15,7 +14,7 @@ Wall = Var(:wall, ℝ, PUnits.Length)
 
 state_vars() = [Pos]
 action_vars() = [Power]
-param_vars() = [Drag]
+param_vars() = [Drag, Mass]
 
 variable_data() = VariableData(
     states = Dict(
@@ -57,20 +56,20 @@ function controller((; speed, sensor))
     (; f = clamp((target_v - speed) * k, -max_force, max_force))
 end
 
+function obs_dist(s, s_prev, others; noise_scale)
+    DistrIterator((
+        sensor = sensor_dist(s, others; noise_scale),
+        speed = speed_dist(s; noise_scale),
+        odometry = odometry_dist(s_prev, s; noise_scale),
+    ))
+end
+
 function observe(s, s_prev, others; noise_scale)
-    (
-        sensor = rand(sensor_dist(s, others; noise_scale)),
-        speed = rand(speed_dist(s; noise_scale)),
-        odometry = rand(odometry_dist(s_prev, s; noise_scale)),
-    )
+    rand(obs_dist(s, s_prev, others; noise_scale))
 end
 
 function observe_logp(obs, s, s_prev, others; noise_scale)
-    +(
-        logpdf(sensor_dist(s, others; noise_scale), obs.sensor),
-        logpdf(speed_dist(s; noise_scale), obs.speed),
-        logpdf(odometry_dist(s_prev, s; noise_scale), obs.odometry),
-    )
+    logpdf(obs_dist(s, s_prev, others; noise_scale), obs)
 end
 
 function generate_data(vdata::VariableData, times::TimeSeries; noise_scale)

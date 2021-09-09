@@ -87,7 +87,7 @@ function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
     push!(env, :square, square, [ℝ] => ℝ, u -> u^2)
     push!(env, :sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2))
 
-    scalar_arithmatic_rules!(env.rules, can_grow)
+    scalar_arithmatic_rules!(env.rules; can_grow)
 end
 square(x) = x^2
 
@@ -106,7 +106,7 @@ function scalar_arithmatic_rules!(rules; can_grow)
         neg(a) + neg(b) => neg(a + b)
         neg(a) * b == neg(a * b)
 
-        a / a => 1
+        # a / a => 1  # TODO: need a better way to apply this
         1 / a => reciprocal(a)
         reciprocal(reciprocal(a)) => a
         a * reciprocal(b) => a / b
@@ -161,7 +161,7 @@ function components_transcendentals!(env::ComponentEnv; can_grow=true)
     can_grow && append!(env.rules, grow)
 end
 
-function components_vec2!(env::ComponentEnv, can_grow=true)
+function components_vec2!(env::ComponentEnv; can_grow=true)
     push!(env, :R2, (mk_R2), [ℝ, ℝ] => ℝ2, signature_all_same) # constructor
     push!(env, :norm_R2, norm_R2, [ℝ2] => ℝ, identity)
 
@@ -171,10 +171,10 @@ function components_vec2!(env::ComponentEnv, can_grow=true)
     push!(env, :rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing)
     push!(env, :neg_R2, (-), [ℝ2] => ℝ2, identity)
 
-    vec2_rules!(env.rules, can_grow)
+    vec2_rules!(env.rules; can_grow)
 end
 
-vec2_rules!(rules, can_grow) = begin
+vec2_rules!(rules; can_grow) = begin
     append!(rules, commutative_monoid(:plus_R2, :R2_0))
     non_grows = @theory begin
         minus_R2(:R2_0, a) => neg_R2(a)
