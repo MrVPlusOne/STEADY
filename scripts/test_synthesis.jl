@@ -85,7 +85,7 @@ end
 compute_solution(; only_prior::Bool, N=200) = begin
     s = (x=Normal(1.0),)
     s′ = (x′=Normal(0.0),)
-    params = (drag = Uniform(0.0, 0.5),)
+    params = DistrIterator((drag = Uniform(0.0, 0.5),))
     times = range(0, 10, length=N)
     actions = map(_ -> (f=2.0,), times)
     f_s′′= ((args) -> (-args.x - args.drag * args.x′),)
@@ -114,7 +114,7 @@ params = (drag=0.1, mass=1.5)
 others = (wall=7.0,)
 x₀ = (pos=0.0,)
 x₀′ = (pos′=0.5,)
-ex_data = Car1D.generate_data(x₀, x₀′, (Car1D.acceleration_f,), params, others, times; noise_scale)
+ex_data = Car1D.generate_data(x₀, x₀′, params, others, times; noise_scale)
 Car1D.plot_data(ex_data, "Truth")
 ## perform enumeration for synthesis
 shape_env = ℝenv()

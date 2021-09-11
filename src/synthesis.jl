@@ -19,15 +19,32 @@ Base.@kwdef(
 struct VariableData
     states::Dict{Var, Tuple{Distribution, Distribution}}  
     dynamics_params::Dict{Var, Distribution}
-    others::Dict{Var, Distribution}
+    others::Dict{Symbol, GDistribution}
     t_unit:: PUnit = PUnits.Time
 end)
+
+_check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
+    check_type(var, value) = begin
+        t = shape_env[var.type]
+        @assert value isa t "Prior distribution for \
+            $var produced value $value, expected type: $t"
+    end
+
+    (; states, dynamics_params) = vdata
+    foreach(states) do (v, (d1, d2))
+        check_type(v, rand(d1))
+        check_type(v, rand(d2))
+    end
+    foreach(dynamics_params) do (v, d)
+        check_type(v, rand(d))
+    end
+end
 
 Base.rand(vdata::VariableData) = begin
     x₀ = (;(v.name => rand(dist) for (v, (dist, _)) in vdata.states)...)
     x′₀ = (;(derivative(v.name) => rand(dist) for (v, (_, dist)) in vdata.states)...)
     params = (;(v.name => rand(dist) for (v, dist) in vdata.dynamics_params)...)
-    others = (;(v.name => rand(dist) for (v, dist) in vdata.others)...)
+    others = (;vdata.others...)
     (; x₀, x′₀, params, others)
 end
 
@@ -145,6 +162,7 @@ function map_synthesis(
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
 )::MapSynthesisResult
     (; vdata, comp_env, enum_result, state_vars, state′′_vars, param_vars) = senum
+    _check_variable_types(vdata, shape_env)
     
     output_types = [v.type for v in state′′_vars]
     all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
@@ -153,14 +171,16 @@ function map_synthesis(
     prog_compile_time = @elapsed begin
         # cache = Dict{TAST, CompiledFunc}()
         compiled = map(all_comps) do comps
-            map(comp -> compile(comp, shape_env, comp_env), comps)
+            # TODO: update this to a single compiled function that returns a tuple 
+            funcs = map(comp -> compile(comp, shape_env, comp_env), comps)
+            input -> map(f -> f(input), funcs)
         end
     end
 
     x₀_dist = (;(s.name => vdata.states[s][1] for s in state_vars)...)
     x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
-    others_dist = (;(p.name => dist for (p, dist) in vdata.others)...)
+    others_dist = (;(name => dist for (name, dist) in vdata.others)...)
 
     function evaluate((comps, f_x′′))
         prior_dists = merge(params_dist, others_dist)
@@ -171,7 +191,7 @@ function map_synthesis(
                 optim_options,
             )) for _ in 1:evals_per_program]
         catch err
-            if err isa ArgumentError
+            if err isa ArgumentError || err isa DomainError
                 return (status= :errored, program=comps, error=err)
             else
                 @error "f_x′′ = $(f_x′′)" 
@@ -231,7 +251,7 @@ export map_trajectory
 function map_trajectory(
     x₀_dist::NamedTuple,
     x′₀_dist::NamedTuple,
-    f_x′′::Tuple,
+    f_x′′::Function,
     params_dist::NamedTuple,
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
@@ -247,9 +267,9 @@ function map_trajectory(
     
     x_size = n_numbers(x_guess)
     function vec_to_traj(vec) 
-        local x₀ = zipmap(x_inv, tuple_from_vec(x_guess, vec))
-        local x′₀ = zipmap(x′_inv, tuple_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
-        local p = zipmap(p_inv, tuple_from_vec(params_guess, @views vec[2x_size+1:end]))
+        local x₀ = zipmap(x_inv, structure_from_vec(x_guess, vec))
+        local x′₀ = zipmap(x′_inv, structure_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
+        local p = zipmap(p_inv, structure_from_vec(params_guess, @views vec[2x_size+1:end]))
         simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
     end
     function loss(vec)
@@ -258,7 +278,7 @@ function map_trajectory(
         -(prior + data_likelihood(traj, p))
     end
     vec_guess::Vector{Float64} = vcat(
-        tuple_to_vec(x_guess), tuple_to_vec(x′_guess), tuple_to_vec(params_guess))
+        structure_to_vec(x_guess), structure_to_vec(x′_guess), structure_to_vec(params_guess))
     # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
     sol = optimize_no_tag(loss, vec_guess, optim_options)
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
@@ -287,7 +307,7 @@ Returns a vector of named tuples containing the next state for each time step.
 function simulate(
     x₀::NamedTuple{x_keys, X},
     x′₀::NamedTuple{x′_keys, X},
-    f_x′′::Tuple{Vararg{Function}},
+    f_x′′::Function,
     params::NamedTuple,
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
@@ -318,7 +338,7 @@ end
 function simulate(
     x₀::NamedTuple{x_keys, X},
     x′₀::NamedTuple{x′_keys, X},
-    f_x′′::Tuple{Vararg{Function}},
+    f_x′′::Function,
     params::NamedTuple,
     should_stop::Function,
     next_time_action!::Function,
@@ -329,8 +349,7 @@ function simulate(
 
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        # map(f -> f(input), f_x′′)::X
-        ntuple(i -> call_T(f_x′′[i], input, typeof(x[i])), length(x))::X
+        call_T(f_x′′, input, X)
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 
@@ -359,16 +378,19 @@ function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
     (x1, v1, a1)
 end
 
-function tuple_to_vec!(arr, v::Union{Tuple, NamedTuple})
+function structure_to_vec!(arr, v::Union{Tuple, NamedTuple})
     i = Ref(0)
     function rec(r::Real)
         arr[i[]+=1] = r
         nothing
     end
-    function rec(v::AbstractVector)
+    function rec(v::AbstractVector{<:Real})
         j = i[]+=1
         arr[j:j+length(v)-1] .= v
         nothing
+    end
+    function rec(v::AbstractVector)
+        foreach(rec, v)
     end
     foreach(rec, v)
     arr
@@ -384,35 +406,39 @@ julia> n_numbers((0.0, @SVector[0.0, 0.0]))
 """
 function n_numbers(v::Union{Tuple, NamedTuple})
     count(::Real) = 1
-    count(::SVector{n}) where n = n
+    count(v::AbstractVector{<:Real}) = length(v)
+    count(v::AbstractVector) = sum(count, v)
     sum(map(count, v))
 end
 
-
 function promote_numbers_type(v::Union{Tuple, NamedTuple})
-    types = typeof.(values(v))
-    Base.promote_eltype(types...)
+    rec(x::Real) = typeof(x)
+    rec(::AbstractVector{T}) where {T <: Real} = T
+    rec(v::AbstractVector) = rec(v[1])
+    rec(v::Union{Tuple, NamedTuple}) = Base.promote_eltype(rec.(values(v))...)
+    Base.promote_eltype(rec.(values(v))...)
 end
 
-function tuple_to_vec(v::Union{Tuple, NamedTuple})
+function structure_to_vec(v::Union{Tuple, NamedTuple})
     T = promote_numbers_type(v)
     vec = Vector{T}(undef, n_numbers(v))
-    tuple_to_vec!(vec, v)
+    structure_to_vec!(vec, v)
     vec
 end
 
-function tuple_from_vec(template::Tuple, vec)
+function structure_from_vec(template::Tuple, vec)::Tuple
     i::Int = 0
     read(::Real) = begin
         vec[i+=1]
     end
-    read(::SVector{n}) where n = begin
-        i+=1
-        SVector{n}(vec[i:i+n-1])
+    read(::SVector{n, <:Real}) where n = begin
+        SVector{n}(read(0.0) for _ in Base.OneTo(n))
     end
+    read(v::AbstractVector) = map(read, v)
+
     read.(template)
 end
 
-function tuple_from_vec(template::NamedTuple, vec)
-    NamedTuple{keys(template)}(tuple_from_vec(values(template), vec))
+function structure_from_vec(template::NamedTuple{S}, vec)::NamedTuple{S} where S
+    NamedTuple{keys(template)}(structure_from_vec(values(template), vec))
 end

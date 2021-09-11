@@ -25,12 +25,12 @@ variable_data() = VariableData(
         Drag => Uniform(0.0, 1.0),
     ),
     others = Dict(
-        Wall => Normal(25.0, 25.0),
+        Wall.name => Normal(25.0, 25.0),
     ),
 )
 
 acceleration_f((; f, drag, mass, pos′)) = begin
-    (f - drag * pos′) / mass
+    ((f - drag * pos′) / mass,)
 end
 
 sensor_max_range = 5.0
@@ -47,7 +47,7 @@ function odometry_dist(s, s1; noise_scale)
     Normal(Δ, 0.1noise_scale * (1+abs(Δ)))
 end
 
-function controller((; speed, sensor))
+function controller(s, (; speed, sensor))
     stop_dis = 2.0
     max_force = 10.0
     is_stopping = sensor < stop_dis
@@ -72,51 +72,9 @@ function observe_logp(obs, s, s_prev, others; noise_scale)
     logpdf(obs_dist(s, s_prev, others; noise_scale), obs)
 end
 
-function generate_data(vdata::VariableData, times::TimeSeries; noise_scale)
-    (; x₀, x′₀, params, others) = rand(vdata)
-    f_x′′ = (acceleration_f,)
-    generate_data(x₀, x′₀, f_x′′, params, others, times; noise_scale)
-end
-
-function generate_data(
-    x₀::NamedTuple,
-    x′₀::NamedTuple,
-    f_x′′::Tuple,
-    params::NamedTuple,
-    others::NamedTuple,
-    times::TimeSeries; 
-    noise_scale,
-)
-    # Refs to store the current time step, state, and observation
-    i_ref = Ref(1)
-    s_ref = Ref(merge(x₀, x′₀))
-    obs_ref = Ref(observe(s_ref[], s_ref[], others; noise_scale))
-
-    states = NamedTuple[]
-    observations = NamedTuple[]
-    actions = NamedTuple[]
-    
-    should_stop() = i_ref[] > length(times)
-    
-    next_time_action!() = begin
-        i = i_ref[]
-        i_ref[] += 1
-        act = controller(obs_ref[])
-        push!(actions, act)
-        times[i], act
-    end
-
-    record_state!(s) = begin
-        s_prev = s_ref[]
-        s_ref[] = s
-        obs_ref[] = observe(s, s_prev, others; noise_scale)
-        push!(states, s_ref[])
-        push!(observations, obs_ref[])
-    end
-
-    SEDL.simulate(x₀, x′₀, f_x′′, params, should_stop, next_time_action!, record_state!)
-    (;params, others, states, observations, actions, times)
-end
+generate_data(x₀, x′₀, params, others, times; noise_scale) = 
+    SEDL.generate_data(x₀, x′₀, acceleration_f, params, others, times; 
+        observe, controller, noise_scale)
 
 function data_likelihood(states, others, observations; noise_scale)
     sum(let 

@@ -37,6 +37,16 @@ when synthesis is run multiple times.
 """
 const compile_cache = Dict{Expr, CompiledFunc}()
 const compile_cache_lock = ReentrantLock()
+
+macro with_type(e, ty)
+    quote  
+        tv = $(esc(ty))
+        v = $(esc(e))
+        @assert(v isa tv, "$e returns value $v, which is not of type $tv.")
+        v
+    end
+end
+
 """
 Compiles a `TAST` expression into the corresponding julia function that can be 
 efficiently executed.
@@ -49,14 +59,14 @@ function compile(
     function compile_body(v::Var)
         e = Expr(:(.), :args, QuoteNode(v.name))
         rtype = shape_env[v.type]
-        :($e::$rtype)
+        :(@with_type($e, $rtype))
     end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
         local args = compile_body.(call.args)
         local rtype = shape_env[call.type]
         local r = Expr(:call, f, args...)
-        :($r::$rtype)
+        :(@with_type($r, $rtype))
     end
 
     body_ex = compile_body(prog)::Expr

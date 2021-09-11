@@ -1,5 +1,8 @@
-export specific_elems, count_len, DistrIterator
+export specific_elems, count_len 
+export GDistribution, DistrIterator, is_distribution
+export SVecDistr, SMvNormal
 export max_by, sort_by
+export rotate2d, rotation2D, °
 
 specific_elems(xs) = identity.(xs)
 
@@ -9,6 +12,8 @@ specific_elems(xs) = identity.(xs)
 )
 
 rotate2d(θ, v) = rotation2D(θ) * v
+
+const ° = π / 180
 
 to_measurement(values) = begin
     μ = mean(values)
@@ -33,7 +38,7 @@ tuple.
 Currently, the result type is restricted to be the same type as `xs` to aid type inference
 when `length(xs)` is large.
 """
-@inline function zipmap(fs::Tuple, xs::X)::X where {X<:Tuple}
+@inline function zipmap(fs, xs::X)::X where {X<:Tuple}
     @assert length(fs) == length(xs) "Need the same number of functions and values"
     ntuple(i -> fs[i](xs[i]), length(xs))
 end
@@ -42,10 +47,17 @@ end
 Apply a tuple of functions to a NamedTuple of corresponding arguments. The result is a 
 NamedTuple.
 """
-@inline function zipmap(fs::Tuple, xs::X)::X where {X<:NamedTuple}
+@inline function zipmap(fs, xs::X)::X where {X<:NamedTuple}
     @assert length(fs) == length(xs) "Need the same number of functions and values"
     t = ntuple(i -> fs[i](xs[i]), length(xs))
     NamedTuple{keys(xs)}(t)
+end
+
+function zipmap(fs, xs::Vector)
+    @assert length(fs) == length(xs) "Need the same number of functions and values"
+    map(eachindex(xs)) do i
+        fs[i](xs[i])
+    end
 end
 
 subtuple(xs::NamedTuple, keys::Tuple) = begin
@@ -108,14 +120,25 @@ julia> rand(nested)
 
 julia> logpdf(nested, rand(nested))
 -13.87393093934596
+
+# Some bijector interface is also supported.
+julia> di = DistrIterator(fill(Uniform(0, 1), 4))
+Main.SEDL.DistrIterator{Vector{Distributions.Uniform{Float64}}}(Distributions.Uniform{Float64}[Distributions.Uniform{Float64}(a=0.0, b=1.0), Distributions.Uniform{Float64}(a=0.0, b=1.0), Distributions.Uniform{Float64}(a=0.0, b=1.0), Distributions.Uniform{Float64}(a=0.0, b=1.0)])
+
+julia> xs = rand(di);
+
+julia> di_bj = bijector(di);
+
+julia> inv(di_bj)(di_bj(xs)) ≈ xs
+true
 ```
 """
 struct DistrIterator{Iter}
     distributions::Iter
 
     DistrIterator(distributions::Iter) where Iter = begin
-        @assert all(map(d -> d isa Distribution || d isa DistrIterator, distributions)) "\
-            Expect an iterators of distributions, but got $distributions."
+        @assert all(map(is_distribution, distributions)) "\
+            Expect an iterator of distributions, but got $distributions."
         new{Iter}(distributions)
     end
 end
@@ -124,3 +147,50 @@ Distributions.rand(rng::Random.AbstractRNG, diter::DistrIterator) =
     map(d -> rand(rng, d), diter.distributions)
 Distributions.logpdf(diter::DistrIterator, xs) = 
     sum(logpdf(d, x) for (d, x) in zip(diter.distributions, xs))
+
+"""
+Generalized distributions that support sampling structured data. 
+"""
+const GDistribution = Union{Distribution, DistrIterator}
+@inline is_distribution(x) = x isa GDistribution
+
+"""
+An iterator of bijectors, used to transform [`DistrIterator`](@ref).
+"""
+struct BijectorIterator{Iter} <: Bijectors.AbstractBijector
+    bijectors::Iter
+    BijectorIterator(bjs::Iter) where Iter = begin
+        @assert all(map(x -> x isa Bijectors.AbstractBijector, bjs)) "\
+            Expect an iterator of bijectors, but got $bjs."
+        new{Iter}(bjs)
+    end
+end
+
+(bit::BijectorIterator)(x) = zipmap(bit.bijectors, x)
+
+function Bijectors.bijector(di::DistrIterator)
+    BijectorIterator(bijector.(di.distributions))
+end
+
+function Bijectors.inv(bit::BijectorIterator)
+    BijectorIterator(inv.(bit.bijectors))
+end
+
+struct SVecDistr{D <: Distribution}
+    distr::D
+end
+
+@forward SVecDistr.distr logpdf, bijector
+
+convert_svector(v::AbstractVector{<:Number}) = SVector{length(v)}(v)
+convert_svector(x::Number) = x
+
+function Distributions.rand(rng::AbstractRNG, d::SVecDistr)
+    convert_svector(rand(rng, d.distr))
+end
+
+function Distributions.rand(d::SVecDistr)
+    convert_svector(rand(d.distr))
+end
+
+const SMvNormal = SVecDistr ∘ MvNormal
