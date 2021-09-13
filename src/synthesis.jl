@@ -15,13 +15,15 @@ can still affect the observations. e.g., these can be (unknown) landmark locatio
 position of the camera.
 - `var_types`: maps each variable to their `PType`.
 """
-Base.@kwdef(
+@kwdef(
 struct VariableData
-    states::Dict{Var, Tuple{Distribution, Distribution}}  
-    dynamics_params::Dict{Var, Distribution}
-    others::Dict{Symbol, GDistribution}
-    t_unit:: PUnit = PUnits.Time
+    states::Dict{Var, Tuple{GDistr, GDistr}}  
+    dynamics_params::Dict{Var, GDistr}
+    # Should map each symbol to a value that supports the trait `Is{GDistr}`
+    others::Dict{Symbol, GDistr}  
+    t_unit::PUnit=PUnits.Time
 end)
+
 
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
     check_type(var, value) = begin
@@ -109,12 +111,21 @@ struct MapSynthesisResult{R}
     sorted_results::Vector
 end
 
-show_top_results(r::MapSynthesisResult, top_k::Int)::Nothing = begin
+get_top_results(r::MapSynthesisResult, top_k::Int) = begin
     rows = map(Iterators.take(r.sorted_results, top_k)) do (; logp, f_x′′, MAP_est)
         (; params, others) = MAP_est
         (; logp, f_x′′=(x -> x.ast).(f_x′′) , params, others)
     end
-    display(DataFrame(rows))
+    rows
+end
+
+show_top_results(r::MapSynthesisResult, top_k::Int) = begin
+    rs = get_top_results(r, top_k)
+    println("Top $top_k solutions:")
+    for (i, r) in enumerate(rs)
+        println("---- solution $i ----")
+        println(r)
+    end
 end
 
 Base.show(io::IO, r::MapSynthesisResult) =
@@ -130,7 +141,7 @@ Base.show(io::IO, ::MIME"text/plain", r::MapSynthesisResult) = begin
     print(io, Dedent())
     println(io, "Best estimation found:", Indent())
     for (k, v) in pairs(r.best_result)
-        println(io, "$k: $v")
+        k ∈ (:logp, :f_x′′) && println(io, "$k: $v")
     end
 end
 
@@ -173,7 +184,10 @@ function map_synthesis(
         compiled = map(all_comps) do comps
             # TODO: update this to a single compiled function that returns a tuple 
             funcs = map(comp -> compile(comp, shape_env, comp_env), comps)
-            input -> map(f -> f(input), funcs)
+            ast = (; (=>).((v.name for v in state′′_vars), comps)...)
+            julia = Expr(:tuple, (x -> x.julia).(funcs))
+            f = input -> map(f -> f(input), funcs)
+            CompiledFunc(ast, julia, f)
         end
     end
 
@@ -181,9 +195,9 @@ function map_synthesis(
     x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
     params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
     others_dist = (;(name => dist for (name, dist) in vdata.others)...)
+    prior_dists = merge(params_dist, others_dist)
 
     function evaluate((comps, f_x′′))
-        prior_dists = merge(params_dist, others_dist)
         rs = try
             [(@ltimed map_trajectory(
                 x₀_dist, x′₀_dist, f_x′′, prior_dists, 
@@ -199,7 +213,11 @@ function map_synthesis(
             end
         end
 
-        sol = (t -> t.value).(rs) |> max_by(s->s.logp)
+        valid_sols = filter(s -> !isnan(s.logp), (t -> t.value).(rs))
+        if isempty(valid_sols)
+            return (status= :errored, program=comps, error=ErrorException("all logp = NaN."))
+        end
+        sol = valid_sols |> max_by(s->s.logp)
         MAP_est = (
             params=subtuple(sol.params, keys(params_dist)),
             others=subtuple(sol.params, keys(others_dist)),
@@ -261,9 +279,9 @@ function map_trajectory(
     x_bj, x′_bj, p_bj = (ds -> map(bijector, values(ds))).((x₀_dist, x′₀_dist, params_dist))
     x_inv, x′_inv, p_inv = (bs -> map(inv, bs)).((x_bj, x′_bj, p_bj))
     
-    x_guess = zipmap(x_bj, map(convert_svector ∘ rand, x₀_dist))
-    x′_guess = zipmap(x′_bj, map(convert_svector ∘ rand, x′₀_dist))
-    params_guess = zipmap(p_bj, map(convert_svector ∘ rand, params_dist))
+    x_guess = zipmap(x_bj, map(rand, x₀_dist))
+    x′_guess = zipmap(x′_bj, map(rand, x′₀_dist))
+    params_guess = zipmap(p_bj, map(rand, params_dist))
     
     x_size = n_numbers(x_guess)
     function vec_to_traj(vec) 
@@ -281,6 +299,9 @@ function map_trajectory(
         structure_to_vec(x_guess), structure_to_vec(x′_guess), structure_to_vec(params_guess))
     # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
     sol = optimize_no_tag(loss, vec_guess, optim_options)
+    if !Optim.converged(sol)
+        @warn "Optim not converged." f_x′′ sol
+    end
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
     logp = -Optim.minimum(sol)
     (;params, traj, x₀, x′₀, logp)

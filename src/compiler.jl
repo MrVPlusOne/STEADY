@@ -1,5 +1,5 @@
-struct CompiledFunc <: Function
-    ast::TAST
+struct CompiledFunc{AST} <: Function
+    ast::AST
     julia::Expr
     f::Function
 end
@@ -59,14 +59,14 @@ function compile(
     function compile_body(v::Var)
         e = Expr(:(.), :args, QuoteNode(v.name))
         rtype = shape_env[v.type]
-        :(@with_type($e, $rtype))
+        :($e::$rtype)
     end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
         local args = compile_body.(call.args)
         local rtype = shape_env[call.type]
-        local r = Expr(:call, f, args...)
-        :(@with_type($r, $rtype))
+        local e = Expr(:call, f, args...)
+        :($e::$rtype)
     end
 
     body_ex = compile_body(prog)::Expr

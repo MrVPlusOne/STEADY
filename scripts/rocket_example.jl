@@ -16,7 +16,7 @@ params = (
     rot_mass = 1.0,
     rot_drag = 0.2,
     length = 0.5,
-    gravity = 1.25,
+    gravity = @SVector[0., -1.25],
 )
 n_landmarks = 3
 landmarks = [
@@ -29,8 +29,7 @@ target_pos = @SVector[-3.0, -2.]
 x₀ = (pos=@SVector[0.0, 0.0], θ=45°,)
 x₀′ = (pos′=@SVector[0.25, 0.1], θ′=-5°,)
 ex_data = Rocket2D.generate_data(x₀, x₀′, params, others, times; noise_scale, target_pos)
-
-Rocket2D.plot_data(ex_data, landmarks, "Truth")
+Rocket2D.plot_data(ex_data, "Truth")
 ## program enumeration
 shape_env = ℝenv()
 comp_env = ComponentEnv()
@@ -44,7 +43,7 @@ prog_logp(comps) = log(0.5) * sum(ast_size.(comps))
 
 pruner = NoPruner()
 senum = synthesis_enumeration(
-    vdata, Rocket2D.action_vars(), comp_env, 5, pruner,
+    vdata, Rocket2D.action_vars(), comp_env, 4, pruner,
 )
 display(senum)
 ## perform MAP synthesis
@@ -56,11 +55,15 @@ syn_result = @time let
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Rocket2D.data_likelihood(states, params, observations; noise_scale), 
-        evals_per_program=10,
+        evals_per_program=40,
         optim_options = Optim.Options(x_abstol=1e-3),
-        n_threads=1,
+        n_threads=2,
     )
 end
 display(syn_result)
 show_top_results(syn_result, 5)
 ##
+map_data = syn_result.sorted_results[1].MAP_est
+Rocket2D.plot_data(map_data, "MAP Estimate")
+
+syn_result.errored_programs

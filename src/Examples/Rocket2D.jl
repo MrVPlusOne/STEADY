@@ -1,7 +1,7 @@
 module Rocket2D
 
 using ..SEDL
-using ..SEDL: ℝ, ℝ2, rotate2d, norm_R2, TimeSeries, SMvNormal
+using ..SEDL: ℝ, ℝ2, rotate2d, norm_R2, TimeSeries, SMvNormal, SNormal, SUniform
 using StatsPlots
 using DataFrames
 using Distributions
@@ -17,7 +17,7 @@ RotDrag = Var(:rot_drag, ℝ, PUnits.Force * PUnits.Length / PUnits.AngularSpeed
 Mass = Var(:mass, ℝ, PUnits.Mass)
 RotMass = Var(:rot_mass, ℝ, PUnits.Mass * PUnits.Length^2)
 RocketLength = Var(:length, ℝ, PUnits.Length)
-Gravity = Var(:gravity, ℝ, PUnits.Force)
+Gravity = Var(:gravity, ℝ2, PUnits.Force)
 
 state_vars() = [Pos, Orientation]
 action_vars() = [Thrust, Turn]
@@ -30,15 +30,15 @@ end
 variable_data(n_landmarks) = VariableData(
     states = Dict(
         Pos => (SMvNormal([0.0, 0.0], 0.01), SMvNormal([0.0, 0.0], 1.0)),
-        Orientation => (Normal(0.0, 0.01), Normal(0.0, 0.5)),
+        Orientation => (SNormal(0.0, 0.01), SNormal(0.0, 0.5)),
     ),
     dynamics_params = Dict(
-        Drag => Uniform(0.001, 1.0),
-        Mass => Uniform(0.5, 5.0),
-        RotMass => Uniform(0.1, 5.0),
-        RotDrag => Uniform(0.001, 1.0),
-        RocketLength => Uniform(0.1,1.0),
-        Gravity => Normal(1.0, 1.0),
+        Drag => SUniform(0.001, 1.0),
+        Mass => SUniform(0.5, 5.0),
+        RotMass => SUniform(0.1, 5.0),
+        RotDrag => SUniform(0.001, 1.0),
+        RocketLength => SUniform(0.1,1.0),
+        Gravity => SMvNormal([0.0, -1.0], 1.0),
     ),
     others = Dict(
         :landmarks => landmark_dist(n_landmarks)),
@@ -50,8 +50,8 @@ limit_control((; thrust, turn)) =
 function acceleration_f(
         (; pos′, θ, θ′, thrust, turn, drag, rot_drag, mass, rot_mass, gravity, length))
     speed = norm_R2(pos′)
-    gravity_force = @SVector[0., -gravity * mass]
-    gravity_moment = sin(θ) * length/2 * gravity * mass
+    gravity_force = gravity * mass
+    gravity_moment = -(cos(θ)*gravity[1] + sin(θ)*gravity[2]) * length/2 * mass
 
     pos′′ = (rotate2d(θ, @SVector[0., thrust]) - drag * speed * pos′ + gravity_force) / mass
     θ′′ = (turn - rot_drag * θ′ * abs(θ′) + gravity_moment) / rot_mass
@@ -60,11 +60,11 @@ end
 
 sensor_max_range = 10.0
 function sensor_dist(s, landmarks; noise_scale)
-    ranges = DistrIterator([Normal(norm_R2(s.pos - l), 0.2noise_scale) for l in landmarks])
+    ranges = DistrIterator([SNormal(norm_R2(s.pos - l), 0.2noise_scale) for l in landmarks])
     bearings = DistrIterator([let 
         d = l - s.pos
         θ = atan(d[2], d[1])
-        Normal(θ - s.θ, 0.1noise_scale)  # relative angle
+        SNormal(θ - s.θ, 0.1noise_scale)  # relative angle
     end for l in landmarks])
     DistrIterator((; ranges, bearings))
 end
@@ -79,13 +79,13 @@ function Δv_meter(s, s1; noise_scale)
 end
 
 function rot_meter(s; noise_scale)
-    Normal(s.θ′, 0.2noise_scale)
+    SNormal(s.θ′, 0.2noise_scale)
 end
 
 Base.isfinite(v::AbstractVector) = all(isfinite.(v))
 
 # assuming access to the ground-truth state 
-function controller(state, obs; target_pos, weight, rng=Random.GLOBAL_RNG)
+function controller(state, obs; target_pos, weight::Real, rng=Random.GLOBAL_RNG)
     if !all(map(isfinite, state))
         return (thrust=0.0, turn=0.0) # to prevent DomainError.
     end
@@ -114,7 +114,7 @@ end
 
 generate_data(x₀, x′₀, params, others, times; noise_scale, target_pos) = begin
     (; mass, gravity) = params
-    weight = mass * gravity
+    weight = -gravity[2] * mass
     SEDL.generate_data(x₀, x′₀, acceleration_f, params, others, times; noise_scale,
         observe = rand ∘ observation_dist, 
         controller = (s, o) -> controller(s, o; 
@@ -130,10 +130,10 @@ function data_likelihood(states, others, observations; noise_scale)
     end for i in 1:length(states))
 end
 
-function plot_data(ex_data, landmarks, name::String)
+function plot_data(ex_data, name::String)
     traj = reduce(hcat, map(x -> x[:pos], ex_data.states))'
     p_traj = plot(traj[:, 1], traj[:, 2], title="($name)", label="Trajectory")
-    landmarks = reduce(hcat, landmarks)
+    landmarks = reduce(hcat, ex_data.others.landmarks)
     scatter!(p_traj, landmarks[1, :], landmarks[2, :], label="Landmarks")
     plot(p_traj, layout=(1,1), aspect_ratio=1)
 end

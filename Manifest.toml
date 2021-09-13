@@ -126,6 +126,12 @@ git-tree-sha1 = "1289b57e8cf019aede076edab0587eb9644175bd"
 uuid = "9e28174c-4ba2-5203-b857-d8d62c4213ee"
 version = "1.0.2"
 
+[[deps.BinaryTraits]]
+deps = ["ExprTools", "MacroTools"]
+git-tree-sha1 = "bb3ccf4bc264b0cc5f8ee8ef4fc4a55c11ccc427"
+uuid = "190e46ec-f771-4705-b939-984896f7be0e"
+version = "0.6.0"
+
 [[deps.Blink]]
 deps = ["Base64", "BinDeps", "Distributed", "JSExpr", "JSON", "Lazy", "Logging", "MacroTools", "Mustache", "Mux", "Reexport", "Sockets", "WebIO", "WebSockets"]
 git-tree-sha1 = "08d0b679fd7caa49e2bca9214b131289e19808c0"

@@ -4,6 +4,8 @@ Simultaneous state estimation and dynamics learning.
 module SEDL
 
 using Base: @kwdef
+using BinaryTraits
+using BinaryTraits.Prefix: Is, IsNot
 using AutoHashEquals
 using MacroTools: @forward
 using Formatting: format
@@ -22,7 +24,7 @@ import ForwardDiff
 using ThreadsX
 using Transducers
 using Bijectors
-using SplitApplyCombine: group as groupby
+using SplitApplyCombine: group as to_groups
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 import Metatheory
@@ -33,6 +35,7 @@ using Metatheory.Library: commutative_monoid
 Metatheory.@metatheory_init()
 
 include("utils.jl")
+include("distributions_utils.jl")
 include("control_utils.jl")
 include("DSL.jl")
 include("components.jl")
