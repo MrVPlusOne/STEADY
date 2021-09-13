@@ -2,7 +2,7 @@ module Car1D
 
 using Distributions
 using ..SEDL
-using ..SEDL: TimeSeries
+using ..SEDL: TimeSeries, SNormal, SMvNormal, SUniform
 using StatsPlots
 using DataFrames
 
@@ -18,14 +18,14 @@ param_vars() = [Drag, Mass]
 
 variable_data() = VariableData(
     states = Dict(
-        Pos => (Normal(0.0, 0.01), Normal(0.0, 1.0)),
+        Pos => (SNormal(0.0, 0.01), SNormal(0.0, 1.0)),
     ),
     dynamics_params = Dict(
-        Mass => Uniform(0.5, 5.0),
-        Drag => Uniform(0.0, 1.0),
+        Mass => SUniform(0.5, 5.0),
+        Drag => SUniform(0.0, 1.0),
     ),
     others = Dict(
-        Wall.name => Normal(25.0, 25.0),
+        Wall.name => SNormal(25.0, 25.0),
     ),
 )
 
@@ -35,19 +35,19 @@ end
 
 sensor_max_range = 5.0
 function sensor_dist(s, others; noise_scale)
-    Normal(others.wall - s.pos, 0.2noise_scale)
+    SNormal(others.wall - s.pos, 0.2noise_scale)
 end
 
 function speed_dist(s; noise_scale)
-    Normal(s.pos′, 0.2noise_scale)
+    SNormal(s.pos′, 0.2noise_scale)
 end
 
 function odometry_dist(s, s1; noise_scale)
     Δ = s1.pos - s.pos
-    Normal(Δ, 0.1noise_scale * (1+abs(Δ)))
+    SNormal(Δ, 0.1noise_scale * (1+abs(Δ)))
 end
 
-function controller(s, (; speed, sensor))
+function controller((; speed, sensor))
     stop_dis = 2.0
     max_force = 10.0
     is_stopping = sensor < stop_dis
