@@ -110,10 +110,12 @@ export PType
 """
 A physical type with both a name and a unit.
 """
+@auto_hash_equals(
 struct PType
     shape::PShape
     unit::PUnit
 end
+)
 
 Base.show(io::IO, v::PType) = begin
     (; shape, unit) = v
@@ -126,10 +128,11 @@ Typed AST for numerical expressions.
 """
 abstract type TAST end
 
+@auto_hash_equals(
 struct Var <: TAST
     name::Symbol
     type::PType
-end
+end)
 
 Var(name::Symbol, shape::PShape, unit::Pair...) = Var(name, shape, PUnit(unit...))
 Var(name::Symbol, shape::PShape, unit::PUnit) = Var(name, PType(shape, unit))
