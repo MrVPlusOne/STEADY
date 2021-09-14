@@ -124,10 +124,19 @@ Perform bottom-up program enumeration.
 ## Arguments
 - `max_size::Integer`: programs with [`ast_size`](@ref) up to this value will be returned.
 """
-function bottom_up_enum(
-    env::ComponentEnv, vars::Vector{Var}, max_size; types_to_prune=Set(), pruner::AbstractPruner=NoPruner(),
+function enumerate_terms(
+    env::ComponentEnv, vars::Set{Var}, max_size; 
+    types_needed::Union{Set{Tuple{Int, PType}}, Nothing}=nothing, 
+    pruner::AbstractPruner=NoPruner(),
 )::EnumerationResult
-    @assert allunique(vars) "Duplicate variables in the input."
+    function types_with_size(size)::Set{PType}
+        r = Set{PType}()
+        (types_needed === nothing) && return r
+        foreach(types_needed) do (s, t)
+            (s == size) && push!(r, t)
+        end
+        r
+    end
 
     start_time = time()
 
@@ -154,23 +163,29 @@ function bottom_up_enum(
                 for arg_units in Iterators.product((keys(d) for d in arg_dicts)...)
                     runit = sig.result_unit(arg_units...)
                     (runit === nothing) && continue # skip invalid combination
+                    rtype = PType(sig.result_shape, runit::PUnit)
+                    if types_needed !== nothing && (size, rtype) ∉ types_needed
+                        continue  # this return type is not needed
+                    end
                     arg_candidates = (d[u] for (u, d) in zip(arg_units, arg_dicts))
                     # iterate over all argument AST combinations
                     for args in Iterators.product(arg_candidates...)
-                        prog = Call(f, args, PType(sig.result_shape, runit::PUnit))
+                        prog = Call(f, args, rtype)
                         insert!(result, prog, size)
                     end
                 end
             end
         end
-        result.pruning_time += @elapsed begin
+        result.pruning_time += @elapsed let
+            types_to_prune = types_with_size(size)
             for x in prune_iteration!(pruner, result, types_to_prune, size, is_last=false)
                 prune!(result, x) 
             end
         end
     end
 
-    result.pruning_time += @elapsed begin 
+    result.pruning_time += @elapsed let 
+        types_to_prune = types_with_size(max_size)
         for x in prune_iteration!(pruner, result, types_to_prune, max_size, is_last=true)
             prune!(result, x) 
         end

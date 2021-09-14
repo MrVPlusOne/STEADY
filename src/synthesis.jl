@@ -72,7 +72,7 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
     n_interest = prod(count_len(enum_result[ty]) for ty in comp_types)
 
     println(io, "===== Synthesis enumeration result =====")
-    println(io, "search_space: $n_interest")
+    println(io, "search_space: $(pretty_number(n_interest))")
     println(io, "n_components: ", length(comp_env.signatures))
     println(io, "states: $state_vars")
     println(io, "actions: $action_vars")
@@ -81,8 +81,8 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
 end
 
 function synthesis_enumeration(
-    vdata::VariableData, action_vars::Vector{Var}, comp_env::ComponentEnv, 
-    max_size, pruner=NoPruner(),
+    vdata::VariableData, action_vars::Vector{Var}, comp_env::ComponentEnv, max_size; 
+    pruner=NoPruner(), type_pruning=true,
 )
     (; t_unit) = vdata
     state_vars = keys(vdata.states) |> collect
@@ -90,8 +90,19 @@ function synthesis_enumeration(
     state′′_vars = derivative.(state′_vars, Ref(t_unit))
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    types_to_prune = Set(v.type for v in state′′_vars)
-    enum_result = bottom_up_enum(comp_env, dyn_vars, max_size; types_to_prune, pruner)
+    output_types = Set(v.type for v in state′′_vars)
+    if type_pruning
+        types_needed, _ = enumerate_types(
+            comp_env, 
+            Set(v.type for v in dyn_vars), 
+            output_types, 
+            max_size,
+        )
+    else 
+        types_needed = nothing
+    end
+    dyn_varset = Set(v for v in dyn_vars)
+    enum_result = enumerate_terms(comp_env, dyn_varset, max_size; types_needed, pruner)
     SynthesisEnumerationResult(;
         vdata,
         comp_env,
@@ -101,6 +112,25 @@ function synthesis_enumeration(
         action_vars,
         param_vars,
         enum_result,
+    )
+end
+
+function synthesis_enumeration_staged(
+    vdata::VariableData, action_vars::Vector{Var},
+    comp_env::ComponentEnv, max_size,
+)
+    (; t_unit) = vdata
+    state_vars = keys(vdata.states) |> collect
+    state′_vars = derivative.(state_vars, Ref(t_unit))
+    state′′_vars = derivative.(state′_vars, Ref(t_unit))
+    param_vars = keys(vdata.dynamics_params) |> collect
+    dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
+    output_types = Set(v.type for v in state′′_vars)
+    enumerate_types(
+        comp_env, 
+        Set(v.type for v in dyn_vars), 
+        output_types, 
+        max_size,
     )
 end
 
@@ -198,26 +228,36 @@ function map_synthesis(
     prior_dists = merge(params_dist, others_dist)
 
     function evaluate((comps, f_x′′))
-        rs = try
-            [(@ltimed map_trajectory(
-                x₀_dist, x′₀_dist, f_x′′, prior_dists, 
-                times, actions, data_likelihood, 
-                optim_options,
-            )) for _ in 1:evals_per_program]
-        catch err
-            if err isa ArgumentError || err isa DomainError
-                return (status= :errored, program=comps, error=err)
-            else
-                @error "f_x′′ = $(f_x′′)" 
-                rethrow()
+        local solutions = []
+        local optimize_times = Float64[]
+        local errors = []
+        for _ in 1:evals_per_program
+            try
+                timed_r = @ltimed map_trajectory(
+                    x₀_dist, x′₀_dist, f_x′′, prior_dists, 
+                    times, actions, data_likelihood, 
+                    optim_options,
+                )
+                if isnan(timed_r.value.logp)
+                    push!(errors, ErrorException("logp = NaN."))
+                else
+                    push!(solutions, timed_r.value)
+                    push!(optimize_times, timed_r.time)
+                end
+            catch err
+                if err isa ArgumentError || err isa DomainError
+                    push!(errors, err)
+                else
+                    @error "f_x′′ = $(f_x′′)" 
+                    rethrow()
+                end
             end
         end
 
-        valid_sols = filter(s -> !isnan(s.logp), (t -> t.value).(rs))
-        if isempty(valid_sols)
-            return (status= :errored, program=comps, error=ErrorException("all logp = NaN."))
+        if isempty(solutions)
+            return (status= :errored, program=comps, errors=unique(errors))
         end
-        sol = valid_sols |> max_by(s->s.logp)
+        sol = solutions |> max_by(s->s.logp)
         MAP_est = (
             params=subtuple(sol.params, keys(params_dist)),
             others=subtuple(sol.params, keys(others_dist)),
@@ -226,19 +266,19 @@ function map_synthesis(
         )
         logp = sol.logp + program_logp(comps)
         (; status= :success,
-            result = (; logp, f_x′′, MAP_est),
-            optimize_times = (t -> t.time).(rs))
+            result=(; logp, f_x′′, MAP_est),
+            optimize_times)
     end
 
-    blas_threads = BLAS.get_num_threads()
-    BLAS.set_num_threads(1)
+    # blas_threads = BLAS.get_num_threads()
+    # BLAS.set_num_threads(1)
     to_eval = withprogress(zip(all_comps, compiled); interval=0.1)
     eval_results = if n_threads > 1
-        ThreadsX.mapi(evaluate, to_eval; ntasks=n_threads)
+        ThreadsX.mapi(evaluate, to_eval)
     else
         to_eval |> Map(evaluate) |> collect
     end
-    BLAS.set_num_threads(blas_threads)
+    # BLAS.set_num_threads(blas_threads)
 
     err_progs = eval_results |> Filter(r -> r.status == :errored) |> collect
     succeeded = filter(r -> r.status == :success, eval_results)

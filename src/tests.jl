@@ -28,7 +28,7 @@ function check_pruning_soundness(
     shape_env = ℝenv(), n_samples=20,
 )
     arg_dists = (; (v.name => dist for (v, dist) in var_dists)...)
-    eresult = bottom_up_enum(comp_env, collect(keys(var_dists)), max_size; 
+    eresult = enumerate_terms(comp_env, collect(keys(var_dists)), max_size; 
         types_to_prune, pruner)
     failed = []
     n_passed = 0

@@ -1,8 +1,79 @@
-export specific_elems, count_len 
+export specific_elems, count_len, @unzip, @unzip_named
 export max_by, sort_by
 export rotate2d, rotation2D, °
 
+using MacroTools: @capture
+
 specific_elems(xs) = identity.(xs)
+
+count_len(iters) = count(_ -> true, iters)
+
+"""
+## Example
+```jldoctest
+julia> @unzip as, bs = [("a", "b", "c") for i in 1:3]
+3-element Vector{Tuple{String, String, String}}:
+ ("a", "b", "c")
+ ("a", "b", "c")
+ ("a", "b", "c")
+
+julia> as
+3-element Vector{String}:
+ "a"
+ "a"
+ "a"
+
+julia> bs
+3-element Vector{String}:
+ "b"
+ "b"
+ "b"
+```
+"""
+macro unzip(assign)
+    if @capture(assign, (v1_, vs__) = rhs_)
+        assigns = map(enumerate([v1; vs])) do (i, v)
+            :($(esc(v)) = map(x -> x[$i], rhs_value))
+        end
+        Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
+    else
+        error("Usage: `@unzip x, [y, ...] = rhs`")
+    end
+end
+
+"""
+## Example
+```jldoctest
+julia> @unzip_named a, c = [(a="a", b="b", c="c") for i in 1:3]
+3-element Vector{NamedTuple{(:a, :b, :c), Tuple{String, String, String}}}:
+ (a = "a", b = "b", c = "c")
+ (a = "a", b = "b", c = "c")
+ (a = "a", b = "b", c = "c")
+
+julia> a
+3-element Vector{String}:
+ "a"
+ "a"
+ "a"
+
+julia> c
+3-element Vector{String}:
+ "c"
+ "c"
+ "c"
+```
+"""
+macro unzip_named(assign)
+    if @capture(assign, (v1_, vs__) = rhs_)
+        assigns = map([v1; vs]) do v
+            :($(esc(v)) = map(x -> x[$(QuoteNode(v))], rhs_value))
+        end
+        Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
+    else
+        error("Usage: `@unzip_named x, [y, ...] = rhs`")
+    end
+end
+
 
 @inline rotation2D(θ) = @SArray(
     [cos(θ) -sin(θ)
@@ -88,6 +159,32 @@ function optimize_no_tag(loss, x₀, optim_options)
     Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
 end
 
-count_len(iters) = count(_ -> true, iters)
-
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
+
+"""
+Like `get!`, but can be used to directly access nested dictionaries.
+
+```jldoctest
+julia> d = Dict{Int, Dict{Symbol, String}}()
+Dict{Int64, Dict{Symbol, String}}()
+
+julia> nested_get!(d, 5 => :a) do
+           "default"
+       end
+"default"
+
+julia> d
+Dict{Int64, Dict{Symbol, String}} with 1 entry:
+  5 => Dict(:a=>"default")
+```
+"""
+function nested_get!(f, d::Dict{K, D}, k_pair::Pair{K, Rest}) where {K, D<:Dict, Rest}
+    inner_dict = get!(d, k_pair[1]) do
+        D()
+    end
+    nested_get!(f, inner_dict, k_pair[2])
+end
+
+function nested_get!(f, d::Dict{K, V}, k::K) where {K, V}
+    get!(f, d, k)
+end

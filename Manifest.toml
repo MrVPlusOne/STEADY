@@ -894,7 +894,7 @@ version = "0.3.1"
 
 [[deps.Metatheory]]
 deps = ["AutoHashEquals", "DataStructures", "DocStringExtensions", "Parameters", "Reexport", "Rewriters", "RuntimeGeneratedFunctions", "TermInterface", "ThreadsX", "TimerOutputs"]
-path = "/Users/jiayiwei/.julia/dev/Metatheory"
+git-tree-sha1 = "b9266bed6cfda85bbf3c18b1566f5f3f02139366"
 uuid = "e9d8d322-4543-424a-9be4-0cc815abe26c"
 version = "0.5.0"
 

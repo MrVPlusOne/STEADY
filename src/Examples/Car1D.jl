@@ -2,7 +2,7 @@ module Car1D
 
 using Distributions
 using ..SEDL
-using ..SEDL: TimeSeries, SNormal, SMvNormal, SUniform
+using ..SEDL: ℝ, ℝ2, TimeSeries, SNormal, SMvNormal, SUniform
 using StatsPlots
 using DataFrames
 

@@ -9,6 +9,7 @@ using StaticArrays
 import Random
 
 Pos = Var(:pos, ℝ2, PUnits.Length)
+"θ is defined as the angle between the rocket head and the y axis."
 Orientation = Var(:θ, ℝ, PUnits.unitless)
 Thrust = Var(:thrust, ℝ, PUnits.Force)
 Turn = Var(:turn, ℝ, PUnits.Force * PUnits.Length)
@@ -97,7 +98,7 @@ function controller(state, obs; target_pos, weight::Real, rng=Random.GLOBAL_RNG)
     thrust_factor = exp(randn(rng)*0.1)
 
     Δpos = pos - target_pos
-    turn = -(5θ/cos(θ)+ω-0.2Δpos[1]) * turn_factor
+    turn = -(2θ/cos(θ)+ω-0.15Δpos[1]) * turn_factor
     thrust = (weight-(0.3Δpos[2]+0.2vel[2]) * thrust_factor) / cos(θ)
     (; thrust, turn) |> limit_control
 end
@@ -130,12 +131,27 @@ function data_likelihood(states, others, observations; noise_scale)
     end for i in 1:length(states))
 end
 
-function plot_data(ex_data, name::String)
-    traj = reduce(hcat, map(x -> x[:pos], ex_data.states))'
-    p_traj = plot(traj[:, 1], traj[:, 2], title="($name)", label="Trajectory")
-    landmarks = reduce(hcat, ex_data.others.landmarks)
-    scatter!(p_traj, landmarks[1, :], landmarks[2, :], label="Landmarks")
-    plot(p_traj, layout=(1,1), aspect_ratio=1)
+function plot_data(ex_data, name::String; marker_len=1.0, marker_thining=10)
+    arrow_style = arrow(:closed, 0.001, 1.0)
+    traj_plot = let
+        states = ex_data.states[1:marker_thining:end]
+        @unzip xs, ys = map(x -> x.pos, states)
+        dirs = map(states) do x
+            rotate2d(x.θ, @SVector[0.0, marker_len])
+        end
+        @unzip us, vs = dirs
+        quiver(xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, label="Orientation")
+    end
+    let
+        @unzip xs, ys = map(x -> x.pos, ex_data.states)
+        plot!(traj_plot, xs, ys, arrow=arrow_style, label="Position")
+    end
+    let
+        @unzip xs, ys = ex_data.others.landmarks
+        scatter!(traj_plot, xs, ys, label="Landmarks")
+    end
+    
+    plot(traj_plot, aspect_ratio=1, title="($name)")
 end
 
 end # end module

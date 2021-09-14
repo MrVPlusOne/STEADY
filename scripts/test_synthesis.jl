@@ -24,7 +24,7 @@ pruners = [
     # IncrementalPruner(; env.rules),
 ]
 results_timed = map(pruners) do pruner
-    @timed bottom_up_enum(env, [x, l, θ], max_prog_size; pruner)
+    @timed enumerate_terms(env, [x, l, θ], max_prog_size; pruner)
 end
 results = (v -> v.value).(results_timed)
 for (p, (;value, time)) in zip(pruners, results_timed)
@@ -38,7 +38,7 @@ f_comp = compile(prog, shape_env, env)
 f_comp(((x=@SVector[1.0, 2.0], l=1.4, θ=2.1)))
 ## test compilation speed
 let
-    result = bottom_up_enum(env, [x, l, θ], 5)
+    result = enumerate_terms(env, [x, l, θ], 5)
     programs = collect(Iterators.take(result[ℝ], 500))
     stats = map(programs) do p
         size = ast_size(p)
