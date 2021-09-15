@@ -9,7 +9,7 @@ function test_equiv(
 )::Union{Nothing, NamedTuple}
     tolerant_types = [DomainError]
     for _ in 1:n_samples
-        args = map(convert_svector ∘ rand, arg_dists)
+        args = map(rand, arg_dists)
         try
             v1, v2 = p1(args), p2(args)
             !isapprox(v1, v2, atol=1e-6, rtol=1e-8) && return (; diff=v1 .- v2, args)

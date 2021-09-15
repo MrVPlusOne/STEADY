@@ -70,10 +70,4 @@ Rocket2D.plot_data(map_data, "MAP Estimate") |> display
 syn_result.errored_programs
 ##
 
-senum = synthesis_enumeration(
-    vdata, Rocket2D.action_vars(), comp_env, 4; pruner,
-)
-types_needed, _ = synthesis_enumeration_staged(
-    vdata, Rocket2D.action_vars(), comp_env, 4,
-)
 

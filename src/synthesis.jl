@@ -50,6 +50,9 @@ Base.rand(vdata::VariableData) = begin
     (; x₀, x′₀, params, others)
 end
 
+
+export SynthesisEnumerationResult, synthesis_enumeration
+
 """
 Group the enumeration data needed for `map_synthesis`. Can be created by `bottom_up_enum`.
 """
@@ -115,6 +118,7 @@ function synthesis_enumeration(
     )
 end
 
+export MapSynthesisResult, map_synthesis
 struct MapSynthesisResult{R}
     best_result::R
     stats::NamedTuple

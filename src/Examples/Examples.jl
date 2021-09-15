@@ -1,3 +1,7 @@
+include("Car1D.jl")
+include("Rocket2D.jl")
+
+export generate_data
 function generate_data(
     x₀::NamedTuple,
     x′₀::NamedTuple,
