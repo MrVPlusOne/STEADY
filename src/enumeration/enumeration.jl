@@ -122,7 +122,7 @@ function enumerate_types(
                 for arg_units in Iterators.product((d for d in arg_dicts)...)
                     runit = sig.result_unit(arg_units...)
                     (runit === nothing) && continue
-                    parent_types = Set(
+                    parent_types = Set{PType}(
                         PType(shape, unit) 
                         for (shape, unit) in zip(arg_shapes, arg_units)
                     )
@@ -213,6 +213,7 @@ function size_combinations(n_args, sizes_for_arg, total_size)
             )
         end
     end
+    (n_args == 0) && return (Int[],)
     (reverse!(v) for v in rec(1, total_size))
 end
 

@@ -9,7 +9,7 @@ struct FuncSignature{F}
     result_unit::F # TODO: replace this with a constraint graph to improve efficiency
 end
 
-FuncSignature(shape_sig::Pair{Vector{PShape}, PShape}, unit_sig::Function) =
+FuncSignature(shape_sig::Pair{Vector{<:PShape}, PShape}, unit_sig::Function) =
     FuncSignature(shape_sig[1], shape_sig[2], unit_sig)
 
 Base.show(io::IO, env::FuncSignature) = begin
@@ -53,41 +53,62 @@ end
 
 Base.insert!(d::Dict, k, v) = d[k] = v
 
-function Base.push!(
+struct ComponentFunc
+    name::Symbol
+    impl::Function
+    shape_sig::Pair{Vector{<:PShape}, PShape}
+    unit_sig::Function
+end
+
+function add_component!(
     env::ComponentEnv, 
-    name::Symbol, 
-    impl::Function, 
-    shape_sig::Pair{Vector{PShape}, PShape},
-    unit_sig::Function,
+    comp::ComponentFunc
 )::ComponentEnv
+    (; name, impl, shape_sig, unit_sig) = comp
     @assert !(name in keys(env.impl_dict)) "Component '$name' already present in the environment."
     insert!(env.impl_dict, name, impl)
     insert!(env.signatures, name, FuncSignature(shape_sig, unit_sig))
     env
 end
 
-function push_unitless!(
+function Base.push!(env::ComponentEnv, comps::ComponentFunc...)
+    foreach(comps) do c
+        add_component!(env, c)
+    end
+    env
+end
+
+function add_unitless_comp!(
     env::ComponentEnv, 
     name::Symbol, 
     impl::Function, 
     shape_sig::Pair{Vector{PShape}, PShape} = [ℝ] => ℝ,
 )::ComponentEnv
-    unitless_sig(us...) = all(isunitless.(us)) ? unitless : nothing
-    push!(env, name, impl, shape_sig, unitless_sig)
+    push!(env, ComponentFunc(name, impl, shape_sig, signature_unitless))
 end
+signature_unitless(us...) = all(isunitless.(us)) ? unitless : nothing
+
+
+function components_void!(env::ComponentEnv)
+    push!(env, ComponentFunc(:void, void, PShape[] => Void, signature_unitless))
+end
+void() = ()
 
 function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
-    push!(env, :(+), (+), [ℝ, ℝ] => ℝ, signature_all_same)
-    push!(env, :(-), (-), [ℝ, ℝ] => ℝ, signature_all_same)
-    push!(env, :(*), (*), [ℝ, ℝ] => ℝ, (*))
-    push!(env, :(/), (/), [ℝ, ℝ] => ℝ, (/))
-    push!(env, :(neg), (-), [ℝ] => ℝ, identity)
-    push!(env, :(reciprocal), x -> 1 / x, [ℝ] => ℝ, u -> unitless / u)
-    push!(env, :abs, abs, [ℝ] => ℝ, identity)
-    push!(env, :square, square, [ℝ] => ℝ, u -> u^2)
-    push!(env, :sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2))
+    push!(env,
+        ComponentFunc(:(+), (+), [ℝ, ℝ] => ℝ, signature_all_same),
+        ComponentFunc(:(-), (-), [ℝ, ℝ] => ℝ, signature_all_same),
+        ComponentFunc(:(*), (*), [ℝ, ℝ] => ℝ, (*)),
+        ComponentFunc(:(/), (/), [ℝ, ℝ] => ℝ, (/)),
+        ComponentFunc(:(neg), (-), [ℝ] => ℝ, identity),
+        ComponentFunc(:(reciprocal), x -> 1 / x, [ℝ] => ℝ, u -> unitless / u),
+        ComponentFunc(:abs, abs, [ℝ] => ℝ, identity),
+        ComponentFunc(:square, square, [ℝ] => ℝ, u -> u^2),
+        ComponentFunc(:sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2)),
+    )
 
     scalar_arithmatic_rules!(env.rules; can_grow)
+    env
 end
 square(x) = x^2
 
@@ -143,10 +164,10 @@ function scalar_arithmatic_rules!(rules; can_grow)
 end
 
 function components_transcendentals!(env::ComponentEnv; can_grow=true)
-    push_unitless!(env, :sin, sin)
-    push_unitless!(env, :cos, cos)
-    push_unitless!(env, :exp, exp)
-    push_unitless!(env, :tanh, tanh)
+    add_unitless_comp!(env, :sin, sin)
+    add_unitless_comp!(env, :cos, cos)
+    add_unitless_comp!(env, :exp, exp)
+    add_unitless_comp!(env, :tanh, tanh)
 
     non_grow = @theory begin
         sin(neg(x)) == neg(sin(x))
@@ -159,19 +180,22 @@ function components_transcendentals!(env::ComponentEnv; can_grow=true)
     end
     append!(env.rules, non_grow)
     can_grow && append!(env.rules, grow)
+    env
 end
 
 function components_vec2!(env::ComponentEnv; can_grow=true)
-    push!(env, :R2, (mk_R2), [ℝ, ℝ] => ℝ2, signature_all_same) # constructor
-    push!(env, :norm_R2, norm_R2, [ℝ2] => ℝ, identity)
-
-    push!(env, :plus_R2, (+), [ℝ2, ℝ2] => ℝ2, signature_all_same)
-    push!(env, :minus_R2, (-), [ℝ2, ℝ2] => ℝ2, signature_all_same)
-    push!(env, :scale_R2, (*), [ℝ, ℝ2] => ℝ2, (*))
-    push!(env, :rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing)
-    push!(env, :neg_R2, (-), [ℝ2] => ℝ2, identity)
+    push!(env,
+        ComponentFunc(:R2, (mk_R2), [ℝ, ℝ] => ℝ2, signature_all_same), # constructor
+        ComponentFunc(:norm_R2, norm_R2, [ℝ2] => ℝ, identity),
+        ComponentFunc(:plus_R2, (+), [ℝ2, ℝ2] => ℝ2, signature_all_same),
+        ComponentFunc(:minus_R2, (-), [ℝ2, ℝ2] => ℝ2, signature_all_same),
+        ComponentFunc(:scale_R2, (*), [ℝ, ℝ2] => ℝ2, (*)),
+        ComponentFunc(:rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing),
+        ComponentFunc(:neg_R2, (-), [ℝ2] => ℝ2, identity),
+    )
 
     vec2_rules!(env.rules; can_grow)
+    env
 end
 
 vec2_rules!(rules; can_grow) = begin

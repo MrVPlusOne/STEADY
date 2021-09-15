@@ -194,11 +194,13 @@ Base.getindex(env::ShapeEnv, s::PType) = env[s.shape]
 
 export ℝ, ℝ2, ℝenv, derivative
 ## === Commonly used type definitions ===
+const Void = PShape(:Void)
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
 
 ℝenv(num_type::Type=Real) = begin 
     ShapeEnv(Dict(
+        Void => Tuple{},
         ℝ => num_type,
         ℝ2 => isconcretetype(num_type) ? SVector{2, num_type} : (SVector{2, <: num_type}),
     ))
