@@ -25,8 +25,8 @@ landmarks = [
     @SVector[4., -4],
 ]
 others = (landmarks = landmarks,)
-target_pos = @SVector[-2.5, -2.5]
-x₀ = (pos=@SVector[0.0, 0.0], θ=45°,)
+target_pos = @SVector[0.0, 0.0]
+x₀ = (pos=@SVector[-5, -4.0], θ=45°,)
 x₀′ = (pos′=@SVector[0.25, 0.1], θ′=-5°,)
 ex_data = Rocket2D.generate_data(x₀, x₀′, params, others, times; noise_scale, target_pos)
 Rocket2D.plot_data(ex_data, "Truth")
@@ -38,7 +38,7 @@ components_scalar_arithmatic!(comp_env; can_grow)
 components_transcendentals!(comp_env; can_grow)
 components_vec2!(comp_env; can_grow)
 
-vdata = Rocket2D.variable_data(n_landmarks)
+vdata = Rocket2D.variable_data(n_landmarks, x₀)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps)) 
 
 # pruner = NoPruner()

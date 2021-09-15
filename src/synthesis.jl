@@ -115,25 +115,6 @@ function synthesis_enumeration(
     )
 end
 
-function synthesis_enumeration_staged(
-    vdata::VariableData, action_vars::Vector{Var},
-    comp_env::ComponentEnv, max_size,
-)
-    (; t_unit) = vdata
-    state_vars = keys(vdata.states) |> collect
-    state′_vars = derivative.(state_vars, Ref(t_unit))
-    state′′_vars = derivative.(state′_vars, Ref(t_unit))
-    param_vars = keys(vdata.dynamics_params) |> collect
-    dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    output_types = Set(v.type for v in state′′_vars)
-    enumerate_types(
-        comp_env, 
-        Set(v.type for v in dyn_vars), 
-        output_types, 
-        max_size,
-    )
-end
-
 struct MapSynthesisResult{R}
     best_result::R
     stats::NamedTuple

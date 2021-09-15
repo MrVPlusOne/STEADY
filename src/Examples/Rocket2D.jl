@@ -28,10 +28,10 @@ landmark_dist(n) = begin
     DistrIterator([SMvNormal([0., -10.], [50.0, 10.0]) for _ in 1:n])
 end
 
-variable_data(n_landmarks) = VariableData(
+variable_data(n_landmarks, (; pos, θ)) = VariableData(
     states = Dict(
-        Pos => (SMvNormal([0.0, 0.0], 0.01), SMvNormal([0.0, 0.0], 1.0)),
-        Orientation => (SNormal(0.0, 0.01), SNormal(0.0, 0.5)),
+        Pos => (SMvNormal(pos, 0.01), SMvNormal([0.0, 0.0], 1.0)),
+        Orientation => (SNormal(θ, 0.01), SNormal(0.0, 0.5)),
     ),
     dynamics_params = Dict(
         Drag => SUniform(0.001, 1.0),
@@ -51,10 +51,11 @@ limit_control((; thrust, turn)) =
 function acceleration_f(
         (; pos′, θ, θ′, thrust, turn, drag, rot_drag, mass, rot_mass, gravity, length))
     speed = norm_R2(pos′)
+    thrust_force = rotate2d(θ, @SVector[0., thrust])
     gravity_force = gravity * mass
     gravity_moment = -(cos(θ)*gravity[1] + sin(θ)*gravity[2]) * length/2 * mass
 
-    pos′′ = (rotate2d(θ, @SVector[0., thrust]) - drag * speed * pos′ + gravity_force) / mass
+    pos′′ = (thrust_force - drag * speed * pos′ + gravity_force) / mass
     θ′′ = (turn - rot_drag * θ′ * abs(θ′) + gravity_moment) / rot_mass
     (pos′′, θ′′)
 end
@@ -83,6 +84,15 @@ function rot_meter(s; noise_scale)
     SNormal(s.θ′, 0.2noise_scale)
 end
 
+function observation_dist(s, s_prev, others; noise_scale)
+    DistrIterator((
+        sensor = sensor_dist(s, others.landmarks; noise_scale),
+        gps = gps_reading(s; noise_scale),
+        Δv = Δv_meter(s, s_prev; noise_scale),
+        ω = rot_meter(s; noise_scale), 
+    ))
+end
+
 Base.isfinite(v::AbstractVector) = all(isfinite.(v))
 
 # assuming access to the ground-truth state 
@@ -94,22 +104,13 @@ function controller(state, obs; target_pos, weight::Real, rng=Random.GLOBAL_RNG)
     (; pos, pos′, θ, θ′) = state
     vel, ω = pos′, θ′
 
-    turn_factor = exp(randn(rng)*0.1)
-    thrust_factor = exp(randn(rng)*0.1)
+    turn_factor = exp(randn(rng)*0.2)
+    thrust_factor = exp(randn(rng)*0.2)
 
     Δpos = pos - target_pos
-    turn = -(2θ/cos(θ)+ω-0.15Δpos[1]) * turn_factor
+    turn = -(3θ/cos(θ)+ω-0.15Δpos[1]) * turn_factor
     thrust = (weight-(0.3Δpos[2]+0.2vel[2]) * thrust_factor) / cos(θ)
     (; thrust, turn) |> limit_control
-end
-
-function observation_dist(s, s_prev, others; noise_scale)
-    DistrIterator((
-        sensor = sensor_dist(s, others.landmarks; noise_scale),
-        gps = gps_reading(s; noise_scale),
-        Δv = Δv_meter(s, s_prev; noise_scale),
-        ω = rot_meter(s; noise_scale), 
-    ))
 end
 
 
