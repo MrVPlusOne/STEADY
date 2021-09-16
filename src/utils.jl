@@ -44,19 +44,19 @@ end
 """
 ## Example
 ```jldoctest
-julia> @unzip_named a, c = [(a="a", b="b", c="c") for i in 1:3]
+julia> @unzip_named (as, :a), (cs, :c) = [(a="a", b="b", c="c") for i in 1:3]
 3-element Vector{NamedTuple{(:a, :b, :c), Tuple{String, String, String}}}:
  (a = "a", b = "b", c = "c")
  (a = "a", b = "b", c = "c")
  (a = "a", b = "b", c = "c")
 
-julia> a
+julia> as
 3-element Vector{String}:
  "a"
  "a"
  "a"
 
-julia> c
+julia> cs
 3-element Vector{String}:
  "c"
  "c"
@@ -64,14 +64,16 @@ julia> c
 ```
 """
 macro unzip_named(assign)
-    if @capture(assign, (v1_, vs__) = rhs_)
-        assigns = map([v1; vs]) do v
-            :($(esc(v)) = map(x -> x[$(QuoteNode(v))], rhs_value))
-        end
-        Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
-    else
-        error("Usage: `@unzip_named x, [y, ...] = rhs`")
+    fail() = error("Usage: `@unzip_named (xs, :x_name), [(ys, :y_name), ...] = rhs`")
+
+    @capture(assign, (v1_, vs__) = rhs_) || fail()
+    assigns = map([v1; vs]) do v
+        (v isa Expr && v.head === :tuple && length(v.args) == 2) || fail()
+        x, x_name = v.args
+        (x isa Symbol && x_name isa QuoteNode) || fail()
+        :($(esc(x)) = map(p -> getfield(p, $x_name), rhs_value))
     end
+    Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
 end
 
 

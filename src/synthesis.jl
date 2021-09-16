@@ -1,5 +1,19 @@
 const TimeSeries{T} = Vector{T}
 
+export DynamicsSketch, no_sketch
+"""
+A sketch for second-order system dynamics.
+"""
+struct DynamicsSketch{F}
+    holes::Vector{Var}
+    "combine(inputs::NamedTuple, hole_values::Tuple) -> accelerations::Tuple"
+    combine::F
+end
+
+function no_sketch(state′′_vars::Vector{Var})
+    DynamicsSketch(state′′_vars, (inputs, hole_values) -> hole_values)
+end
+
 export VariableData, map_synthesis
 """
 The robot dynamics are assumed to be of the form `f(state, action, params) -> next_state`.
@@ -22,6 +36,9 @@ struct VariableData
     # Should map each symbol to a value that supports the trait `Is{GDistr}`
     others::Dict{Symbol, GDistr}  
     t_unit::PUnit=PUnits.Time
+    state_vars::Vector{Var} = keys(states) |> collect
+    state′_vars::Vector{Var} = derivative.(state_vars, Ref(t_unit))
+    state′′_vars::Vector{Var} = derivative.(state′_vars, Ref(t_unit))
 end)
 
 
@@ -57,48 +74,48 @@ export SynthesisEnumerationResult, synthesis_enumeration
 Group the enumeration data needed for `map_synthesis`. Can be created by `bottom_up_enum`.
 """
 @kwdef(
-struct SynthesisEnumerationResult
+struct SynthesisEnumerationResult{Combine}
     vdata::VariableData
+    sketch::DynamicsSketch{Combine}
     comp_env::ComponentEnv
-    state_vars::Vector{Var}
-    state′_vars::Vector{Var}
-    state′′_vars::Vector{Var}
     action_vars::Vector{Var}
     param_vars::Vector{Var}
     enum_result::EnumerationResult
 end)
 
 Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
-    (; comp_env, state_vars, state′′_vars, action_vars, param_vars, enum_result) = r
+    (; comp_env, action_vars, param_vars, enum_result, sketch) = r
+    (; state_vars, state′′_vars) = r.vdata
+    holes = sketch.holes
 
     comp_types = Set(v.type for v in state′′_vars)
     n_interest = prod(count_len(enum_result[ty]) for ty in comp_types)
+    search_details = join((count_len(enum_result[ty]) for ty in comp_types), " * ")
 
     println(io, "===== Synthesis enumeration result =====")
-    println(io, "search_space: $(pretty_number(n_interest))")
+    println(io, "search_space: $(pretty_number(n_interest)) = $search_details")
     println(io, "n_components: ", length(comp_env.signatures))
+    println(io, "holes: $holes")
     println(io, "states: $state_vars")
     println(io, "actions: $action_vars")
     println(io, "params: $param_vars")
+
     show(io, mime, enum_result)
 end
 
 function synthesis_enumeration(
-    vdata::VariableData, action_vars::Vector{Var}, comp_env::ComponentEnv, max_size; 
+    vdata::VariableData, sketch::DynamicsSketch, action_vars::Vector{Var},
+    comp_env::ComponentEnv, max_size; 
     pruner=NoPruner(), type_pruning=true,
 )
-    (; t_unit) = vdata
-    state_vars = keys(vdata.states) |> collect
-    state′_vars = derivative.(state_vars, Ref(t_unit))
-    state′′_vars = derivative.(state′_vars, Ref(t_unit))
+    (; state_vars, state′_vars, state′′_vars) = vdata
     param_vars = keys(vdata.dynamics_params) |> collect
     dyn_vars = [state_vars; state′_vars; action_vars; param_vars]
-    output_types = Set(v.type for v in state′′_vars)
     if type_pruning
         types_needed, _ = enumerate_types(
             comp_env, 
             Set(v.type for v in dyn_vars), 
-            output_types, 
+            Set(v.type for v in sketch.holes), 
             max_size,
         )
     else 
@@ -108,10 +125,8 @@ function synthesis_enumeration(
     enum_result = enumerate_terms(comp_env, dyn_varset, max_size; types_needed, pruner)
     SynthesisEnumerationResult(;
         vdata,
+        sketch,
         comp_env,
-        state_vars,
-        state′_vars,
-        state′′_vars,
         action_vars,
         param_vars,
         enum_result,
@@ -187,22 +202,37 @@ function map_synthesis(
     optim_options = Optim.Options(),
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
 )::MapSynthesisResult
-    (; vdata, comp_env, enum_result, state_vars, state′′_vars, param_vars) = senum
+    (; vdata, sketch, comp_env, enum_result, param_vars) = senum
+    (; state_vars, state′′_vars) = vdata
     _check_variable_types(vdata, shape_env)
     
     output_types = [v.type for v in state′′_vars]
-    all_comps = collect(Iterators.product((enum_result[ty] for ty in output_types)...))
+    all_comps = collect(Iterators.product((enum_result[v.type] for v in sketch.holes)...))
+
+    "barrier function to improve the compiled functions' performance."
+    compile_sketch(
+        comps::Tuple{Vararg{TAST}}, 
+        hole_names::Tuple{Vararg{Symbol}},
+        output_names::Tuple{Vararg{Symbol}},
+    ) = begin
+        # TODO: Check the inferred return types 
+        funcs = map(comp -> compile(comp, shape_env, comp_env), comps)
+        ast = (; (=>).((v.name for v in sketch.holes), comps)...)
+        julia = Expr(:tuple, (x -> x.julia).(funcs))
+        f(input) = begin
+            hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
+            NamedTuple{output_names}(sketch.combine(input, hole_values))
+        end
+        CompiledFunc(ast, julia, f)
+    end
 
     @info "number of programs: $(length(all_comps))"
     prog_compile_time = @elapsed begin
         # cache = Dict{TAST, CompiledFunc}()
-        compiled = map(all_comps) do comps
-            # TODO: update this to a single compiled function that returns a tuple 
-            funcs = map(comp -> compile(comp, shape_env, comp_env), comps)
-            ast = (; (=>).((v.name for v in state′′_vars), comps)...)
-            julia = Expr(:tuple, (x -> x.julia).(funcs))
-            f = input -> map(f -> f(input), funcs)
-            CompiledFunc(ast, julia, f)
+        hole_names = Tuple(v.name for v in sketch.holes)
+        output_names = tuple((v.name for v in state′′_vars)...)
+        compiled_progs = map(all_comps) do comps
+            compile_sketch(comps, hole_names, output_names)
         end
     end
 
@@ -257,7 +287,7 @@ function map_synthesis(
 
     # blas_threads = BLAS.get_num_threads()
     # BLAS.set_num_threads(1)
-    to_eval = withprogress(zip(all_comps, compiled); interval=0.1)
+    to_eval = withprogress(zip(all_comps, compiled_progs); interval=0.1)
     eval_results = if n_threads > 1
         ThreadsX.mapi(evaluate, to_eval)
     else
@@ -392,10 +422,11 @@ function simulate(
 )::Nothing where {x_keys, x′_keys, X}
     common_keys = intersect(x_keys, x′_keys)
     @assert isempty(common_keys) "overlapping keys: $common_keys"
+    x′′_keys = derivative.(keys(x′₀))
 
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        call_T(f_x′′, input, X)
+        call_T(values ∘ NamedTuple{x′′_keys} ∘ f_x′′, input, X)
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 

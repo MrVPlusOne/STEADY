@@ -57,7 +57,16 @@ function acceleration_f(
 
     pos′′ = (thrust_force - drag * speed * pos′ + gravity_force) / mass
     θ′′ = (turn - rot_drag * θ′ * abs(θ′) + gravity_moment) / rot_mass
-    (pos′′, θ′′)
+    (; pos′′, θ′′)
+end
+
+ground_truth_sketch() = begin
+    combine(inputs, _) = acceleration_f(inputs)
+    
+    DynamicsSketch(
+        Var[],
+        combine,
+    )
 end
 
 sensor_max_range = 10.0
@@ -132,27 +141,32 @@ function data_likelihood(states, others, observations; noise_scale)
     end for i in 1:length(states))
 end
 
-function plot_data(ex_data, name::String; marker_len=1.0, marker_thining=10)
+function plot_data!(p, ex_data, name::String; marker_len=1.0, marker_thining=10)
     arrow_style = arrow(:closed, 0.001, 1.0)
-    traj_plot = let
+    let
         states = ex_data.states[1:marker_thining:end]
         @unzip xs, ys = map(x -> x.pos, states)
         dirs = map(states) do x
             rotate2d(x.θ, @SVector[0.0, marker_len])
         end
         @unzip us, vs = dirs
-        quiver(xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, label="Orientation")
+        quiver!(p, xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, label="Orientation ($name)")
     end
     let
         @unzip xs, ys = map(x -> x.pos, ex_data.states)
-        plot!(traj_plot, xs, ys, arrow=arrow_style, label="Position")
+        plot!(p, xs, ys, arrow=arrow_style, label="Position ($name)")
     end
     let
         @unzip xs, ys = ex_data.others.landmarks
-        scatter!(traj_plot, xs, ys, label="Landmarks")
+        scatter!(p, xs, ys, label="Landmarks ($name)")
     end
-    
-    plot(traj_plot, aspect_ratio=1, title="($name)")
+    p
+    # plot(traj_plot, aspect_ratio=1, title="($name)")
+end
+
+function plot_data(ex_data, name::String; kargs...)
+    p = plot(; aspect_ratio=1, legend = :outerbottom, title="Rocket2D.jl")
+    plot_data!(p, ex_data, name; kargs...)
 end
 
 end # end module
