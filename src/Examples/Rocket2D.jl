@@ -1,7 +1,8 @@
 module Rocket2D
 
 using ..SEDL
-using ..SEDL: ℝ, ℝ2, rotate2d, norm_R2, TimeSeries, SMvNormal, SNormal, SUniform
+using ..SEDL: ℝ, ℝ2, rotate2d, norm_R2, TimeSeries
+using ..SEDL: SMvNormal, SNormal, SUniform, SMvUniform
 using StatsPlots
 using DataFrames
 using Distributions
@@ -25,13 +26,14 @@ action_vars() = [Thrust, Turn]
 param_vars() = [Drag, RotDrag, Mass, RotMass, RocketLength, Gravity]
 
 landmark_dist(n) = begin
-    DistrIterator([SMvNormal([0., -10.], [50.0, 10.0]) for _ in 1:n])
+    # DistrIterator([SMvNormal([0., -10.], [30.0, 10.0]) for _ in 1:n])
+    DistrIterator([SMvUniform((-40., 40.), (-20., 10.0)) for _ in 1:n])
 end
 
-variable_data(n_landmarks, (; pos, θ)) = VariableData(
+variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
     states = Dict(
-        Pos => (SMvNormal(pos, 0.01), SMvNormal([0.0, 0.0], 1.0)),
-        Orientation => (SNormal(θ, 0.01), SNormal(0.0, 0.5)),
+        Pos => (SMvNormal(pos, x₀_σ), SMvNormal([0.0, 0.0], 1.0)),
+        Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
     ),
     dynamics_params = Dict(
         Drag => SUniform(0.001, 1.0),
@@ -39,7 +41,7 @@ variable_data(n_landmarks, (; pos, θ)) = VariableData(
         RotMass => SUniform(0.1, 5.0),
         RotDrag => SUniform(0.001, 1.0),
         RocketLength => SUniform(0.1,1.0),
-        Gravity => SMvNormal([0.0, -1.0], 1.0),
+        Gravity => SMvUniform((-0.1, 0.1), (0.1, 3.0)),
     ),
     others = Dict(
         :landmarks => landmark_dist(n_landmarks)),
@@ -50,13 +52,15 @@ limit_control((; thrust, turn)) =
 
 function acceleration_f(
         (; pos′, θ, θ′, thrust, turn, drag, rot_drag, mass, rot_mass, gravity, length))
-    speed = norm_R2(pos′)
+    # speed = norm_R2(pos′)
     thrust_force = rotate2d(θ, @SVector[0., thrust])
     gravity_force = gravity * mass
     gravity_moment = -(cos(θ)*gravity[1] + sin(θ)*gravity[2]) * length/2 * mass
+    drag_force = - drag * pos′
+    rot_drag_moment = - rot_drag * θ′
 
-    pos′′ = (thrust_force - drag * speed * pos′ + gravity_force) / mass
-    θ′′ = (turn - rot_drag * θ′ * abs(θ′) + gravity_moment) / rot_mass
+    pos′′ = (thrust_force + drag_force + gravity_force) / mass
+    θ′′ = (turn  + rot_drag_moment + gravity_moment) / rot_mass
     (; pos′′, θ′′)
 end
 
@@ -70,14 +74,19 @@ ground_truth_sketch() = begin
 end
 
 sensor_max_range = 10.0
+# function sensor_dist(s, landmarks; noise_scale)
+#     ranges = DistrIterator([SNormal(norm_R2(s.pos - l), 0.2noise_scale) for l in landmarks])
+#     bearings = DistrIterator([let 
+#         d = l - s.pos
+#         θ = atan(d[2], d[1])
+#         SNormal(θ - s.θ, 0.1noise_scale)  # relative angle
+#     end for l in landmarks])
+#     DistrIterator((; ranges, bearings))
+# end
+
+# simpler version for debugging
 function sensor_dist(s, landmarks; noise_scale)
-    ranges = DistrIterator([SNormal(norm_R2(s.pos - l), 0.2noise_scale) for l in landmarks])
-    bearings = DistrIterator([let 
-        d = l - s.pos
-        θ = atan(d[2], d[1])
-        SNormal(θ - s.θ, 0.1noise_scale)  # relative angle
-    end for l in landmarks])
-    DistrIterator((; ranges, bearings))
+    DistrIterator([SMvNormal(l, 0.2noise_scale) for l in landmarks])
 end
 
 function gps_reading(s; noise_scale)
@@ -133,11 +142,18 @@ generate_data(x₀, x′₀, params, others, times; noise_scale, target_pos) = b
 end
 
 
-function data_likelihood(states, others, observations; noise_scale)
+function data_likelihood(states, others, observations; noise_scale, check_dual=false)
     sum(let 
         s = states[i]
         s_prev = (i == 1) ? s : states[i-1]
-        logpdf(observation_dist(s, s_prev, others; noise_scale), observations[i])
+        v = logpdf(observation_dist(s, s_prev, others; noise_scale), observations[i])
+        if check_dual && SEDL.is_bad_dual(v)
+            @info "data_likelihood" i s v
+            @info "data_likelihood" others
+            @info "data_likelihood" distr = observation_dist(s, s_prev, others; noise_scale)
+            error("bad dual detected.")
+        end
+        v
     end for i in 1:length(states))
 end
 

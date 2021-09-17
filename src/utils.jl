@@ -4,8 +4,10 @@ export rotate2d, rotation2D, °
 
 using MacroTools: @capture
 using Cthulhu
+using ForwardDiff: Dual
 
-specific_elems(xs) = identity.(xs)
+specific_elems(xs::AbstractVector{T}) where T = 
+    Base.isconcretetype(T) ? xs : identity.(xs)
 
 count_len(iters) = count(_ -> true, iters)
 
@@ -195,3 +197,30 @@ end
 function nested_get!(f, d::Dict{K, V}, k::K) where {K, V}
     get!(f, d, k)
 end
+
+function is_bad_dual(v::Dual)
+    isfinite(v.value) && abs(v.value) < 1e10 && any(isnan, v.partials)
+end
+is_bad_dual(v::AbstractVector) = any(is_bad_dual, v)
+is_bad_dual(v::Real) = false
+
+"""
+Convert any `NaN` partial derivatives to zeros. 
+"""
+fix_nan_dual(v::Dual{Tag}) where {Tag} = let
+    if is_bad_dual(v) 
+        new_partials = ForwardDiff.Partials(nan_to_zero.(v.partials.values))
+        Dual{Tag}(v.value, new_partials)
+    else 
+        v
+    end
+end
+fix_nan_dual(v::Real) = v
+
+function nan_to_zero(v::R)::R where {R <: Real}
+    isnan(v) ? zero(v) : v
+end
+
+using Statistics: norm
+Base.show(io::IO, d::ForwardDiff.Dual) = 
+    print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")

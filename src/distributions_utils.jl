@@ -1,39 +1,10 @@
 export GDistr, DistrIterator
-export DistrWrapper, SVecDistr, SMvNormal
+export SMvNormal, SMvUniform, SUniform, SNormal
 
 import Distributions: rand, logpdf
 import Bijectors: AbstractBijector, bijector
+import StatsFuns
 
-"""
-Generalized distributions that support sampling (and evaluating the probability of) 
-structured data. 
-"""
-abstract type GDistr end
-
-struct DistrWrapper{D, F, Inv} <: GDistr
-    distr::D
-    sample_transform::F
-    sample_inv::Inv
-
-    DistrWrapper(
-        distr::D, 
-        sample_transform::F=identity,
-        sample_inv::Inv=identity,
-    ) where {D <: Union{Distribution, GDistr}, F, Inv} = 
-        new{D, F, Inv}(distr, sample_transform, sample_inv)
-end
-
-rand(rng::AbstractRNG, d::DistrWrapper) = rand(rng, d.distr) |> d.sample_transform
-logpdf(d::DistrWrapper, x) = logpdf(d.distr, d.sample_inv(x))
-bijector(d::DistrWrapper) = bijector(d.distr)  # this only works for simple sample_transform
-Base.show(io::IO, dw::DistrWrapper) =
-    print(io, "DistrWrapper(`$(dw.distr) |> $(dw.sample_transform)`)")
-
-
-SVecDistr(distr::Distribution{Multivariate}) = DistrWrapper(distr, to_svec)
-const SMvNormal = SVecDistr ∘ MvNormal
-const SNormal = DistrWrapper ∘ Normal
-const SUniform = DistrWrapper ∘ Uniform
 
 """
 A wrapper of a sequence of distributions. This can be used to sample or compute
@@ -76,21 +47,29 @@ julia> inv(di_bj)(di_bj(xs)) ≈ xs
 true
 ```
 """
-struct DistrIterator{Iter} <: GDistr
+struct DistrIterator{Iter}
     distributions::Iter
 
     DistrIterator(distributions::Iter) where Iter = begin
-        eltype(distributions) <: GDistr || throw(
-            ArgumentError("Expect an iterator of `GDistr`, but got $distributions"))
+        foreach(distributions) do d
+            d isa GDistr || throw(
+                ArgumentError("Expect value of type `$GDistr`, but got: $d"))
+        end
         new{Iter}(distributions)
     end
 end
-
 
 rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
     map(d -> rand(rng, d), diter.distributions)
 logpdf(diter::DistrIterator, xs) = 
     sum(logpdf(d, x) for (d, x) in zip(diter.distributions, xs))
+
+Base.show(io::IO, di::DistrIterator) = 
+    if di.distributions isa AbstractVector
+        print(io, "DistrIterator([$(join(di.distributions, ","))])")
+    else
+        print(io, "DistrIterator($(di.distributions))")
+    end
 
 """
 An iterator of bijectors, used to transform [`DistrIterator`](@ref).
@@ -112,4 +91,69 @@ end
 
 function Bijectors.inv(bit::BijectorIterator)
     BijectorIterator(inv.(bit.bijectors))
+end
+
+"""
+Distributions that returns static vectors.
+"""
+abstract type StaticDistr end
+
+"""
+Generalized distributions that support sampling (and evaluating the probability of) 
+structured data. 
+"""
+const GDistr = Union{Distribution, StaticDistr, DistrIterator}
+
+SMvNormal(μ::AbstractVector, σ::Real) = let 
+    n = length(μ)
+    SMvNormal(SVector{n}(μ), SVector{n}(σ for _ in 1:n))
+end
+SMvNormal(μ::AbstractVector, σ::AbstractVector) = let 
+    n = length(μ)
+    @assert length(σ) == n
+    SMvNormal(SVector{n}(μ), SVector{n}(σ))
+end
+SMvNormal(μ::SVector{n}, σ::SVector{n}) where n = let
+    normals = SNormal.(μ, σ)
+    DistrIterator(normals)
+end
+
+const SNormal = Normal
+const SUniform = Uniform
+
+struct SMvUniform{n, T} <: StaticDistr
+    uniforms::StaticVector{n, Uniform{T}}
+end
+
+SMvUniform(ranges::Tuple{Real, Real}...) = let
+    uniforms = map(ranges) do (l, u) 
+        SUniform(l, u)
+    end
+    SMvUniform(SVector{length(ranges)}(uniforms))
+end
+
+rand(rng::Random.AbstractRNG, d::SMvUniform) = let
+    map(d -> rand(rng, d), d.uniforms)
+end
+
+logpdf(d::SMvUniform, xs) =
+    sum(logpdf(d, x) for (d, x) in zip(d.uniforms, xs))
+
+function Bijectors.bijector(d::SMvUniform)
+    BijectorIterator(bijector.(d.uniforms))
+end
+
+# This fixes the numerical error when y is a Dual and has Inf partial derivatives.
+function Bijectors.truncated_invlink(y, a, b)
+    lowerbounded, upperbounded = isfinite(a), isfinite(b)
+    v = if lowerbounded && upperbounded
+        (b - a) * StatsFuns.logistic(y) + a
+    elseif lowerbounded
+        exp(y) + a
+    elseif upperbounded
+        b - exp(y)
+    else
+        y
+    end
+    fix_nan_dual(v)
 end

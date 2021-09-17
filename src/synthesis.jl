@@ -199,7 +199,7 @@ function map_synthesis(
     program_logp::Function,
     data_likelihood::Function;
     evals_per_program::Int = 10,
-    trails_per_eval::Int = 10,
+    trials_per_eval::Int = 10,
     optim_options = Optim.Options(),
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
     check_gradient=false,
@@ -247,9 +247,10 @@ function map_synthesis(
     function evaluate((comps, f_x′′))
         local solutions = []
         local optimize_times = Float64[]
+        local optimize_iters = Int[]
         local errors = []
         for _ in 1:evals_per_program
-            for _ in 1:trails_per_eval
+            for _ in 1:trials_per_eval
                 try
                     timed_r = @ltimed map_trajectory(
                         x₀_dist, x′₀_dist, f_x′′, prior_dists, 
@@ -261,6 +262,7 @@ function map_synthesis(
                     else
                         push!(solutions, timed_r.value)
                         push!(optimize_times, timed_r.time)
+                        push!(optimize_iters, timed_r.value.iters)
                         break # successfully evaluated
                     end
                 catch err
@@ -287,7 +289,7 @@ function map_synthesis(
         logp = sol.logp + program_logp(comps)
         (; status= :success,
             result=(; logp, f_x′′, MAP_est),
-            optimize_times)
+            optimize_times, optimize_iters)
     end
 
     # blas_threads = BLAS.get_num_threads()
@@ -310,9 +312,12 @@ function map_synthesis(
     all_times = succeeded |> Map(r -> r.optimize_times) |> collect
     first_opt_time, mean_opt_time = 
         (f.(all_times) |> to_measurement for f in (first, mean))
+    mean_opt_iters = succeeded |> Map(r -> mean(r.optimize_iters)) |> to_measurement
+    opt_success_rate = (succeeded |> Map(r -> length(r.optimize_times)/evals_per_program) 
+        |> to_measurement)
 
     stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
-        prog_compile_time, first_opt_time, mean_opt_time)
+        prog_compile_time, first_opt_time, mean_opt_time, mean_opt_iters, opt_success_rate)
     MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
@@ -338,6 +343,7 @@ function map_trajectory(
 )
     x_bj, x′_bj, p_bj = (ds -> map(bijector, values(ds))).((x₀_dist, x′₀_dist, params_dist))
     x_inv, x′_inv, p_inv = (bs -> map(inv, bs)).((x_bj, x′_bj, p_bj))
+    actions = specific_elems(actions) # important for type stability
     
     x_guess = zipmap(x_bj, map(rand, x₀_dist))
     x′_guess = zipmap(x′_bj, map(rand, x′₀_dist))
@@ -356,13 +362,13 @@ function map_trajectory(
         prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
         dl = data_likelihood(traj, p)
         v = -(prior + dl)
-        if is_bad_dual(v)
+        if isnan(v) || is_bad_dual(v)
             @info "loss computing" vec
             @info "loss computing" params=p
             @info "loss computing" traj
             @info "loss computing" prior
             @info "loss computing" likelihood=dl
-            error("bad loss derivatives detected: loss = $v")
+            error("bad loss detected: loss = $v")
         end
         v
     end
@@ -371,14 +377,15 @@ function map_trajectory(
     # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
 
     sol = optimize_no_tag(loss, vec_guess, optim_options)
+    iters = Optim.iterations(sol)
     if !Optim.converged(sol)
         @warn "Optim not converged." f_x′′ sol
-    elseif Optim.iterations(sol) <= 1
-        @warn "Optim iterations too small." iterations=Optim.iterations(sol) sol
+    elseif iters <= 1
+        @warn "Optim iterations too small." iterations=iters sol
     end
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
     logp = -Optim.minimum(sol)
-    (;params, traj, x₀, x′₀, logp)
+    (; traj, params, x₀, x′₀, logp, iters)
 end
 
 
@@ -410,7 +417,7 @@ function simulate(
 ) where {x_keys, x′_keys, X}
     i_ref = Ref(1)
     next_time_action!() = begin
-        i = i_ref[]
+        i = i_ref[]::Int
         i_ref[] += 1
         times[i], actions[i]
     end

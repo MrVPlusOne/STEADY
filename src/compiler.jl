@@ -54,7 +54,7 @@ efficiently executed.
 Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile(
-    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv; check_gradient=false
 )::CompiledFunc
     function compile_body(v::Var)
         e = Expr(:(.), :args, QuoteNode(v.name))
@@ -66,7 +66,18 @@ function compile(
         local args = compile_body.(call.args)
         local rtype = shape_env[call.type]
         local e = Expr(:call, f, args...)
-        :($e::$rtype)
+        if check_gradient
+            quote
+                v = e::$rtype
+                is_bad_dual(v) && let 
+                    args = $(Expr(:call, :tuple, args...))
+                    error("Bad dual detected. \nf=$f\nargs=$args")
+                end
+                v
+            end
+        else 
+            :($e::$rtype)
+        end
     end
 
     body_ex = compile_body(prog)::Expr
