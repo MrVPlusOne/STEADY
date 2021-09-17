@@ -199,8 +199,10 @@ function map_synthesis(
     program_logp::Function,
     data_likelihood::Function;
     evals_per_program::Int = 10,
+    trails_per_eval::Int = 10,
     optim_options = Optim.Options(),
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
+    check_gradient=false,
 )::MapSynthesisResult
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
@@ -216,7 +218,7 @@ function map_synthesis(
         output_names::Tuple{Vararg{Symbol}},
     ) = begin
         # TODO: Check the inferred return types 
-        funcs = map(comp -> compile(comp, shape_env, comp_env), comps)
+        funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
         ast = (; (=>).((v.name for v in sketch.holes), comps)...)
         julia = Expr(:tuple, (x -> x.julia).(funcs))
         f(input) = begin
@@ -247,24 +249,27 @@ function map_synthesis(
         local optimize_times = Float64[]
         local errors = []
         for _ in 1:evals_per_program
-            try
-                timed_r = @ltimed map_trajectory(
-                    x₀_dist, x′₀_dist, f_x′′, prior_dists, 
-                    times, actions, data_likelihood, 
-                    optim_options,
-                )
-                if isnan(timed_r.value.logp)
-                    push!(errors, ErrorException("logp = NaN."))
-                else
-                    push!(solutions, timed_r.value)
-                    push!(optimize_times, timed_r.time)
-                end
-            catch err
-                if err isa ArgumentError || err isa DomainError
-                    push!(errors, err)
-                else
-                    @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
-                    rethrow()
+            for _ in 1:trails_per_eval
+                try
+                    timed_r = @ltimed map_trajectory(
+                        x₀_dist, x′₀_dist, f_x′′, prior_dists, 
+                        times, actions, data_likelihood, 
+                        optim_options,
+                    )
+                    if isnan(timed_r.value.logp)
+                        push!(errors, ErrorException("logp = NaN."))
+                    else
+                        push!(solutions, timed_r.value)
+                        push!(optimize_times, timed_r.time)
+                        break # successfully evaluated
+                    end
+                catch err
+                    if err isa ArgumentError || err isa DomainError
+                        push!(errors, err)
+                    else
+                        @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
+                        rethrow()
+                    end
                 end
             end
         end
@@ -346,10 +351,19 @@ function map_trajectory(
         simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
     end
     loss = (vec) -> let
+        is_bad_dual(vec) && error("Bad dual in loss input vec: $vec")
         traj, (x₀, x′₀, p) = vec_to_traj(vec)
         prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
-        v = -(prior + data_likelihood(traj, p))
-        is_bad_dual(v) && error("bad loss derivatives detected: loss = $v")
+        dl = data_likelihood(traj, p)
+        v = -(prior + dl)
+        if is_bad_dual(v)
+            @info "loss computing" vec
+            @info "loss computing" params=p
+            @info "loss computing" traj
+            @info "loss computing" prior
+            @info "loss computing" likelihood=dl
+            error("bad loss derivatives detected: loss = $v")
+        end
         v
     end
     vec_guess::Vector{Float64} = vcat(
@@ -367,11 +381,6 @@ function map_trajectory(
     (;params, traj, x₀, x′₀, logp)
 end
 
-
-function is_bad_dual(v::ForwardDiff.Dual)
-    isfinite(v.value) && any(isnan, v.partials)
-end
-is_bad_dual(v) = false
 
 function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real where ks
     sum(logpdf.(values(dist), values(v)))
