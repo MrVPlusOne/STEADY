@@ -8,8 +8,8 @@ using StaticArrays
 ## generate data
 Random.seed!(123)
 
-noise_scale = 0.01
-times = collect(0.0:0.1:20.0)
+noise_scale = 1.0
+times = collect(0.0:0.1:5)
 params = (
     drag = 0.1,
     mass = 1.5,
@@ -27,9 +27,9 @@ landmarks = [
 others = (landmarks = landmarks,)
 target_pos = @SVector[0.0, 0.0]
 x₀ = (pos=@SVector[-5, -4.0], θ=45°,)
-x₀′ = (pos′=@SVector[0.25, 0.1], θ′=-5°,)
-ex_data = Rocket2D.generate_data(x₀, x₀′, params, others, times; noise_scale, target_pos)
-traj_plot = Rocket2D.plot_data(ex_data, "Truth")
+x′₀ = (pos′=@SVector[0.25, 0.1], θ′=-5°,)
+ex_data = Rocket2D.generate_data(x₀, x′₀, params, others, times; noise_scale, target_pos)
+Rocket2D.plot_data(ex_data, "Truth") |> display
 ## program enumeration
 shape_env = ℝenv()
 comp_env = ComponentEnv()
@@ -41,6 +41,11 @@ components_vec2!(comp_env; can_grow)
 
 vdata = Rocket2D.variable_data(n_landmarks, x₀)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps); init=0) 
+to_distribution(vdata)
+prior_p = logpdf(to_distribution(vdata), (;x₀, x′₀, params, others))
+if !isfinite(prior_p)
+    error("prior_p = $prior_p, some value may be out of its support.")
+end
 
 # sketch = no_sketch(vdata.state′′_vars)
 sketch = Rocket2D.ground_truth_sketch()
@@ -52,7 +57,7 @@ senum = synthesis_enumeration(
 )
 display(senum)
 ## perform MAP synthesis
-syn_result = @time let
+syn_result = let
     observations = ex_data.observations
     map_synthesis(
         senum,
@@ -60,18 +65,19 @@ syn_result = @time let
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Rocket2D.data_likelihood(states, params, observations; noise_scale), 
-        evals_per_program=20,
+        evals_per_program=1,
+        trials_per_eval=1,
         optim_options = Optim.Options(x_abstol=1e-3),
         n_threads=1,
     )
-end
+end;
 display(syn_result)
 show_top_results(syn_result, 5)
-##
 map_data = syn_result.sorted_results[1].MAP_est
-Rocket2D.plot_data!(traj_plot, map_data, "Estimate") |> display
+let 
+    p = Rocket2D.plot_data(ex_data, "Truth")
+    Rocket2D.plot_data!(p, map_data, "Estimate") |> display
+end
 
 syn_result.errored_programs
 ##
-
-

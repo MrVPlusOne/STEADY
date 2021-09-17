@@ -17,17 +17,24 @@ action_vars() = [Power]
 param_vars() = [Drag, Mass]
 
 variable_data() = VariableData(
-    states = Dict(
+    states = OrderedDict(
         Pos => (SNormal(0.0, 0.01), SNormal(0.0, 1.0)),
     ),
-    dynamics_params = Dict(
+    dynamics_params = OrderedDict(
         Mass => SUniform(0.5, 5.0),
         Drag => SUniform(0.0, 1.0),
     ),
-    others = Dict(
+    others = OrderedDict(
         Wall.name => SNormal(25.0, 25.0),
     ),
 )
+
+function data_logp((; x₀, x₀′, params, others), vdata::VariableData)
+    map(pairs(x₀)) do (k, v)
+        vdata.states
+    end
+
+end
 
 acceleration_f((; f, drag, mass, pos′)) = begin
     ((f - drag * pos′) / mass,)

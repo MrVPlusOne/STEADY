@@ -10,6 +10,8 @@ using AutoHashEquals
 using MacroTools: @forward
 using Formatting: format
 using StaticArrays
+using DataStructures: OrderedDict
+export OrderedDict
 using UnPack
 using ProgressLogging
 import Random

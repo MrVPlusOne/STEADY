@@ -31,16 +31,26 @@ position of the camera.
 """
 @kwdef(
 struct VariableData
-    states::Dict{Var, Tuple{GDistr, GDistr}}  
-    dynamics_params::Dict{Var, GDistr}
+    states::OrderedDict{Var, Tuple{GDistr, GDistr}}  
+    dynamics_params::OrderedDict{Var, GDistr}
     # Should map each symbol to a value that supports the trait `Is{GDistr}`
-    others::Dict{Symbol, GDistr}  
+    others::OrderedDict{Symbol, GDistr}  
     t_unit::PUnit=PUnits.Time
     state_vars::Vector{Var} = keys(states) |> collect
     state′_vars::Vector{Var} = derivative.(state_vars, Ref(t_unit))
     state′′_vars::Vector{Var} = derivative.(state′_vars, Ref(t_unit))
 end)
 
+to_distribution(vdata::VariableData) = let
+    (; state_vars) = vdata
+    all_dists = (
+        x₀ = (;(s.name => vdata.states[s][1] for s in state_vars)...),
+        x′₀ = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...),
+        params = (;(v.name => dist for (v, dist) in vdata.dynamics_params)...),
+        others = (;(name => dist for (name, dist) in vdata.others)...),
+    )
+    DistrIterator(map(DistrIterator, all_dists))
+end
 
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
     check_type(var, value) = begin
@@ -58,15 +68,6 @@ _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
         check_type(v, rand(d))
     end
 end
-
-Base.rand(vdata::VariableData) = begin
-    x₀ = (;(v.name => rand(dist) for (v, (dist, _)) in vdata.states)...)
-    x′₀ = (;(derivative(v.name) => rand(dist) for (v, (_, dist)) in vdata.states)...)
-    params = (;(v.name => rand(dist) for (v, dist) in vdata.dynamics_params)...)
-    others = (;vdata.others...)
-    (; x₀, x′₀, params, others)
-end
-
 
 export SynthesisEnumerationResult, synthesis_enumeration
 
@@ -238,11 +239,7 @@ function map_synthesis(
         end
     end
 
-    x₀_dist = (;(s.name => vdata.states[s][1] for s in state_vars)...)
-    x′₀_dist = (;(derivative(s.name) => vdata.states[s][2] for s in state_vars)...)
-    params_dist = (;(p.name => vdata.dynamics_params[p] for p in param_vars)...)
-    others_dist = (;(name => dist for (name, dist) in vdata.others)...)
-    prior_dists = merge(params_dist, others_dist)
+    prior_dists = to_distribution(vdata)
 
     function evaluate((comps, f_x′′))
         local solutions = []
@@ -253,7 +250,7 @@ function map_synthesis(
             for _ in 1:trials_per_eval
                 try
                     timed_r = @ltimed map_trajectory(
-                        x₀_dist, x′₀_dist, f_x′′, prior_dists, 
+                        f_x′′, prior_dists, 
                         times, actions, data_likelihood, 
                         optim_options,
                     )
@@ -266,7 +263,7 @@ function map_synthesis(
                         break # successfully evaluated
                     end
                 catch err
-                    if err isa ArgumentError || err isa DomainError
+                    if err isa Union{OverflowError, DomainError}
                         push!(errors, err)
                     else
                         @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
@@ -281,8 +278,8 @@ function map_synthesis(
         end
         sol = solutions |> max_by(s->s.logp)
         MAP_est = (
-            params=subtuple(sol.params, keys(params_dist)),
-            others=subtuple(sol.params, keys(others_dist)),
+            sol.params,
+            sol.others,
             states=sol.traj,
             logp=sol.logp,
         )
@@ -332,39 +329,34 @@ end
 
 export map_trajectory
 function map_trajectory(
-    x₀_dist::NamedTuple,
-    x′₀_dist::NamedTuple,
     f_x′′::Function,
-    params_dist::NamedTuple,
+    prior_dist::DistrIterator{<: NamedTuple{(:x₀, :x′₀, :params, :others)}},
     times::AbstractVector,
     actions::TimeSeries{<:NamedTuple},
     data_likelihood,
     optim_options::Optim.Options,
 )
-    x_bj, x′_bj, p_bj = (ds -> map(bijector, values(ds))).((x₀_dist, x′₀_dist, params_dist))
-    x_inv, x′_inv, p_inv = (bs -> map(inv, bs)).((x_bj, x′_bj, p_bj))
+    bj = bijector(prior_dist)
+    bj_inv = inv(bj)
     actions = specific_elems(actions) # important for type stability
     
-    x_guess = zipmap(x_bj, map(rand, x₀_dist))
-    x′_guess = zipmap(x′_bj, map(rand, x′₀_dist))
-    params_guess = zipmap(p_bj, map(rand, params_dist))
+    guess = rand(prior_dist)
     
-    x_size = n_numbers(x_guess)
     vec_to_traj = (vec) -> let
-        local x₀ = zipmap(x_inv, structure_from_vec(x_guess, vec))
-        local x′₀ = zipmap(x′_inv, structure_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
-        local p = zipmap(p_inv, structure_from_vec(params_guess, @views vec[2x_size+1:end]))
-        simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
+        local (; x₀, x′₀, params, others) = bj_inv(structure_from_vec(guess, vec))
+        local p = merge(params, others)
+        simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, params, others)
     end
     loss = (vec) -> let
         is_bad_dual(vec) && error("Bad dual in loss input vec: $vec")
-        traj, (x₀, x′₀, p) = vec_to_traj(vec)
-        prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
-        dl = data_likelihood(traj, p)
+        local traj, values = vec_to_traj(vec)
+        prior = logpdf(prior_dist, values)
+        dl = data_likelihood(traj, values.others)
         v = -(prior + dl)
         if isnan(v) || is_bad_dual(v)
             @info "loss computing" vec
-            @info "loss computing" params=p
+            @info "loss computing" values.params
+            @info "loss computing" values.others
             @info "loss computing" traj
             @info "loss computing" prior
             @info "loss computing" likelihood=dl
@@ -372,10 +364,9 @@ function map_trajectory(
         end
         v
     end
-    vec_guess::Vector{Float64} = vcat(
-        structure_to_vec(x_guess), structure_to_vec(x′_guess), structure_to_vec(params_guess))
-    # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
 
+    vec_guess::Vector{Float64} = structure_to_vec(guess)
+    # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
     sol = optimize_no_tag(loss, vec_guess, optim_options)
     iters = Optim.iterations(sol)
     if !Optim.converged(sol)
@@ -383,9 +374,11 @@ function map_trajectory(
     elseif iters <= 1
         @warn "Optim iterations too small." iterations=iters sol
     end
-    traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
-    logp = -Optim.minimum(sol)
-    (; traj, params, x₀, x′₀, logp, iters)
+    let
+        traj, values = vec_to_traj(Optim.minimizer(sol))
+        logp = -Optim.minimum(sol)
+        (; traj, values.params, values.others, logp, iters)
+    end
 end
 
 
@@ -496,6 +489,9 @@ function structure_to_vec!(arr, v::Union{Tuple, NamedTuple})
     function rec(v::AbstractVector)
         foreach(rec, v)
     end
+    function rec(v::Union{Tuple, NamedTuple})
+        foreach(rec, v)
+    end
     foreach(rec, v)
     arr
 end
@@ -508,12 +504,10 @@ julia> n_numbers((0.0, @SVector[0.0, 0.0]))
 3
 ```
 """
-function n_numbers(v::Union{Tuple, NamedTuple})
-    count(::Real) = 1
-    count(v::AbstractVector{<:Real}) = length(v)
-    count(v::AbstractVector) = sum(count, v)
-    sum(map(count, v))
-end
+n_numbers(v::Union{Tuple, NamedTuple}) = sum(n_numbers, v)
+n_numbers(::Real) = 1
+n_numbers(v::AbstractVector{<:Real}) = length(v)
+n_numbers(v::AbstractVector) = sum(n_numbers, v)
 
 function promote_numbers_type(v::Union{Tuple, NamedTuple})
     rec(x::Real) = typeof(x)
@@ -541,7 +535,7 @@ end
 _read_structure(x, i::Ref{Int}, vec) = let
     if x isa Real
         vec[i[]+=1]
-    elseif x isa AbstractVector
+    elseif x isa Union{AbstractVector, Tuple, NamedTuple}
         map(x) do x′
             _read_structure(x′, i, vec)
         end

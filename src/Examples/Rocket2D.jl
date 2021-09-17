@@ -31,21 +31,38 @@ landmark_dist(n) = begin
 end
 
 variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
-    states = Dict(
+    states = OrderedDict(
         Pos => (SMvNormal(pos, x₀_σ), SMvNormal([0.0, 0.0], 1.0)),
         Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
     ),
-    dynamics_params = Dict(
+    dynamics_params = OrderedDict(
         Drag => SUniform(0.001, 1.0),
         Mass => SUniform(0.5, 5.0),
         RotMass => SUniform(0.1, 5.0),
         RotDrag => SUniform(0.001, 1.0),
         RocketLength => SUniform(0.1,1.0),
-        Gravity => SMvUniform((-0.1, 0.1), (0.1, 3.0)),
+        Gravity => SMvNormal([0.0, -1.0], [0.2, 0.5]),
     ),
-    others = Dict(
+    others = OrderedDict(
         :landmarks => landmark_dist(n_landmarks)),
 )
+
+# variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
+#     states = OrderedDict(
+#         Pos => (SMvNormal(pos, x₀_σ), SMvNormal([0.0, 0.0], 1.0)),
+#         Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
+#     ),
+#     dynamics_params = OrderedDict(
+#         Drag => SNormal(0.1, 0.5),
+#         Mass => Exponential(1.0), # SUniform(0.5, 5.0),
+#         RotMass => Exponential(1.0), # SUniform(0.1, 5.0),
+#         RotDrag => SNormal(0.1, 0.5), # SUniform(0.001, 1.0),
+#         RocketLength => Exponential(1.0), # SUniform(0.1,1.0),
+#         Gravity => SMvNormal([0.0, -1.0], [0.1, 1.0]), # SMvUniform((-0.1, 0.1), (0.1, 3.0)),
+#     ),
+#     others = OrderedDict(
+#         :landmarks => landmark_dist(n_landmarks)),
+# )
 
 limit_control((; thrust, turn)) =
     (thrust = clamp(thrust, 0, 5.0), turn=clamp(turn, -2.0, 2.0))

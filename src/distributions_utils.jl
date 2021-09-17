@@ -71,6 +71,8 @@ Base.show(io::IO, di::DistrIterator) =
         print(io, "DistrIterator($(di.distributions))")
     end
 
+Base.show(io::IO, ::Type{<:DistrIterator}) = print(io, "DistrIterator{...}")
+
 """
 An iterator of bijectors, used to transform [`DistrIterator`](@ref).
 """
@@ -86,11 +88,11 @@ end
 (bit::BijectorIterator)(x) = zipmap(bit.bijectors, x)
 
 function Bijectors.bijector(di::DistrIterator)
-    BijectorIterator(bijector.(di.distributions))
+    BijectorIterator(map(bijector, di.distributions))
 end
 
 function Bijectors.inv(bit::BijectorIterator)
-    BijectorIterator(inv.(bit.bijectors))
+    BijectorIterator(map(inv, bit.bijectors))
 end
 
 """
@@ -118,7 +120,10 @@ SMvNormal(μ::SVector{n}, σ::SVector{n}) where n = let
     DistrIterator(normals)
 end
 
-const SNormal = Normal
+SNormal(μ, σ) = let 
+    σ >= zero(σ) || throw(OverflowError("Normal σ = $σ"))
+    Normal(μ, σ)
+end
 const SUniform = Uniform
 
 struct SMvUniform{n, T} <: StaticDistr
