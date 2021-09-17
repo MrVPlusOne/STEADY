@@ -232,4 +232,5 @@ vec2_rules!(rules; can_grow) = begin
 end
 
 mk_R2(x, y) = @SVector [x, y]
-norm_R2(x) = sqrt(x[1]^2 + x[2]^2)
+# this makes sure that gradient exists when norm = 0.
+norm_R2(x) = sqrt(x[1]^2 + x[2]^2+eps(x[1]))

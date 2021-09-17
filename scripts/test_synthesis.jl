@@ -52,24 +52,13 @@ let
     @df time_vs_size plot(:size, :compile_time)
 end
 ## test simulation
-@time let
-    s = (x=1.0,)
-    s′ = (x′=0.0,)
-    params = (a = 1.0,)
-    times = range(0, 10, length=100)
-    actions = map(_ -> (f=2.0,), times)
-    f_s′′= ((args) -> (-1 * args.a * args.x),)
-    simulate(s, s′, f_s′′, params, times, actions)
-end
-
 gen_traj(N) = begin
     s = (x=1.0,)
     s′ = (x′=0.0,)
     params = (a = 1.0,)
     times = range(0, 10, length=N) |> collect
     actions = map(_ -> (f=2.0,), times)
-    acc = CompiledFunc(x, :(1+1), (args) -> (-args.a * args.x - 0.1 * args.x′))
-    f_s′′= (acc,)
+    f_s′′= ((args) -> (x′′ = -1 * args.a * args.x, ))
     simulate(s, s′, f_s′′, params, times, actions) |> specific_elems
 end
 
@@ -83,12 +72,12 @@ end
 ##
 # test map_estimate
 compute_solution(; only_prior::Bool, N=200) = begin
-    s = (x=Normal(1.0),)
-    s′ = (x′=Normal(0.0),)
-    params = DistrIterator((drag = Uniform(0.0, 0.5),))
+    s = (x=SNormal(1.0),)
+    s′ = (x′=SNormal(0.0),)
+    params = (drag = SUniform(0.0, 0.5),)
     times = range(0, 10, length=N)
     actions = map(_ -> (f=2.0,), times)
-    f_s′′= ((args) -> (-args.x - args.drag * args.x′),)
+    f_s′′= (args) -> (x′′= -args.x - args.drag * args.x′,)
     function likelihood(traj, p)
         if only_prior
             0.0
@@ -123,12 +112,13 @@ components_scalar_arithmatic!(comp_env, can_grow=false)
 # components_transcendentals!(comp_env)
 
 vdata = Car1D.variable_data()
+sketch = no_sketch(vdata.state′′_vars)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
 pruner = RebootPruner(rules=comp_env.rules)
 # pruner = NoPruner()
 senum = synthesis_enumeration(
-    vdata, Car1D.action_vars(), comp_env, 7, pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 3; pruner)
 if :reports in propertynames(pruner)
     display(total_time_report(pruner.reports))
 end

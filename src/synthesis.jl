@@ -263,7 +263,7 @@ function map_synthesis(
                 if err isa ArgumentError || err isa DomainError
                     push!(errors, err)
                 else
-                    @error "f_x′′ = $(f_x′′)" 
+                    @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
                     rethrow()
                 end
             end
@@ -339,28 +339,39 @@ function map_trajectory(
     params_guess = zipmap(p_bj, map(rand, params_dist))
     
     x_size = n_numbers(x_guess)
-    function vec_to_traj(vec) 
+    vec_to_traj = (vec) -> let
         local x₀ = zipmap(x_inv, structure_from_vec(x_guess, vec))
         local x′₀ = zipmap(x′_inv, structure_from_vec(x′_guess, @views vec[x_size+1:2x_size]))
         local p = zipmap(p_inv, structure_from_vec(params_guess, @views vec[2x_size+1:end]))
         simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, p)
     end
-    function loss(vec)
+    loss = (vec) -> let
         traj, (x₀, x′₀, p) = vec_to_traj(vec)
         prior = logpdf(x₀_dist, x₀) + logpdf(x′₀_dist, x′₀) + logpdf(params_dist, p)
-        -(prior + data_likelihood(traj, p))
+        v = -(prior + data_likelihood(traj, p))
+        is_bad_dual(v) && error("bad loss derivatives detected: loss = $v")
+        v
     end
     vec_guess::Vector{Float64} = vcat(
         structure_to_vec(x_guess), structure_to_vec(x′_guess), structure_to_vec(params_guess))
     # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
+
     sol = optimize_no_tag(loss, vec_guess, optim_options)
     if !Optim.converged(sol)
         @warn "Optim not converged." f_x′′ sol
+    elseif Optim.iterations(sol) <= 1
+        @warn "Optim iterations too small." iterations=Optim.iterations(sol) sol
     end
     traj, (x₀, x′₀, params) = vec_to_traj(Optim.minimizer(sol))
     logp = -Optim.minimum(sol)
     (;params, traj, x₀, x′₀, logp)
 end
+
+
+function is_bad_dual(v::ForwardDiff.Dual)
+    isfinite(v.value) && any(isnan, v.partials)
+end
+is_bad_dual(v) = false
 
 function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real where ks
     sum(logpdf.(values(dist), values(v)))
@@ -504,16 +515,23 @@ function structure_to_vec(v::Union{Tuple, NamedTuple})
 end
 
 function structure_from_vec(template::Tuple, vec)::Tuple
-    i::Int = 0
-    read(::Real) = begin
-        vec[i+=1]
-    end
-    read(::SVector{n, <:Real}) where n = begin
-        SVector{n}(read(0.0) for _ in Base.OneTo(n))
-    end
-    read(v::AbstractVector) = map(read, v)
+    i::Ref{Int} = Ref(0)
 
-    read.(template)
+    map(template) do x
+        _read_structure(x, i, vec)
+    end
+end
+
+_read_structure(x, i::Ref{Int}, vec) = let
+    if x isa Real
+        vec[i[]+=1]
+    elseif x isa AbstractVector
+        map(x) do x′
+            _read_structure(x′, i, vec)
+        end
+    else
+        error("don't know how to handle the template: $x")
+    end
 end
 
 function structure_from_vec(template::NamedTuple{S}, vec)::NamedTuple{S} where S

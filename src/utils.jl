@@ -3,6 +3,7 @@ export max_by, sort_by
 export rotate2d, rotation2D, °
 
 using MacroTools: @capture
+using Cthulhu
 
 specific_elems(xs) = identity.(xs)
 
@@ -124,7 +125,7 @@ NamedTuple.
     NamedTuple{keys(xs)}(t)
 end
 
-function zipmap(fs, xs::Vector)
+function zipmap(fs, xs::AbstractVector)
     @assert length(fs) == length(xs) "Need the same number of functions and values"
     map(eachindex(xs)) do i
         fs[i](xs[i])
@@ -160,6 +161,10 @@ function optimize_no_tag(loss, x₀, optim_options)
     end
     Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
 end
+
+# function optimize_no_tag(loss, x₀, optim_options)
+#     Optim.optimize(loss, x₀, Optim.LBFGS(), optim_options, autodiff=:forward)
+# end
 
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
 
