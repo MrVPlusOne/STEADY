@@ -37,7 +37,7 @@ function data_logp((; x₀, x₀′, params, others), vdata::VariableData)
 end
 
 acceleration_f((; f, drag, mass, pos′)) = begin
-    ((f - drag * pos′) / mass,)
+    (pos′′ = (f - drag * pos′) / mass,)
 end
 
 sensor_max_range = 5.0

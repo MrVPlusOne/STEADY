@@ -129,9 +129,7 @@ end
 
 function zipmap(fs, xs::AbstractVector)
     @assert length(fs) == length(xs) "Need the same number of functions and values"
-    map(eachindex(xs)) do i
-        fs[i](xs[i])
-    end
+    map((f, x) -> f(x), fs, xs)
 end
 
 subtuple(xs::NamedTuple, keys::Tuple) = begin

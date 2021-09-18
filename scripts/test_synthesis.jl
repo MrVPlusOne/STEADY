@@ -102,8 +102,8 @@ times = collect(range(0.0, 5.0, length=50))
 params = (drag=0.1, mass=1.5)
 others = (wall=7.0,)
 x₀ = (pos=0.0,)
-x₀′ = (pos′=0.5,)
-ex_data = Car1D.generate_data(x₀, x₀′, params, others, times; noise_scale)
+x′₀ = (pos′=0.5,)
+ex_data = Car1D.generate_data(x₀, x′₀, params, others, times; noise_scale)
 Car1D.plot_data(ex_data, "Truth")
 ## perform enumeration for synthesis
 shape_env = ℝenv()
@@ -112,6 +112,10 @@ components_scalar_arithmatic!(comp_env, can_grow=false)
 # components_transcendentals!(comp_env)
 
 vdata = Car1D.variable_data()
+prior_p = logpdf(to_distribution(vdata), (;x₀, x′₀, params, others))
+if !isfinite(prior_p)
+    error("prior_p = $prior_p, some value may be out of its support.")
+end
 sketch = no_sketch(vdata.state′′_vars)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
@@ -119,9 +123,6 @@ pruner = RebootPruner(rules=comp_env.rules)
 # pruner = NoPruner()
 senum = synthesis_enumeration(
     vdata, sketch, Car1D.action_vars(), comp_env, 3; pruner)
-if :reports in propertynames(pruner)
-    display(total_time_report(pruner.reports))
-end
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.by)#, explain=join(r.explain, " ; "))
     end
@@ -130,7 +131,7 @@ let rows = map(senum.enum_result.pruned) do r
 end
 display(senum)
 ## perform MAP sythesis
-syn_result = @time let 
+syn_result = let 
     observations = ex_data.observations
     map_synthesis(
         senum,
@@ -140,7 +141,7 @@ syn_result = @time let
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
-        n_threads=6,
+        n_threads=1,
     )
 end
 display(syn_result)

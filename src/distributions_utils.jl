@@ -62,7 +62,7 @@ end
 rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
     map(d -> rand(rng, d), diter.distributions)
 logpdf(diter::DistrIterator, xs) = 
-    sum(logpdf(d, x) for (d, x) in zip(diter.distributions, xs))
+    sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
 
 Base.show(io::IO, di::DistrIterator) = 
     if di.distributions isa AbstractVector

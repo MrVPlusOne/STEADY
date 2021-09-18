@@ -160,7 +160,7 @@ end
 
 
 function data_likelihood(states, others, observations; noise_scale, check_dual=false)
-    sum(let 
+    dl(i) = let 
         s = states[i]
         s_prev = (i == 1) ? s : states[i-1]
         v = logpdf(observation_dist(s, s_prev, others; noise_scale), observations[i])
@@ -171,7 +171,8 @@ function data_likelihood(states, others, observations; noise_scale, check_dual=f
             error("bad dual detected.")
         end
         v
-    end for i in 1:length(states))
+    end
+    sum(dl(i) for i in 1:length(states))
 end
 
 function plot_data!(p, ex_data, name::String; marker_len=1.0, marker_thining=10)

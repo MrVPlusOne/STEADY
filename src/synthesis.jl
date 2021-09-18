@@ -340,7 +340,8 @@ function map_trajectory(
     bj_inv = inv(bj)
     actions = specific_elems(actions) # important for type stability
     
-    guess = rand(prior_dist)
+    guess = bj(rand(prior_dist))
+    vec_guess::Vector{Float64} = structure_to_vec(guess)
     
     vec_to_traj = (vec) -> let
         local (; x₀, x′₀, params, others) = bj_inv(structure_from_vec(guess, vec))
@@ -365,7 +366,6 @@ function map_trajectory(
         v
     end
 
-    vec_guess::Vector{Float64} = structure_to_vec(guess)
     # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
     sol = optimize_no_tag(loss, vec_guess, optim_options)
     iters = Optim.iterations(sol)
@@ -442,11 +442,11 @@ function simulate(
 )::Nothing where {x_keys, x′_keys, X}
     common_keys = intersect(x_keys, x′_keys)
     @assert isempty(common_keys) "overlapping keys: $common_keys"
-    x′′_keys = derivative.(keys(x′₀))
+    x′′_keys = derivative.(x′_keys)
 
     acc(x, x′, action) = begin
         input = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′), action, params)
-        call_T(values ∘ NamedTuple{x′′_keys} ∘ f_x′′, input, X)
+        call_T(f_x′′, input, NamedTuple{x′′_keys, X}) |> values
     end
     to_named(x, x′) = merge(NamedTuple{x_keys}(x), NamedTuple{x′_keys}(x′))
 

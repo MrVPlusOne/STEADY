@@ -9,7 +9,7 @@ using StaticArrays
 Random.seed!(123)
 
 noise_scale = 1.0
-times = collect(0.0:0.1:5)
+times = collect(0.0:0.1:10)
 params = (
     drag = 0.1,
     mass = 1.5,
@@ -41,7 +41,6 @@ components_vec2!(comp_env; can_grow)
 
 vdata = Rocket2D.variable_data(n_landmarks, x₀)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps); init=0) 
-to_distribution(vdata)
 prior_p = logpdf(to_distribution(vdata), (;x₀, x′₀, params, others))
 if !isfinite(prior_p)
     error("prior_p = $prior_p, some value may be out of its support.")
@@ -65,12 +64,12 @@ syn_result = let
         ex_data.actions, ex_data.times, 
         prog_logp, 
         (states, params) -> Rocket2D.data_likelihood(states, params, observations; noise_scale), 
-        evals_per_program=1,
-        trials_per_eval=1,
-        optim_options = Optim.Options(x_abstol=1e-3),
+        evals_per_program=10,
+        trials_per_eval=5,
+        optim_options = Optim.Options(f_abstol=1e-3),
         n_threads=1,
     )
-end;
+end
 display(syn_result)
 show_top_results(syn_result, 5)
 map_data = syn_result.sorted_results[1].MAP_est
