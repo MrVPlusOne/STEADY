@@ -11,9 +11,9 @@ Random.seed!(123)
 noise_scale = 1.0
 times = collect(0.0:0.1:10)
 params = (
-    drag = 0.1,
     mass = 1.5,
     rot_mass = 1.0,
+    drag = 0.1,
     rot_drag = 0.2,
     length = 0.5,
     gravity = @SVector[0., -1.25],
@@ -66,7 +66,8 @@ syn_result = let
         (states, params) -> Rocket2D.data_likelihood(states, params, observations; noise_scale), 
         evals_per_program=10,
         trials_per_eval=5,
-        optim_options = Optim.Options(f_abstol=1e-3),
+        optim_options=Optim.Options(f_abstol=1e-3, outer_f_abstol=1e-3),
+        use_bijectors=false,
         n_threads=1,
     )
 end

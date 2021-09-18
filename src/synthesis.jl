@@ -202,6 +202,7 @@ function map_synthesis(
     evals_per_program::Int = 10,
     trials_per_eval::Int = 10,
     optim_options = Optim.Options(),
+    use_bijectors=true,
     n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
     check_gradient=false,
 )::MapSynthesisResult
@@ -252,7 +253,7 @@ function map_synthesis(
                     timed_r = @ltimed map_trajectory(
                         f_x′′, prior_dists, 
                         times, actions, data_likelihood, 
-                        optim_options,
+                        optim_options, use_bijectors,
                     )
                     if isnan(timed_r.value.logp)
                         push!(errors, ErrorException("logp = NaN."))
@@ -327,6 +328,8 @@ function transpose_series(
     end for t in 1:len)
 end
 
+const DebugMode = Ref(false)
+
 export map_trajectory
 function map_trajectory(
     f_x′′::Function,
@@ -335,18 +338,29 @@ function map_trajectory(
     actions::TimeSeries{<:NamedTuple},
     data_likelihood,
     optim_options::Optim.Options,
+    use_bijectors=true, # if false, will use box constrained optimization
 )
-    bj = bijector(prior_dist)
-    bj_inv = inv(bj)
     actions = specific_elems(actions) # important for type stability
-    
-    guess = bj(rand(prior_dist))
-    vec_guess::Vector{Float64} = structure_to_vec(guess)
+
+    guess = rand(prior_dist)
+    if use_bijectors
+        bj = bijector(prior_dist)
+        bj_inv = inv(bj)
+        guess_original = guess
+        use_bijectors && (guess = bj(guess_original))
+        @assert structure_to_vec(bj_inv(guess)) ≈ structure_to_vec(guess_original)
+    else
+        lower, upper = _compute_bounds(prior_dist)
+    end
+    guess_vec::Vector{Float64} = structure_to_vec(guess)
+    @assert structure_from_vec(guess, guess_vec) == guess
     
     vec_to_traj = (vec) -> let
-        local (; x₀, x′₀, params, others) = bj_inv(structure_from_vec(guess, vec))
+        values = structure_from_vec(guess, vec)
+        use_bijectors && (values = bj_inv(values))
+        local (; x₀, x′₀, params, others) = values
         local p = merge(params, others)
-        simulate(x₀, x′₀, f_x′′, p, times, actions), (; x₀, x′₀, params, others)
+        simulate(x₀, x′₀, f_x′′, p, times, actions), values
     end
     loss = (vec) -> let
         is_bad_dual(vec) && error("Bad dual in loss input vec: $vec")
@@ -355,6 +369,9 @@ function map_trajectory(
         dl = data_likelihood(traj, values.others)
         v = -(prior + dl)
         if isnan(v) || is_bad_dual(v)
+            DebugMode[] = true
+            data_likelihood(traj, values.others)
+            DebugMode[] = false
             @info "loss computing" vec
             @info "loss computing" values.params
             @info "loss computing" values.others
@@ -366,8 +383,11 @@ function map_trajectory(
         v
     end
 
-    # sol = Optim.optimize(loss, vec_guess, LBFGS(), optim_options; autodiff = :forward)
-    sol = optimize_no_tag(loss, vec_guess, optim_options)
+    if use_bijectors
+        sol = optimize_no_tag(loss, guess_vec, optim_options)
+    else
+        sol = optimize_bounded(loss, guess_vec, (lower, upper), optim_options)
+    end
     iters = Optim.iterations(sol)
     if !Optim.converged(sol)
         @warn "Optim not converged." f_x′′ sol
@@ -475,25 +495,39 @@ function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
     (x1, v1, a1)
 end
 
-function structure_to_vec!(arr, v::Union{Tuple, NamedTuple})
+function structure_to_vec!(arr, v::Union{AbstractVector, Tuple, NamedTuple})
     i = Ref(0)
-    function rec(r::Real)
-        arr[i[]+=1] = r
+    rec(r) = let
+        if r isa Real
+            arr[i[]+=1] = r
+        elseif r isa Union{AbstractVector, Tuple, NamedTuple}
+            foreach(rec, r)
+        end
         nothing
     end
-    function rec(v::AbstractVector{<:Real})
-        j = i[]+=1
-        arr[j:j+length(v)-1] .= v
-        nothing
-    end
-    function rec(v::AbstractVector)
-        foreach(rec, v)
-    end
-    function rec(v::Union{Tuple, NamedTuple})
-        foreach(rec, v)
-    end
-    foreach(rec, v)
+    rec(v)
+    @assert i[] == length(arr)
     arr
+end
+
+function _compute_bounds(prior_dist)
+    lower, upper = Float64[], Float64[]
+    rec(d) = let
+        if d isa UnivariateDistribution
+            (l, u) = Distributions.extrema(d)
+            push!(lower, l)
+            push!(upper, u)
+        elseif d isa DistrIterator
+            foreach(rec, d.distributions)
+        elseif d isa SMvUniform
+            foreach(rec, d.uniforms)
+        else
+            error("Don't know how to compute bounds for $d")
+        end
+        nothing
+    end
+    rec(prior_dist)
+    lower, upper
 end
 
 """

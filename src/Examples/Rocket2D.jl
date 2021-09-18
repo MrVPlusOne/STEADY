@@ -1,8 +1,8 @@
 module Rocket2D
 
 using ..SEDL
-using ..SEDL: ℝ, ℝ2, rotate2d, norm_R2, TimeSeries
-using ..SEDL: SMvNormal, SNormal, SUniform, SMvUniform
+using ..SEDL: ℝ, ℝ2, rotate2d, °, norm_R2, dir_R2, cross_R2, TimeSeries
+using ..SEDL: SMvNormal, SNormal, SUniform, SMvUniform, PertBeta, CircularNormal
 using StatsPlots
 using DataFrames
 using Distributions
@@ -36,33 +36,24 @@ variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
         Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
     ),
     dynamics_params = OrderedDict(
-        Drag => SUniform(0.001, 1.0),
         Mass => SUniform(0.5, 5.0),
         RotMass => SUniform(0.1, 5.0),
+        Drag => SUniform(0.001, 1.0),
         RotDrag => SUniform(0.001, 1.0),
         RocketLength => SUniform(0.1,1.0),
         Gravity => SMvNormal([0.0, -1.0], [0.2, 0.5]),
     ),
+    # dynamics_params = OrderedDict(
+    #     Mass => PertBeta(0.5, 1.0, 5.0),
+    #     RotMass => PertBeta(0.25, 1.0, 5.0),
+    #     Drag => PertBeta(0.001, 0.2, 1.),
+    #     RotDrag => PertBeta(0.001, 0.2, 1.),
+    #     RocketLength => PertBeta(0.1, 1.0, 2.0),
+    #     Gravity => SMvNormal([0.0, -1.0], [0.2, 0.5]),
+    # ),
     others = OrderedDict(
         :landmarks => landmark_dist(n_landmarks)),
 )
-
-# variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
-#     states = OrderedDict(
-#         Pos => (SMvNormal(pos, x₀_σ), SMvNormal([0.0, 0.0], 1.0)),
-#         Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
-#     ),
-#     dynamics_params = OrderedDict(
-#         Drag => SNormal(0.1, 0.5),
-#         Mass => Exponential(1.0), # SUniform(0.5, 5.0),
-#         RotMass => Exponential(1.0), # SUniform(0.1, 5.0),
-#         RotDrag => SNormal(0.1, 0.5), # SUniform(0.001, 1.0),
-#         RocketLength => Exponential(1.0), # SUniform(0.1,1.0),
-#         Gravity => SMvNormal([0.0, -1.0], [0.1, 1.0]), # SMvUniform((-0.1, 0.1), (0.1, 3.0)),
-#     ),
-#     others = OrderedDict(
-#         :landmarks => landmark_dist(n_landmarks)),
-# )
 
 limit_control((; thrust, turn)) =
     (thrust = clamp(thrust, 0, 5.0), turn=clamp(turn, -2.0, 2.0))
@@ -91,20 +82,29 @@ ground_truth_sketch() = begin
 end
 
 sensor_max_range = 10.0
-# function sensor_dist(s, landmarks; noise_scale)
-#     ranges = DistrIterator([SNormal(norm_R2(s.pos - l), 0.2noise_scale) for l in landmarks])
-#     bearings = DistrIterator([let 
-#         d = l - s.pos
-#         θ = atan(d[2], d[1])
-#         SNormal(θ - s.θ, 0.1noise_scale)  # relative angle
-#     end for l in landmarks])
-#     DistrIterator((; ranges, bearings))
-# end
-
-# simpler version for debugging
 function sensor_dist(s, landmarks; noise_scale)
-    DistrIterator([SMvNormal(l, 0.2noise_scale) for l in landmarks])
+    ranges = DistrIterator([SNormal(norm_R2(s.pos - l), 0.5noise_scale) for l in landmarks])
+    bearings = DistrIterator([let 
+        d = l - s.pos
+        if norm_R2(d) <= 0.001
+            Uniform(0, 2π)
+        else
+            θ = atan(d[2], d[1])
+            δ = θ - (s.θ +π/2)
+            CircularNormal(δ, noise_scale * 6°)
+        end
+    end for l in landmarks])
+    if SEDL.DebugMode[]
+        @info sensor_dist ranges
+        @info sensor_dist bearings
+    end
+    DistrIterator((; ranges, bearings))
 end
+
+# # simpler version for debugging
+# function sensor_dist(s, landmarks; noise_scale)
+#     DistrIterator([SMvNormal(l, 0.2noise_scale) for l in landmarks])
+# end
 
 function gps_reading(s; noise_scale)
     SMvNormal(s.pos, 1noise_scale)

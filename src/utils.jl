@@ -136,6 +136,11 @@ subtuple(xs::NamedTuple, keys::Tuple) = begin
     NamedTuple{keys}(map(k -> getfield(xs, k), keys))
 end
 
+warp_angle(angle::Real) = let
+    x = angle % 2π
+    x < 0 ? x + 2π : x
+end
+
 """
 Lightweight version of @timed.
 """
@@ -160,6 +165,22 @@ function optimize_no_tag(loss, x₀, optim_options)
         end
     end
     Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
+end
+
+function optimize_bounded(loss, x₀, (lower, upper), optim_options)
+    # drop tag to reduce JIT compilation time and avoid tag checking
+    cfg = ForwardDiff.GradientConfig(nothing, x₀) 
+    function fg!(F, G, x)
+        (G === nothing) && return loss(x)
+
+        gr = ForwardDiff.DiffResult(first(x), (G,))
+        ForwardDiff.gradient!(gr, loss, x, cfg)
+        if F !== nothing
+            return gr.value
+        end
+    end
+    optimizer = Optim.Fminbox(Optim.LBFGS())
+    Optim.optimize(Optim.only_fg!(fg!), lower, upper, x₀, optimizer, optim_options)
 end
 
 # function optimize_no_tag(loss, x₀, optim_options)

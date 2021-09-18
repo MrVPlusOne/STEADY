@@ -1,9 +1,16 @@
 export GDistr, DistrIterator
 export SMvNormal, SMvUniform, SUniform, SNormal
 
-import Distributions: rand, logpdf
+import Distributions: rand, logpdf, extrema
 import Bijectors: AbstractBijector, bijector
 import StatsFuns
+
+## simplify the distribution displays
+Base.show(io::IO, d::Normal) = print(io, "Normal(μ=$(d.μ), σ=$(d.σ))")
+Base.show(io::IO, ::Type{<:Normal}) = print(io, "Normal{...}")
+
+Base.show(io::IO, d::Uniform) = print(io, "Uniform(lb=$(d.a), ub=$(d.b))")
+Base.show(io::IO, ::Type{<:Uniform}) = print(io, "Uniform{...}")
 
 
 """
@@ -63,6 +70,11 @@ rand(rng::Random.AbstractRNG, diter::DistrIterator) =
     map(d -> rand(rng, d), diter.distributions)
 logpdf(diter::DistrIterator, xs) = 
     sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+logpdf(diter::DistrIterator{<:NamedTuple}, xs::NamedTuple) = let
+    @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
+        distributions: $(diter.distributions)\nvalues:$xs"
+    sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+end
 
 Base.show(io::IO, di::DistrIterator) = 
     if di.distributions isa AbstractVector
@@ -162,3 +174,69 @@ function Bijectors.truncated_invlink(y, a, b)
     end
     fix_nan_dual(v)
 end
+
+"""
+Like a normal distribution, but always warp values to [0, 2π)
+"""
+struct CircularNormal{T, N} <: ContinuousUnivariateDistribution
+    μ::T
+    normal::N
+    CircularNormal(μ::A, σ::B) where {A, B} = let
+        n = truncated(Normal(0, σ), -π, π)
+        new{promote_type(A, B), typeof(n)}(μ, n)
+    end
+end
+Base.show(io::IO, ::Type{<:CircularNormal}) = print(io, "CircularNormal{...}")
+Base.show(io::IO, d::CircularNormal) = 
+    print(io, "CircularNormal(μ=$(d.μ), σ=$(d.normal.untruncated.σ))")
+
+extrema(::CircularNormal) = (0.0, 2π)
+rand(rng::AbstractRNG, d::CircularNormal) = warp_angle(rand(rng, d.normal) + d.μ)
+logpdf(d::CircularNormal, x) = let
+    (0 <= x <= 2π) || return -Inf
+    dis = warp_angle(x - d.μ)
+    dis = min(dis, 2π-dis)
+    logpdf(d.normal, dis)
+end
+
+# copied from https://github.com/oxinabox/ProjectManagement.jl/blob/da3de128ebc031b695bcb1795b53bcfeba617d87/src/timing_distributions.jl
+"""
+    PertBeta(a, b, c) <: ContinuousUnivariateDistribution
+The [PERT Beta distribution](https://en.wikipedia.org/wiki/PERT_distribution).
+ - `a`: the minimum value of the support
+ - `b`: the mode
+ - `c`: the maximum value of the support
+"""
+struct PertBeta{T<:Real} <: ContinuousUnivariateDistribution
+    a::T # min
+    b::T # mode
+    c::T # max
+end
+
+function beta_dist(dd::PertBeta)
+    α = (4dd.b + dd.c - 5dd.a)/(dd.c - dd.a)
+    β = (5dd.c - dd.a - 4dd.b)/(dd.c - dd.a)
+    return Beta(α, β)
+end
+
+# Shifts x to the domain of the beta_dist
+input_shift(dd::PertBeta, x) = (x - dd.a)/(dd.c - dd.a)
+# Shifts y from the domain of the beta_dist
+output_shift(dd::PertBeta, y) = y*(dd.c - dd.a) + dd.a
+
+Distributions.mode(dd::PertBeta) = dd.b
+Base.minimum(dd::PertBeta) = dd.a
+Base.maximum(dd::PertBeta) = dd.c
+Statistics.mean(dd::PertBeta) = (dd.a + 4dd.b + dd.c)/6
+Statistics.var(dd::PertBeta) = ((mean(dd) - dd.a) * (dd.c - mean(dd)))/7
+Distributions.insupport(dd::PertBeta, x) = dd.a < x < dd.c
+
+for f in (:skewness, :kurtosis)
+    @eval Distributions.$f(dd::PertBeta) = $f(beta_dist(dd))
+end
+for f in (:pdf, :cdf, :logpdf)
+    @eval Distributions.$f(dd::PertBeta, x::Real) = $f(beta_dist(dd), input_shift(dd, x))
+end
+
+Statistics.quantile(dd::PertBeta, x) = output_shift(dd, quantile(beta_dist(dd), x))
+Base.rand(rng::AbstractRNG, dd::PertBeta) = output_shift(dd, rand(rng, beta_dist(dd)))

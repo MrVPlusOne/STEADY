@@ -192,6 +192,7 @@ function components_vec2!(env::ComponentEnv; can_grow=true)
         ComponentFunc(:scale_R2, (*), [ℝ, ℝ2] => ℝ2, (*)),
         ComponentFunc(:rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing),
         ComponentFunc(:neg_R2, (-), [ℝ2] => ℝ2, identity),
+        ComponentFunc(:cross_R2, cross_R2, [ℝ2, ℝ2] => ℝ, (*)),
     )
 
     vec2_rules!(env.rules; can_grow)
@@ -209,6 +210,7 @@ vec2_rules!(rules; can_grow) = begin
         scale_R2(s, neg_R2(a)) == scale_R2(neg(s), a)
         scale_R2(s, neg_R2(a)) == neg_R2(scale_R2(s, a))
         R2(neg(a), neg(b)) => neg_R2(R2(a, b))
+        neg(cross_R2(a, b)) => cross_R2(b, a)
 
         # rotate_R2(b, rotate_R2(a, v)) => rotate_R2(a+b, v)
         rotate_R2(θ, neg_R2(a)) == neg_R2(rotate_R2(θ, a))
@@ -234,3 +236,5 @@ end
 mk_R2(x, y) = @SVector [x, y]
 # this makes sure that gradient exists when norm = 0.
 norm_R2(x) = sqrt(x[1]^2 + x[2]^2+eps(x[1]))
+cross_R2(x, y) = x[1]*y[2] - x[2]*y[1]
+dir_R2(θ) = @SVector[cos(θ), sin(θ)]
