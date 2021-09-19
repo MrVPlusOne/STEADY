@@ -365,7 +365,7 @@ function map_trajectory(
     loss = (vec) -> let
         is_bad_dual(vec) && error("Bad dual in loss input vec: $vec")
         local traj, values = vec_to_traj(vec)
-        prior = logpdf(prior_dist, values)
+        prior = score(prior_dist, values)
         dl = data_likelihood(traj, values.others)
         v = -(prior + dl)
         if isnan(v) || is_bad_dual(v)

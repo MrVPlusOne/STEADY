@@ -1,5 +1,6 @@
 export GDistr, DistrIterator
 export SMvNormal, SMvUniform, SUniform, SNormal
+export score
 
 import Distributions: rand, logpdf, extrema
 import Bijectors: AbstractBijector, bijector
@@ -12,6 +13,20 @@ Base.show(io::IO, ::Type{<:Normal}) = print(io, "Normal{...}")
 Base.show(io::IO, d::Uniform) = print(io, "Uniform(lb=$(d.a), ub=$(d.b))")
 Base.show(io::IO, ::Type{<:Uniform}) = print(io, "Uniform{...}")
 
+
+"""
+    score(distribution, value) -> log_p_score
+Returns a score equals to `logpdf` plus a constant. During optimization, this can be 
+used in place of `logpdf` to reduce the computational cost.
+"""
+function score end
+
+score(d::Distribution, x) = logpdf(d, x)
+
+score(d::Normal, x) = let
+    (; μ, σ) = d
+    -abs2((x - μ) / σ)/2 - log(σ)
+end
 
 """
 A wrapper of a sequence of distributions. This can be used to sample or compute
@@ -68,12 +83,21 @@ end
 
 rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
     map(d -> rand(rng, d), diter.distributions)
-logpdf(diter::DistrIterator, xs) = 
+
+logpdf(diter::DistrIterator, xs) = let
+    if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
+        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.distributions)\nvalues:$xs"
+    end
     sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
-logpdf(diter::DistrIterator{<:NamedTuple}, xs::NamedTuple) = let
-    @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
-        distributions: $(diter.distributions)\nvalues:$xs"
-    sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+end
+
+score(diter::DistrIterator, xs) = let
+    if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
+        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.distributions)\nvalues:$xs"
+    end
+    sum(score(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
 end
 
 Base.show(io::IO, di::DistrIterator) = 
@@ -156,6 +180,8 @@ end
 logpdf(d::SMvUniform, xs) =
     sum(logpdf(d, x) for (d, x) in zip(d.uniforms, xs))
 
+score(d::SMvUniform, xs) = 0.0
+
 function Bijectors.bijector(d::SMvUniform)
     BijectorIterator(bijector.(d.uniforms))
 end
@@ -176,27 +202,30 @@ function Bijectors.truncated_invlink(y, a, b)
 end
 
 """
-Like a normal distribution, but always warp values to [0, 2π)
+Like a normal distribution, but always warp values to [0, 2π). 
 """
-struct CircularNormal{T, N} <: ContinuousUnivariateDistribution
-    μ::T
-    normal::N
-    CircularNormal(μ::A, σ::B) where {A, B} = let
-        n = truncated(Normal(0, σ), -π, π)
-        new{promote_type(A, B), typeof(n)}(μ, n)
-    end
+struct CircularNormal{T1, T2} <: ContinuousUnivariateDistribution
+    μ::T1
+    σ::T2
 end
 Base.show(io::IO, ::Type{<:CircularNormal}) = print(io, "CircularNormal{...}")
 Base.show(io::IO, d::CircularNormal) = 
-    print(io, "CircularNormal(μ=$(d.μ), σ=$(d.normal.untruncated.σ))")
+    print(io, "CircularNormal(μ=$(d.μ), σ=$(d.σ))")
 
 extrema(::CircularNormal) = (0.0, 2π)
-rand(rng::AbstractRNG, d::CircularNormal) = warp_angle(rand(rng, d.normal) + d.μ)
+rand(rng::AbstractRNG, d::CircularNormal) = 
+    warp_angle(rand(rng, truncated(Normal(0.0, d.σ), -π, π)) + d.μ)
 logpdf(d::CircularNormal, x) = let
     (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
-    logpdf(d.normal, dis)
+    logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
+end
+score(d::CircularNormal, x) = let
+    (0 <= x <= 2π) || return -Inf
+    dis = warp_angle(x - d.μ)
+    dis = min(dis, 2π-dis)
+    score(Normal(0.0, d.σ), dis)
 end
 
 # copied from https://github.com/oxinabox/ProjectManagement.jl/blob/da3de128ebc031b695bcb1795b53bcfeba617d87/src/timing_distributions.jl
@@ -234,7 +263,7 @@ Distributions.insupport(dd::PertBeta, x) = dd.a < x < dd.c
 for f in (:skewness, :kurtosis)
     @eval Distributions.$f(dd::PertBeta) = $f(beta_dist(dd))
 end
-for f in (:pdf, :cdf, :logpdf)
+for f in (:pdf, :cdf, :logpdf, :score)
     @eval Distributions.$f(dd::PertBeta, x::Real) = $f(beta_dist(dd), input_shift(dd, x))
 end
 

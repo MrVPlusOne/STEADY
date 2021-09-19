@@ -41,15 +41,15 @@ variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
         Drag => SUniform(0.001, 1.0),
         RotDrag => SUniform(0.001, 1.0),
         RocketLength => SUniform(0.1,1.0),
-        Gravity => SMvNormal([0.0, -1.0], [0.2, 0.5]),
+        Gravity => SMvNormal([0.0, -1.0], [0.01, 0.5]),
     ),
     # dynamics_params = OrderedDict(
     #     Mass => PertBeta(0.5, 1.0, 5.0),
     #     RotMass => PertBeta(0.25, 1.0, 5.0),
     #     Drag => PertBeta(0.001, 0.2, 1.),
     #     RotDrag => PertBeta(0.001, 0.2, 1.),
-    #     RocketLength => PertBeta(0.1, 1.0, 2.0),
-    #     Gravity => SMvNormal([0.0, -1.0], [0.2, 0.5]),
+    #     RocketLength => PertBeta(0.1, 0.5, 1.0),
+    #     Gravity => SMvNormal([0.0, -1.0], [0.01, 0.5]),
     # ),
     others = OrderedDict(
         :landmarks => landmark_dist(n_landmarks)),
@@ -159,11 +159,12 @@ generate_data(x₀, x′₀, params, others, times; noise_scale, target_pos) = b
 end
 
 
-function data_likelihood(states, others, observations; noise_scale, check_dual=false)
+function data_likelihood(states, others, observations; 
+        noise_scale, data_thining::Int, check_dual=false)
     dl(i) = let 
         s = states[i]
         s_prev = (i == 1) ? s : states[i-1]
-        v = logpdf(observation_dist(s, s_prev, others; noise_scale), observations[i])
+        v = score(observation_dist(s, s_prev, others; noise_scale), observations[i])
         if check_dual && SEDL.is_bad_dual(v)
             @info "data_likelihood" i s v
             @info "data_likelihood" others
@@ -172,7 +173,7 @@ function data_likelihood(states, others, observations; noise_scale, check_dual=f
         end
         v
     end
-    sum(dl(i) for i in 1:length(states))
+    sum(dl(i) for i in 1:data_thining:length(states))
 end
 
 function plot_data!(p, ex_data, name::String; marker_len=1.0, marker_thining=10)

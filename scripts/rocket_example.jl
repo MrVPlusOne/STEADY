@@ -9,7 +9,7 @@ using StaticArrays
 Random.seed!(123)
 
 noise_scale = 1.0
-times = collect(0.0:0.1:10)
+times = collect(0.0:0.1:20)
 params = (
     mass = 1.5,
     rot_mass = 1.0,
@@ -56,18 +56,21 @@ senum = synthesis_enumeration(
 )
 display(senum)
 ## perform MAP synthesis
-syn_result = let
+data_thining = 10
+syn_result = @time let
     observations = ex_data.observations
     map_synthesis(
         senum,
         shape_env,
         ex_data.actions, ex_data.times, 
         prog_logp, 
-        (states, params) -> Rocket2D.data_likelihood(states, params, observations; noise_scale), 
+        (states, params) -> Rocket2D.data_likelihood(
+            states, params, observations; noise_scale, data_thining), 
         evals_per_program=10,
         trials_per_eval=5,
-        optim_options=Optim.Options(f_abstol=1e-3, outer_f_abstol=1e-3),
-        use_bijectors=false,
+        optim_options=Optim.Options(
+            f_abstol=1e-3, outer_f_abstol=1e-3, iterations=2000, outer_iterations=4),
+        use_bijectors=true,
         n_threads=1,
     )
 end

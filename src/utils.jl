@@ -5,6 +5,7 @@ export rotate2d, rotation2D, °
 using MacroTools: @capture
 using Cthulhu
 using ForwardDiff: Dual
+import LineSearches
 
 specific_elems(xs::AbstractVector{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
@@ -164,7 +165,8 @@ function optimize_no_tag(loss, x₀, optim_options)
             return gr.value
         end
     end
-    Optim.optimize(Optim.only_fg!(fg!), x₀, Optim.LBFGS(), optim_options)
+    algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
+    Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
 end
 
 function optimize_bounded(loss, x₀, (lower, upper), optim_options)
