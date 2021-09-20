@@ -23,7 +23,7 @@ using Statistics
 using Measurements
 using Optim
 import ForwardDiff
-using ThreadsX
+import ThreadsX, ThreadPools
 using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups

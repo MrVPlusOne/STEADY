@@ -99,7 +99,7 @@ end
 ## example synthesis problem
 noise_scale = 1.0
 times = collect(range(0.0, 5.0, length=50))
-params = (drag=0.1, mass=1.5)
+params = (mass=1.5, drag=0.1, )
 others = (wall=7.0,)
 x₀ = (pos=0.0,)
 x′₀ = (pos′=0.5,)
@@ -122,7 +122,7 @@ prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger p
 pruner = RebootPruner(rules=comp_env.rules)
 # pruner = NoPruner()
 senum = synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 3; pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 5; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.by)#, explain=join(r.explain, " ; "))
     end
@@ -141,7 +141,7 @@ syn_result = let
         (states, params) -> Car1D.data_likelihood(states, params, observations; noise_scale), 
         evals_per_program=10,
         optim_options = Optim.Options(x_abstol=1e-3),
-        n_threads=1,
+        n_threads=4,
     )
 end
 display(syn_result)

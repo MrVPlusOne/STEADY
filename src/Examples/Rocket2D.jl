@@ -35,22 +35,22 @@ variable_data(n_landmarks, (; pos, θ), x₀_σ=0.01) = VariableData(
         Pos => (SMvNormal(pos, x₀_σ), SMvNormal([0.0, 0.0], 1.0)),
         Orientation => (SNormal(θ, x₀_σ), SNormal(0.0, 0.5)),
     ),
-    dynamics_params = OrderedDict(
-        Mass => SUniform(0.5, 5.0),
-        RotMass => SUniform(0.1, 5.0),
-        Drag => SUniform(0.001, 1.0),
-        RotDrag => SUniform(0.001, 1.0),
-        RocketLength => SUniform(0.1,1.0),
-        Gravity => SMvNormal([0.0, -1.0], [0.01, 0.5]),
-    ),
     # dynamics_params = OrderedDict(
-    #     Mass => PertBeta(0.5, 1.0, 5.0),
-    #     RotMass => PertBeta(0.25, 1.0, 5.0),
-    #     Drag => PertBeta(0.001, 0.2, 1.),
-    #     RotDrag => PertBeta(0.001, 0.2, 1.),
-    #     RocketLength => PertBeta(0.1, 0.5, 1.0),
+    #     Mass => SUniform(0.5, 5.0),
+    #     RotMass => SUniform(0.1, 5.0),
+    #     Drag => SUniform(0.001, 1.0),
+    #     RotDrag => SUniform(0.001, 1.0),
+    #     RocketLength => SUniform(0.1,1.0),
     #     Gravity => SMvNormal([0.0, -1.0], [0.01, 0.5]),
     # ),
+    dynamics_params = OrderedDict(
+        Mass => PertBeta(1.0, 1.5, 2.0),
+        RotMass => PertBeta(0.5, 1.0, 1.5),
+        Drag => PertBeta(0.0, 0.2, 0.8),
+        RotDrag => PertBeta(0.0, 0.2, 0.8),
+        RocketLength => PertBeta(0.2, 0.5, 0.9),
+        Gravity => SMvNormal([0.0, -1.25], [0.01, 0.1]),
+    ),
     others = OrderedDict(
         :landmarks => landmark_dist(n_landmarks)),
 )
@@ -77,6 +77,21 @@ ground_truth_sketch() = begin
     
     DynamicsSketch(
         Var[],
+        combine,
+    )
+end
+
+simple_sketch() = let
+    combine(inputs, (; ext_force, ext_moment)) = let
+        (; θ, thrust, mass, turn, rot_mass) = inputs
+        thrust_force = rotate2d(θ, @SVector[0., thrust])
+        pos′′ = (thrust_force + ext_force) / mass
+        θ′′ = (turn  + ext_moment) / rot_mass
+        (; pos′′, θ′′)
+    end
+
+    DynamicsSketch(
+        [Var(:ext_force, ℝ2, PUnits.Force), Var(:ext_moment, ℝ, PUnits.Torque)],
         combine,
     )
 end

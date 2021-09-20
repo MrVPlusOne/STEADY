@@ -9,7 +9,7 @@ using StaticArrays
 Random.seed!(123)
 
 noise_scale = 1.0
-times = collect(0.0:0.1:20)
+times = collect(0.0:0.1:10)
 params = (
     mass = 1.5,
     rot_mass = 1.0,
@@ -47,16 +47,17 @@ if !isfinite(prior_p)
 end
 
 # sketch = no_sketch(vdata.state′′_vars)
-sketch = Rocket2D.ground_truth_sketch()
+# sketch = Rocket2D.ground_truth_sketch()
+sketch = Rocket2D.simple_sketch()
 
 # pruner = NoPruner()
 pruner = RebootPruner(; comp_env.rules)
 senum = synthesis_enumeration(
-    vdata, sketch, Rocket2D.action_vars(), comp_env, 5; pruner, type_pruning=true,
+    vdata, sketch, Rocket2D.action_vars(), comp_env, 3; pruner, type_pruning=true,
 )
 display(senum)
 ## perform MAP synthesis
-data_thining = 10
+data_thining = 5
 syn_result = @time let
     observations = ex_data.observations
     map_synthesis(
@@ -71,7 +72,7 @@ syn_result = @time let
         optim_options=Optim.Options(
             f_abstol=1e-3, outer_f_abstol=1e-3, iterations=2000, outer_iterations=4),
         use_bijectors=true,
-        n_threads=1,
+        n_threads=6,
     )
 end
 display(syn_result)

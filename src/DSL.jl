@@ -101,6 +101,7 @@ module PUnits
     const Speed = Length / Time
     const Acceleration = Length / Time^2
     const Force = Mass * Acceleration
+    const Torque = Force * Length
 
     const Angle = unitless
     const AngularSpeed = Angle / Time

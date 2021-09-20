@@ -1,3 +1,5 @@
+using ProgressMeter: Progress, next!
+
 const TimeSeries{T} = Vector{T}
 
 export DynamicsSketch, no_sketch
@@ -89,9 +91,8 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
     (; state_vars, state′′_vars) = r.vdata
     holes = sketch.holes
 
-    comp_types = Set(v.type for v in state′′_vars)
-    n_interest = prod(count_len(enum_result[ty]) for ty in comp_types)
-    search_details = join((count_len(enum_result[ty]) for ty in comp_types), " * ")
+    n_interest = prod(count_len(enum_result[v.type]) for v in holes)
+    search_details = join((count_len(enum_result[v.type]) for v in holes), " * ")
 
     println(io, "===== Synthesis enumeration result =====")
     println(io, "search_space: $(pretty_number(n_interest)) = $search_details")
@@ -188,8 +189,8 @@ The system dynamics are assuemd to be 2nd-order.
 
 - `program_logp(prog::TAST) -> logp` should return the log piror probability of a given 
 dynamics program. 
-- `data_likelihood(trajectory::Dict{Var, TimeSeries}, other_vars::Dict{Var, Any}) -> logp` 
-should return the log probability density of the observation.
+- `data_likelihood(trajectory, other_vars) -> logp_score` 
+should return the log probability density (plus some fixed constant) of the observation.
 - `max_size`: the maximal AST size of each component program to consider.
 """
 function map_synthesis(
@@ -210,15 +211,12 @@ function map_synthesis(
     (; state_vars, state′′_vars) = vdata
     _check_variable_types(vdata, shape_env)
     
-    output_types = [v.type for v in state′′_vars]
-    all_comps = collect(Iterators.product((enum_result[v.type] for v in sketch.holes)...))
-
     "barrier function to improve the compiled functions' performance."
     compile_sketch(
         comps::Tuple{Vararg{TAST}}, 
-        hole_names::Tuple{Vararg{Symbol}},
-        output_names::Tuple{Vararg{Symbol}},
-    ) = begin
+        ::Val{hole_names},
+        ::Val{output_names},
+    ) where {hole_names, output_names} = begin
         # TODO: Check the inferred return types 
         funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
         ast = (; (=>).((v.name for v in sketch.holes), comps)...)
@@ -230,17 +228,20 @@ function map_synthesis(
         CompiledFunc(ast, julia, f)
     end
 
+    all_comps = collect(Iterators.product((enum_result[v.type] for v in sketch.holes)...))
     @info "number of programs: $(length(all_comps))"
     prog_compile_time = @elapsed begin
         # cache = Dict{TAST, CompiledFunc}()
-        hole_names = Tuple(v.name for v in sketch.holes)
-        output_names = tuple((v.name for v in state′′_vars)...)
+        hole_names = Val(Tuple(v.name for v in sketch.holes))
+        output_names = Val(tuple((v.name for v in state′′_vars)...))
         compiled_progs = map(all_comps) do comps
             compile_sketch(comps, hole_names, output_names)
         end
     end
+    @info "Programs assembled ($(prog_compile_time)s)."
 
     prior_dists = to_distribution(vdata)
+    progress = Progress(length(all_comps), desc="evaluating", showspeed=true)
 
     function evaluate((comps, f_x′′))
         local solutions = []
@@ -273,6 +274,7 @@ function map_synthesis(
                 end
             end
         end
+        next!(progress)
 
         if isempty(solutions)
             return (status= :errored, program=comps, errors=unique(errors))
@@ -290,15 +292,14 @@ function map_synthesis(
             optimize_times, optimize_iters)
     end
 
-    # blas_threads = BLAS.get_num_threads()
-    # BLAS.set_num_threads(1)
-    to_eval = withprogress(zip(all_comps, compiled_progs); interval=0.1)
-    eval_results = if n_threads > 1
-        ThreadsX.mapi(evaluate, to_eval)
+    to_eval = zip(all_comps, compiled_progs)
+    if n_threads > 1
+        pool = ThreadPools.QueuePool(2, n_threads)
+        eval_results = ThreadPools.tmap(evaluate, pool, to_eval)
+        close(pool)
     else
-        to_eval |> Map(evaluate) |> collect
+        eval_results = map(evaluate, to_eval)
     end
-    # BLAS.set_num_threads(blas_threads)
 
     err_progs = eval_results |> Filter(r -> r.status == :errored) |> collect
     succeeded = filter(r -> r.status == :success, eval_results)
@@ -319,14 +320,7 @@ function map_synthesis(
     MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
-function transpose_series(
-    len::Int, vars, series_comps::Dict{Var, TimeSeries}
-)::TimeSeries{<:NamedTuple}
-    collect(let 
-        as = (a.name => series_comps[a][t] for a in vars)
-        (; as...)
-    end for t in 1:len)
-end
+
 
 const DebugMode = Ref(false)
 
