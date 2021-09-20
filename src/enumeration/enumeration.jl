@@ -1,3 +1,5 @@
+using ProgressMeter: Progress, next!, @showprogress, progress_pmap
+
 include("enumeration_result.jl")
 
 """
@@ -55,7 +57,7 @@ function enumerate_terms(
 
     signatures = env.signatures
     # construct larger programs from smaller ones
-    @progress name="bottom_up_enum" for size in 2:max_size 
+    @showprogress desc="bottom_up_enum" for size in 2:max_size 
         for (f, sig) in signatures
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
@@ -110,7 +112,7 @@ function enumerate_types(
 
     # first, enumerate all types under the size constraint
     signatures = env.signatures
-    @progress name="enumerate_all_types" for size in 2:max_size 
+    @showprogress desc="enumerate_all_types" for size in 2:max_size 
         for (_, sig) in signatures
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable

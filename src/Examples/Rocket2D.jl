@@ -174,8 +174,8 @@ generate_data(x₀, x′₀, params, others, times; noise_scale, target_pos) = b
 end
 
 
-function data_likelihood(states, others, observations; 
-        noise_scale, data_thining::Int, check_dual=false)
+data_likelihood(observations; 
+    noise_scale, data_thining::Int, check_dual=false) = (states, others) -> let
     dl(i) = let 
         s = states[i]
         s_prev = (i == 1) ? s : states[i-1]

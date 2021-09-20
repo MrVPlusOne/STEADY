@@ -12,8 +12,6 @@ using Formatting: format
 using StaticArrays
 using DataStructures: OrderedDict
 export OrderedDict
-using UnPack
-using ProgressLogging
 import Random
 using Random: AbstractRNG
 using Distributions
@@ -23,7 +21,7 @@ using Statistics
 using Measurements
 using Optim
 import ForwardDiff
-import ThreadsX, ThreadPools
+import ThreadPools
 using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups
@@ -53,4 +51,4 @@ if false
     include("../scripts/test_synthesis.jl")
 end
 
-end
+end # end module

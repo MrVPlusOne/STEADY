@@ -105,6 +105,7 @@ end
 sort_by(f) = xs -> sort(xs, by=f)
 
 pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
+pretty_number(v::Measurement) = string(v)
 
 """
 Apply a tuple of functions to a tuple of corresponding arguments. The result is also a 
@@ -220,7 +221,7 @@ function nested_get!(f, d::Dict{K, V}, k::K) where {K, V}
 end
 
 function is_bad_dual(v::Dual)
-    isfinite(v.value) && abs(v.value) < 1e10 && any(isnan, v.partials)
+    isfinite(v.value) && abs(v.value) < 1e5 && any(isnan, v.partials)
 end
 is_bad_dual(v::AbstractVector) = any(is_bad_dual, v)
 is_bad_dual(v::Real) = false
@@ -245,3 +246,11 @@ end
 using Statistics: norm
 Base.show(io::IO, d::ForwardDiff.Dual) = 
     print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
+
+
+"""
+A helper macro to find functions by name.
+"""
+@generated function find_func(T, args...)
+    return Expr(:splatnew, :T, :args)
+end

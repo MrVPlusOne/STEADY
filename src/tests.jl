@@ -32,7 +32,7 @@ function check_pruning_soundness(
         types_to_prune, pruner)
     failed = []
     n_passed = 0
-    @progress name="check pruned" for (; pruned, by) in eresult.pruned
+    @showprogress desc="check pruned" for (; pruned, by) in eresult.pruned
         f1 = compile(pruned, shape_env, comp_env)
         f2 = compile(by, shape_env, comp_env)
         counter_ex = test_equiv(f1, f2, arg_dists, n_samples)

@@ -40,7 +40,6 @@ components_transcendentals!(comp_env; can_grow)
 components_vec2!(comp_env; can_grow)
 
 vdata = Rocket2D.variable_data(n_landmarks, x₀)
-prog_logp(comps) = log(0.5) * sum(ast_size.(comps); init=0) 
 prior_p = logpdf(to_distribution(vdata), (;x₀, x′₀, params, others))
 if !isfinite(prior_p)
     error("prior_p = $prior_p, some value may be out of its support.")
@@ -53,26 +52,25 @@ sketch = Rocket2D.simple_sketch()
 # pruner = NoPruner()
 pruner = RebootPruner(; comp_env.rules)
 senum = synthesis_enumeration(
-    vdata, sketch, Rocket2D.action_vars(), comp_env, 3; pruner, type_pruning=true,
+    vdata, sketch, Rocket2D.action_vars(), comp_env, 5; pruner, type_pruning=true,
 )
 display(senum)
 ## perform MAP synthesis
 data_thining = 5
-syn_result = @time let
-    observations = ex_data.observations
+syn_result = @time let 
     map_synthesis(
         senum,
         shape_env,
         ex_data.actions, ex_data.times, 
-        prog_logp, 
-        (states, params) -> Rocket2D.data_likelihood(
-            states, params, observations; noise_scale, data_thining), 
+        prog_size_prior(0.5), 
+        Rocket2D.data_likelihood(ex_data.observations; noise_scale, data_thining), 
         evals_per_program=10,
         trials_per_eval=5,
         optim_options=Optim.Options(
             f_abstol=1e-3, outer_f_abstol=1e-3, iterations=2000, outer_iterations=4),
         use_bijectors=true,
-        n_threads=6,
+        use_distributed=true,
+        n_threads=1,
     )
 end
 display(syn_result)
@@ -82,6 +80,6 @@ let
     p = Rocket2D.plot_data(ex_data, "Truth")
     Rocket2D.plot_data!(p, map_data, "Estimate") |> display
 end
-
+syn_result.sorted_results[1].MAP_est.others |> dump
 syn_result.errored_programs
 ##

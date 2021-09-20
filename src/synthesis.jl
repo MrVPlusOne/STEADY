@@ -1,4 +1,5 @@
-using ProgressMeter: Progress, next!
+using ProgressMeter: Progress, next!, @showprogress, progress_pmap
+using Distributed
 
 const TimeSeries{T} = Vector{T}
 
@@ -181,6 +182,11 @@ Base.size(v::Transducers.ProgressLoggingFoldable) = size(v.foldable)
 
 import LinearAlgebra.BLAS
 
+export prog_size_prior
+function prog_size_prior(decay::Float64)
+    (comps) -> log(decay) * sum(ast_size.(comps); init=0) 
+end
+
 """
 Perform Maximum a posteriori (MAP) synthesis to find the joint assignment of the motion 
 model *and* the trajecotry that maximizes the posterior probability.
@@ -202,105 +208,51 @@ function map_synthesis(
     data_likelihood::Function;
     evals_per_program::Int = 10,
     trials_per_eval::Int = 10,
-    optim_options = Optim.Options(),
-    use_bijectors=true,
-    n_threads = min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
+    optim_options=Optim.Options(),
+    use_bijectors::Bool=true,
+    n_threads::Int=min(Sys.CPU_THREADS ÷ 2, Threads.nthreads()),
+    use_distributed::Bool=false,
     check_gradient=false,
 )::MapSynthesisResult
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
     _check_variable_types(vdata, shape_env)
-    
-    "barrier function to improve the compiled functions' performance."
-    compile_sketch(
-        comps::Tuple{Vararg{TAST}}, 
-        ::Val{hole_names},
-        ::Val{output_names},
-    ) where {hole_names, output_names} = begin
-        # TODO: Check the inferred return types 
-        funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
-        ast = (; (=>).((v.name for v in sketch.holes), comps)...)
-        julia = Expr(:tuple, (x -> x.julia).(funcs))
-        f(input) = begin
-            hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
-            NamedTuple{output_names}(sketch.combine(input, hole_values))
-        end
-        CompiledFunc(ast, julia, f)
-    end
 
     all_comps = collect(Iterators.product((enum_result[v.type] for v in sketch.holes)...))
     @info "number of programs: $(length(all_comps))"
-    prog_compile_time = @elapsed begin
-        # cache = Dict{TAST, CompiledFunc}()
-        hole_names = Val(Tuple(v.name for v in sketch.holes))
-        output_names = Val(tuple((v.name for v in state′′_vars)...))
-        compiled_progs = map(all_comps) do comps
-            compile_sketch(comps, hole_names, output_names)
-        end
-    end
-    @info "Programs assembled ($(prog_compile_time)s)."
 
     prior_dists = to_distribution(vdata)
-    progress = Progress(length(all_comps), desc="evaluating", showspeed=true)
+    compile_ctx = (
+        hole_names = Val(Tuple(v.name for v in sketch.holes)),
+        output_names = Val(tuple((v.name for v in state′′_vars)...)),
+        shape_env, comp_env, sketch.combine, check_gradient,
+    )
+    ctx = (; compile_ctx, 
+        evals_per_program, trials_per_eval, use_bijectors, optim_options, 
+        prior_dists, times, actions, program_logp, data_likelihood,
+    )
+    
+    to_eval = all_comps
+    progress = Progress(length(all_comps), desc="evaluating", 
+        showspeed=true, output=stdout)
 
-    function evaluate((comps, f_x′′))
-        local solutions = []
-        local optimize_times = Float64[]
-        local optimize_iters = Int[]
-        local errors = []
-        for _ in 1:evals_per_program
-            for _ in 1:trials_per_eval
-                try
-                    timed_r = @ltimed map_trajectory(
-                        f_x′′, prior_dists, 
-                        times, actions, data_likelihood, 
-                        optim_options, use_bijectors,
-                    )
-                    if isnan(timed_r.value.logp)
-                        push!(errors, ErrorException("logp = NaN."))
-                    else
-                        push!(solutions, timed_r.value)
-                        push!(optimize_times, timed_r.time)
-                        push!(optimize_iters, timed_r.value.iters)
-                        break # successfully evaluated
-                    end
-                catch err
-                    if err isa Union{OverflowError, DomainError}
-                        push!(errors, err)
-                    else
-                        @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
-                        rethrow()
-                    end
-                end
-            end
-        end
-        next!(progress)
-
-        if isempty(solutions)
-            return (status= :errored, program=comps, errors=unique(errors))
-        end
-        sol = solutions |> max_by(s->s.logp)
-        MAP_est = (
-            sol.params,
-            sol.others,
-            states=sol.traj,
-            logp=sol.logp,
-        )
-        logp = sol.logp + program_logp(comps)
-        (; status= :success,
-            result=(; logp, f_x′′, MAP_est),
-            optimize_times, optimize_iters)
-    end
-
-    to_eval = zip(all_comps, compiled_progs)
-    if n_threads > 1
-        pool = ThreadPools.QueuePool(2, n_threads)
-        eval_results = ThreadPools.tmap(evaluate, pool, to_eval)
-        close(pool)
+    if use_distributed
+        length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
+        @everywhere SEDL._eval_ctx[] = $ctx
+        eval_results = progress_pmap(evaluate_prog_distributed, to_eval; progress)
     else
-        eval_results = map(evaluate, to_eval)
+        eval_task(e) = let
+            evaluate_prog(ctx, e)
+            next!(progress)
+        end
+        if n_threads <= 1
+            eval_results = map(eval_task, to_eval)
+        else
+            pool = ThreadPools.QueuePool(2, n_threads)
+            eval_results = ThreadPools.tmap(eval_task, pool, to_eval)
+            close(pool)
+        end
     end
-
     err_progs = eval_results |> Filter(r -> r.status == :errored) |> collect
     succeeded = filter(r -> r.status == :success, eval_results)
     isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
@@ -311,18 +263,108 @@ function map_synthesis(
     all_times = succeeded |> Map(r -> r.optimize_times) |> collect
     first_opt_time, mean_opt_time = 
         (f.(all_times) |> to_measurement for f in (first, mean))
-    mean_opt_iters = succeeded |> Map(r -> mean(r.optimize_iters)) |> to_measurement
+    opt_iters = succeeded |> Map(r -> mean(r.optimize_iters)) |> to_measurement
+    opt_converge_rate = succeeded |> Map(r -> mean(r.optimize_converges)) |> to_measurement
     opt_success_rate = (succeeded |> Map(r -> length(r.optimize_times)/evals_per_program) 
         |> to_measurement)
 
     stats = (; n_progs=length(all_comps), n_err_progs=length(err_progs),
-        prog_compile_time, first_opt_time, mean_opt_time, mean_opt_iters, opt_success_rate)
+        first_opt_time, mean_opt_time, opt_iters, opt_success_rate, opt_converge_rate)
     MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
+const _eval_ctx = Ref{Any}(nothing)
+function evaluate_prog_distributed(comps)
+    ctx = _eval_ctx[]
+    evaluate_prog(ctx, comps)
+end
 
+function evaluate_prog(ctx, comps)
+    compile_ctx = ctx.compile_ctx
+    (; hole_names, output_names) = compile_ctx
+    f_x′′ = compile_sketch(comps, hole_names, output_names, compile_ctx)
+    evaluate_prog(ctx, comps, f_x′′)
+end
+
+function evaluate_prog(ctx, comps, f_x′′)
+    (; evals_per_program, trials_per_eval, use_bijectors, optim_options) = ctx
+    (; prior_dists, times, actions, data_likelihood, program_logp) = ctx
+
+    local solutions = []
+    local optimize_times = Float64[]
+    local optimize_iters = Int[]
+    local optimize_converges = Bool[]
+    local errors = []
+    for _ in 1:evals_per_program
+        for _ in 1:trials_per_eval
+            try
+                local (;value, time) = @ltimed map_trajectory(
+                    f_x′′, prior_dists, 
+                    times, actions, data_likelihood, 
+                    optim_options, use_bijectors,
+                )
+                if isnan(value.logp)
+                    push!(errors, ErrorException("logp = NaN."))
+                else
+                    push!(solutions, value)
+                    push!(optimize_times, time)
+                    push!(optimize_iters, value.iters)
+                    push!(optimize_converges, value.converged)
+                    break # successfully evaluated
+                end
+            catch err
+                if err isa Union{OverflowError, DomainError, BadLossError}
+                    push!(errors, err)
+                else
+                    @error "Unexpected error encountered when evaluating f_x′′ = $(f_x′′)" 
+                    rethrow()
+                end
+            end
+        end
+    end
+
+    if isempty(solutions)
+        return (status= :errored, program=comps, errors=unique(errors))
+    end
+    sol = solutions |> max_by(s->s.logp)
+    MAP_est = (
+        sol.params,
+        sol.others,
+        states=sol.traj,
+        logp=sol.logp,
+    )
+    logp = sol.logp + program_logp(comps)
+    # only return the AST to prevent passing generated functions in a distributed setting.
+    (; status= :success,
+        result=(; logp, f_x′′, MAP_est),
+        optimize_times, optimize_iters, optimize_converges)
+end
+
+
+"Combine sketch hole expressions into an executable Julia function."
+compile_sketch(
+    comps::Tuple{Vararg{TAST}}, 
+    ::Val{hole_names},
+    ::Val{output_names},
+    (;shape_env, comp_env, combine, check_gradient),
+) where {hole_names, output_names} = begin
+    # TODO: Check the inferred return types 
+    funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
+    ast = (; (=>).(hole_names, comps)...)
+    julia = Expr(:tuple, (x -> x.julia).(funcs))
+    f = input -> let
+        hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
+        NamedTuple{output_names}(combine(input, hole_values))
+    end
+    CompiledFunc(ast, julia, f)
+end
 
 const DebugMode = Ref(false)
+
+struct BadLossError{I} <: Exception
+    msg::AbstractString
+    info::I
+end
 
 export map_trajectory
 function map_trajectory(
@@ -363,16 +405,8 @@ function map_trajectory(
         dl = data_likelihood(traj, values.others)
         v = -(prior + dl)
         if isnan(v) || is_bad_dual(v)
-            DebugMode[] = true
-            data_likelihood(traj, values.others)
-            DebugMode[] = false
-            @info "loss computing" vec
-            @info "loss computing" values.params
-            @info "loss computing" values.others
-            @info "loss computing" traj
-            @info "loss computing" prior
-            @info "loss computing" likelihood=dl
-            error("bad loss detected: loss = $v")
+            info = (; vec, values.params, values.others, traj, prior, likelihood=dl, loss=v)
+            throw(BadLossError("bad loss detected: loss = $v", info))
         end
         v
     end
@@ -383,15 +417,11 @@ function map_trajectory(
         sol = optimize_bounded(loss, guess_vec, (lower, upper), optim_options)
     end
     iters = Optim.iterations(sol)
-    if !Optim.converged(sol)
-        @warn "Optim not converged." f_x′′ sol
-    elseif iters <= 1
-        @warn "Optim iterations too small." iterations=iters sol
-    end
     let
         traj, values = vec_to_traj(Optim.minimizer(sol))
         logp = -Optim.minimum(sol)
-        (; traj, values.params, values.others, logp, iters)
+        converged = Optim.converged(sol) && iters > 1
+        (; traj, values.params, values.others, logp, iters, converged)
     end
 end
 
