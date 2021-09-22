@@ -104,4 +104,4 @@ function plot_data((; others, states, observations, actions, times), name::Strin
     plot(p_state, p_action, p_obs, layout=(3,1), size=(600,600))
 end
 
-end
+end # end module
