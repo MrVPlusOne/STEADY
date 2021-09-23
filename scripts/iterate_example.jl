@@ -1,9 +1,9 @@
-##
+##-----------------------------------------------------------
 using Gen
 using Plots
 using ProgressMeter
-
-##
+using StatsFuns: softmax, logsumexp, logsubexp
+##-----------------------------------------------------------
 @gen function data_process(gen_mode,
         times, motion_model, obs_model, controller, controls)
     local states
@@ -32,7 +32,7 @@ end
 
 function states_likelihood(times, motion_model, states, controls)
     T = length(times)
-    s = 0.0
+    s = logpdf(MvNormal([0.0, 0.0], [0.01, 0.5]), states[1])
     for i in 1:T-1
         state = states[i]
         Δt = times[i+1]-times[i]
@@ -42,11 +42,23 @@ function states_likelihood(times, motion_model, states, controls)
     s    
 end
 
+function data_likelihood(states, obs_model, observations)
+    sum(let
+    logpdf(MvNormal(obs_model(states[i+1])...), observations[i])
+    end for i in 1:length(states)-1)
+end
+
 function get_states(trace, T)
     cmap = get_choices(trace)
     [cmap[(:state, i)] for i in 1:T]
 end
-plot_trace(trace, times, name) = plot_trace!(plot(), trace, times, name)
+
+function get_observations(trace, T)
+    cmap = get_choices(trace)
+    [cmap[(:obs, i)] for i in 1:T-1]
+end
+
+plot_trace(trace, times, name) = plot_trace!(plot(legend=:outerbottom), trace, times, name)
 plot_trace!(p, trace, times, name) = let
     cmap = get_choices(trace)
     states = (cmap[(:state, i)] for i in 1:length(times))
@@ -82,9 +94,10 @@ function obs_model(state)
     v_mea = pos′
     ([dis, v_mea], [1.0, 0.3])
 end
-#-----------------------------------------------------------
-## generate data
-times = collect(0.0:0.1:10.0)
+##-----------------------------------------------------------
+# generate data
+Random.seed!(123)
+times = collect(0.0:0.1:8.0)
 T = length(times)
 params = (; drag = 0.2, mass=1.5, σ_pos=0.1, σ_pos′=0.2)
 controller = (s, z) -> begin
@@ -101,8 +114,8 @@ ex_trace, p_data = generate(data_process,
 )
 ex_data = get_retval(ex_trace)
 plot_trace(ex_trace, times, "truth") |> display
-#----------------------------------------------------------- 
-## randomly guess the states
+##----------------------------------------------------------- 
+# randomly guess the states
 obs_map = let
     content = (((:obs, i), ex_trace[(:obs, i)]) for i in 1:T-1)
     cmap = choicemap(content...)
@@ -121,8 +134,8 @@ plot_trace(guessed_trace, times, "guess") |> display
 
 (p_data, p_guess)
 hidden_variables = Gen.select(((:state, i) for i in 1:T-1)...)
-#-----------------------------------------------------------
-## particle filter inference
+##-----------------------------------------------------------
+# particle filter inference
 function PF_inference_gen((;times, obs_map, controls), motion_model, n_particles)
     init_args = (false, times[1], motion_model, obs_model, nothing, controls)
     pf_state = initialize_particle_filter(data_process, init_args, choicemap(), n_particles)
@@ -137,7 +150,7 @@ function PF_inference_gen((;times, obs_map, controls), motion_model, n_particles
     pf_state
 end
 
-pf_s = PF_inference_gen((;times, obs_map, ex_data.controls), ground_motion_model, 1000)
+pf_s = PF_inference_gen((;times, obs_map, ex_data.controls), ground_motion_model, 500)
 plot_traces(pf_s.traces, times, "particle filter", ex_trace)
 ##-----------------------------------------------------------
 # performs important resampling
@@ -151,8 +164,8 @@ end
 
 ir_traces = posterior_samples_importance(2000, 10)
 plot_traces(ir_traces, times, "IR", ex_trace)
-#-----------------------------------------------------------
-## dynamics fitting
+##-----------------------------------------------------------
+# dynamics fitting
 to_params(vec) = let
     local drag, mass, σ_pos, σ_pos′ = vec
     (; drag, mass, σ_pos, σ_pos′)
@@ -160,17 +173,38 @@ end
 
 to_vec((; drag, mass, σ_pos, σ_pos′)) = [drag, mass, σ_pos, σ_pos′]
 
+function log_softmax(x::AbstractArray{<:Real})
+    u = maximum(x)
+    x = x .- u
+    dnum = logsumexp(x)
+    x .- dnum
+end
+
+let x = rand(5)
+    exp.(log_softmax(x)) ≈ softmax(x) 
+end
+
+data_likelihood(trace, T) = 
+    data_likelihood(get_states(trace, T), obs_model, get_observations(trace, T))
+
 function fit_dynamics(traces, times, controls, T, params_guess)
-    trajectories = get_states.(traces, T)
+    trajectories = get_states.(traces, Ref(T))
+    old_scores = get_score.(traces)
+    data_scores = data_likelihood.(traces, Ref(T))
 
     function loss(vec)
         local params = to_params(vec)
-        s_σ = logpdf(Normal(0.1, 0.01), params.σ_pos) + logpdf(Normal(0.2, 0.001), params.σ_pos′)
-        scores = map(trajectories) do states
+        # s_σ = logpdf(Normal(0.1, 0.01), params.σ_pos) + logpdf(Normal(0.2, 0.001), params.σ_pos′)
+        new_scores = map(trajectories) do states
             states_likelihood(times, 
                 (s, u, Δt) -> car_motion_model(s, u, Δt, params), states, controls)
         end
-        -Distributions.logsumexp(scores) - s_σ
+        # we weight the samples by their relative probability in the new distribution 
+        log_weights = log_softmax(new_scores .- old_scores)
+        # and maximize the (weighted) expectated sample probability
+        -logsumexp(log_weights .+ data_scores) - sum(new_scores .- old_scores)
+        # -logsumexp(scores) - s_σ
+        # -sum(scores) - s_σ
     end
 
     alg = Optim.LBFGS()
@@ -178,12 +212,11 @@ function fit_dynamics(traces, times, controls, T, params_guess)
     Optim.converged(sol) || display(sol)
     Optim.minimizer(sol) |> to_params
 end
-
-plot_trace(pf_s.traces[1], times, "particle 1")
+##-----------------------------------------------------------
+# show some rollouts
 map_params = fit_dynamics(pf_s.traces[1:50], times, ex_data.controls, T, 
-    (; drag = 0.2, mass=1.0, σ_pos=0.2, σ_pos′=0.4))
-#-----------------------------------------------------------
-## show some rollouts
+    (; drag = 0.5, mass=1.0, σ_pos=0.2, σ_pos′=0.4))
+
 let 
     rollouts = [generate(data_process, 
         (true, times, 
@@ -195,24 +228,48 @@ let
     plot_traces(rollouts, times, "map rollouts", ex_trace) |> display
 end
 ##-----------------------------------------------------------
-# now, repeat the experiment with bad parameters
+# iterative synthesis utilities
+function select_elites(traces, elite_ratio)
+    traces = traces |> sort_by(get_score) |> reverse
+    local n = ceil(Int, length(traces)*elite_ratio)
+    traces[1:n]
+end
+
 function iterative_dyn_fitting(params₀, ex_data, iters)
-    params_est = params₀
+    local params_est = params₀
     params_history = [params_est]
     particle_history = []
+    score_history = []
     for i in 1:iters
         @info "iteration $i..."
         local pf_s = PF_inference_gen((;times, obs_map, ex_data.controls), 
-            params_to_model(params_est), 1000)
-        particles = pf_s.traces[1:200]
+            params_to_model(params_est), 500)
+        local particles = pf_s.traces
         params_est = fit_dynamics(particles, times, ex_data.controls, T, params_est)
         push!(params_history, params_est)
         push!(particle_history, particles)
         @show params_est
+        log_avg_prob = data_likelihood.(particles, Ref(T)) |> sum
+        @show log_avg_prob
+        push!(score_history, log_avg_prob)
     end
-    (; params_history, particle_history)
+    (; params_history, particle_history, score_history)
 end
+
+function plot_result((; params_history, particle_history, score_history);
+        truth_trace = nothing, max_particles_to_plot=100)
+    for (i, particles) in enumerate(particle_history)
+        local traces = particles[1:min(length(particles), max_particles_to_plot)]
+        local ts = get_args(traces[1])[2]
+        plot_traces(traces, ts, "iteration $i", truth_trace) |> display
+    end
+    plot(score_history, title="score_history", ylabel="log_avg_prob") |> display
+end
+
+##-----------------------------------------------------------
+# perform iterative synthesis
 bad_params = (; drag = 0.8, mass=4.0, σ_pos=0.5, σ_pos′=0.8)
 syn_result = iterative_dyn_fitting(bad_params, ex_data, 20)
 display(syn_result.params_history)
+plot_result(syn_result, truth_trace=ex_trace)
 ##-----------------------------------------------------------
