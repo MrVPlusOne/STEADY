@@ -481,6 +481,12 @@ git-tree-sha1 = "1cb2c362f919eea17c93e1c3c819f56376aba30f"
 uuid = "ea4f424c-a589-11e8-07c0-fd5c91b9da4a"
 version = "0.4.3"
 
+[[deps.GenParticleFilters]]
+deps = ["Distributions", "Gen", "Parameters", "Statistics"]
+git-tree-sha1 = "c81fac5c684880db08495d2103a59ee34508c4b0"
+uuid = "56b76ac4-72ef-411e-b419-6d312ed86a6f"
+version = "0.1.6"
+
 [[deps.GeometryBasics]]
 deps = ["EarCut_jll", "IterTools", "LinearAlgebra", "StaticArrays", "StructArrays", "Tables"]
 git-tree-sha1 = "58bcdf5ebc057b085e58d95c138725628dd7453c"
