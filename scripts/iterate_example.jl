@@ -1,6 +1,6 @@
 ##-----------------------------------------------------------
 using Gen
-using Plots
+using StatsPlots
 using ProgressMeter
 using StatsFuns: softmax, logsumexp, logsubexp
 ##-----------------------------------------------------------
@@ -30,6 +30,12 @@ using StatsFuns: softmax, logsumexp, logsubexp
     gen_mode && return (;states, controls)
 end
 
+function states_likelihood(trace)
+    (gen_mode, times, motion_model, obs_model, controller, controls) = get_args(trace)
+    states = get_states(trace, length(times))
+    states_likelihood(times, motion_model, states, controls)
+end
+
 function states_likelihood(times, motion_model, states, controls)
     T = length(times)
     s = logpdf(MvNormal([0.0, 0.0], [0.01, 0.5]), states[1])
@@ -42,10 +48,16 @@ function states_likelihood(times, motion_model, states, controls)
     s    
 end
 
+function data_likelihood(trace)
+    gen_mode, times = get_args(trace)
+    T = length(times)
+    states = get_states(trace, T)
+    data_likelihood(states, obs_model, get_observations(trace, T))
+end
+
 function data_likelihood(states, obs_model, observations)
-    sum(let
-    logpdf(MvNormal(obs_model(states[i+1])...), observations[i])
-    end for i in 1:length(states)-1)
+    sum(logpdf(MvNormal(obs_model(states[i])...), observations[i])
+    for i in 1:length(states)-1)
 end
 
 function get_states(trace, T)
@@ -184,38 +196,43 @@ let x = rand(5)
     exp.(log_softmax(x)) ≈ softmax(x) 
 end
 
-data_likelihood(trace, T) = 
-    data_likelihood(get_states(trace, T), obs_model, get_observations(trace, T))
+function sample_performance(log_joint_new, log_joint_old, log_data_p)
+    # compute the importance wights of the samples under the new dynamics        
+    local log_weights = log_softmax(log_joint_new .- log_joint_old .- log_data_p)
+    # compute the (weighted) expectated data log probability
+    logsumexp(log_weights .+ log_data_p)
+end
 
 function fit_dynamics(traces, times, controls, T, params_guess)
     trajectories = get_states.(traces, Ref(T))
-    old_logp = get_score.(traces)
-    data_scores = data_likelihood.(traces, Ref(T))
+    old_s = get_score.(traces)
+    data_scores = data_likelihood.(traces)
+    state_scores = states_likelihood.(traces)
 
-    function loss(vec)
+    function objective(vec)
         local params = to_params(vec)
-        # s_σ = logpdf(Normal(0.1, 0.01), params.σ_pos) + logpdf(Normal(0.2, 0.001), params.σ_pos′)
-        state_s = map(trajectories) do states
+        local state_s = map(trajectories) do states
             states_likelihood(times, 
                 (s, u, Δt) -> car_motion_model(s, u, Δt, params), states, controls)
         end
-        post_s = state_s .+ data_scores
+        local joint_s = state_s .+ data_scores
 
-        # we weight the samples by their relative probability in the new distribution 
-        log_weights = log_softmax(state_s) .- log_softmax(post_s)
-        # and maximize the (weighted) expectated sample probability
-        # regularization = sum(softmax(post_s) .* (log_softmax(post_s) .- old_logp)) # .- log_softmax(old_scores))
-        regularization = 0.5 * sum((post_s .- old_logp).^2)
-        logsumexp(log_weights .+ data_scores) - regularization
-        # -logsumexp(scores) - s_σ
-        # -sum(scores) - s_σ
+        local perf = sample_performance(joint_s, old_s, data_scores)
+        local kl = 0.5mean((joint_s .- old_s).^2)
+        perf - kl
     end
 
+    f_init = objective(params_guess)
     alg = Optim.LBFGS()
-    sol = Optim.maximize(loss, to_vec(params_guess), alg, autodiff=:forward)
+    sol = Optim.maximize(objective, to_vec(params_guess), alg, autodiff=:forward)
     Optim.converged(sol) || display(sol)
-    params = Optim.minimizer(sol) |> to_params
+    f_final = objective(Optim.maximizer(sol))
+    params = Optim.maximizer(sol) |> to_params
+    (; f_init, f_final, params)
 end
+
+as_real(x::Real) = x
+as_real(x::Dual) = x.value
 ##-----------------------------------------------------------
 # show some rollouts
 map_params = fit_dynamics(pf_s.traces[1:50], times, ex_data.controls, T, 
@@ -239,27 +256,28 @@ function select_elites(traces, elite_ratio)
     traces[1:n]
 end
 
-function iterative_dyn_fitting(params₀, ex_trace, iters)
+function iterative_dyn_fitting(params₀, ex_trace, iters; n_particles=500, n_trajs=100)
     local ex_data = get_retval(ex_trace)
     local params_est = params₀
     params_history = [params_est]
-    particle_history = []
+    traj_history = []
     score_history = []
     for i in 1:iters
         @info "iteration $i..."
         local pf_s = PF_inference_gen((;times, obs_map, ex_data.controls), 
-            params_to_model(params_est), 500)
-        local particles = pf_s.traces
-        params_est = fit_dynamics(particles, times, ex_data.controls, T, params_est)
+            params_to_model(params_est), n_particles)
+        local trajectories = pf_s.traces[1:n_trajs]
+        fit_r = fit_dynamics(trajectories, times, ex_data.controls, T, params_est)
+        @show fit_r
+        params_est = fit_r.params
         push!(params_history, params_est)
-        push!(particle_history, particles)
-        @show params_est
-        log_avg_prob = data_likelihood.(particles, Ref(T)) |> sum
-        @show log_avg_prob
-        push!(score_history, log_avg_prob)
-        plot_traces(particles[1:100], times, "iteration $i", ex_trace) |> display
+        push!(traj_history, trajectories)
+        local perf = sample_performance(0.0, 0.0, data_likelihood.(trajectories))
+        @show perf
+        push!(score_history, perf)
+        plot_traces(trajectories[1:100], times, "iteration $i", ex_trace) |> display
     end
-    (; params_history, particle_history, score_history)
+    (; params_history, traj_history, score_history)
 end
 
 function plot_result((; params_history, particle_history, score_history);
@@ -274,8 +292,10 @@ end
 
 ##-----------------------------------------------------------
 # perform iterative synthesis
+params = (; drag = 0.2, mass=1.5, σ_pos=0.1, σ_pos′=0.2)
 bad_params = (; drag = 0.8, mass=4.0, σ_pos=0.5, σ_pos′=0.8)
-syn_result = iterative_dyn_fitting(bad_params, ex_trace, 40)
-display(syn_result.params_history)
+# bad_params = (; drag = 0.254553, mass= 1.42392, σ_pos=0.31645, σ_pos′=0.584295)
+syn_result = iterative_dyn_fitting(bad_params, ex_trace, 100)
+show(DataFrame(syn_result.params_history), allrows=true)
 # plot_result(syn_result, truth_trace=ex_trace)
 ##-----------------------------------------------------------
