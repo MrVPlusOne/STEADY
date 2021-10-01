@@ -36,6 +36,7 @@ Metatheory.@metatheory_init()
 
 include("utils.jl")
 include("distributions_utils.jl")
+include("particle_filters.jl")
 include("control_utils.jl")
 include("DSL.jl")
 include("components.jl")

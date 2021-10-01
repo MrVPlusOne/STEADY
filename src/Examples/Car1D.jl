@@ -29,13 +29,6 @@ variable_data() = VariableData(
     ),
 )
 
-function data_logp((; x₀, x₀′, params, others), vdata::VariableData)
-    map(pairs(x₀)) do (k, v)
-        vdata.states
-    end
-
-end
-
 acceleration_f((; f, drag, mass, pos′)) = begin
     (pos′′ = (f - drag * pos′) / mass,)
 end
