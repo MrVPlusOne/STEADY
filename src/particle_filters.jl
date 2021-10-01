@@ -1,4 +1,5 @@
 using StatsFuns: softmax!
+using StatsBase: countmap
 
 struct StochasticSystem{X, U, Y, X0_Dist, Motion, ObsM}
     x0_dist::X0_Dist
@@ -33,9 +34,13 @@ function resample!(indices, weights, bins_buffer)
             end
         end
     end
+    Random.shuffle!(indices)
     return indices
 end
 
+"""
+Run particle filters forward in time
+"""
 function forward_filter(
     system::StochasticSystem{X}, (; times, controls, observations), n_particles; 
     resample_threshold::Float64 = 0.5,    
@@ -65,6 +70,57 @@ function forward_filter(
             indices = @views(ancestors[:, t])
             resample!(indices, w_vec, bins_buffer)
             current_lw .= 0.0
+            particles[:, t] = particles[indices, t]
+        end
+
+        Δt = times[t+1] - times[t]
+        u = controls[t]
+        particles[:, t+1] .= rand.(motion_model.(@views(particles[:, t]), Ref(u), Δt))
+        current_lw .+= logpdf.(obs_model.(@views(particles[:, t+1])), Ref(observations[t+1]))
+    end
+    log_weights[:, T] = current_lw
+    softmax!(@views(weights[:, T]), current_lw)
+
+    (; particles, weights, log_weights, ancestors)
+end
+
+"""
+Similar to particle filters, but try to track the data likelihood of the entire trajectory 
+by not resetting weights to 0 during resampling.
+"""
+function forward_smoother(
+    system::StochasticSystem{X}, (; times, controls, observations), n_particles; 
+    resample_threshold::Float64 = 0.5,    
+) where X
+    T, N = length(times), n_particles
+    (; x0_dist, motion_model, obs_model) = system
+    
+    particles = Matrix{X}(undef, N, T)
+    ancestors = Matrix{Int}(undef, N, T)
+    log_weights = Matrix{Float64}(undef, N, T) # unnormalized log weights
+    weights = Matrix{Float64}(undef, N, T) # normalized probabilities
+
+    particles[:, 1] .= (rand(x0_dist) for _ in 1:N)
+    ancestors[:, :] .= 1:N
+    
+    # log weights at the current time step
+    current_lw = logpdf.(obs_model.(@views(particles[:, 1])), Ref(observations[1]))
+    bins_buffer = zeros(Float64, N)
+
+    for t in 1:T-1
+        w_vec = @views weights[:, t]
+        softmax!(w_vec, current_lw)
+        log_weights[:, t] = current_lw
+        
+        # optionally resample
+        if effective_particles(w_vec) < N * resample_threshold
+            indices = @views(ancestors[:, t])
+            resample!(indices, w_vec, bins_buffer)
+            index_to_log_n = Dict(i => -log(n) for (i, n) in countmap(indices))
+            for i in 1:N
+                ancestor = indices[i]
+                current_lw[i] = log_weights[ancestor, t] + index_to_log_n[ancestor]
+            end
             particles[:, t] = particles[indices, t]
         end
 

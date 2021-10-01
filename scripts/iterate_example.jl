@@ -97,7 +97,7 @@ function car_motion_model((; drag, mass, σ_pos, σ_pos′))
         f = ctrl[1]
         (; pos′′) = Car1D.acceleration_f((;f, drag, mass, pos′))
         μ = @SVector[pos + Δt * pos′,  pos′ + Δt * pos′′]
-        SMvNormal(μ, abs.(@SVector[σ_pos * Δt, σ_pos′ * Δt]))
+        SMvNormal(μ, @SVector[σ_pos * Δt, σ_pos′ * Δt])
     end
 end
 
@@ -147,8 +147,9 @@ function particle_trajectories(particles::Matrix{P}, ancestors::Matrix{Int}) whe
 end
 
 function filter_smoother(system, data, n_particles; 
-        resample_threshold=0.5, thining=10)
-    (; particles, log_weights, ancestors) = forward_filter(system, data, n_particles; resample_threshold)
+        resample_threshold=1.0, thining=10, track_weights=true)
+    pf = track_weights ? forward_smoother : forward_filter
+    (; particles, log_weights, ancestors) = pf(system, data, n_particles; resample_threshold)
     trajs = particle_trajectories(particles, ancestors)
     trajectories = trajs[1:thining:end,:]
     log_weights = log_weights[1:thining:end, end]
@@ -167,14 +168,15 @@ end
 pf_result = @time forward_filter(true_system, obs_data, 10000)
 plot_particles(pf_result.particles, times, "particle filter", ex_data.states) |> display
 
-pfs_result = @time filter_smoother(true_system, obs_data, 1000)
+pfs_result = @time filter_smoother(true_system, obs_data, 10000; 
+    resample_threshold=1.0, track_weights=true)
 plot_particles(pfs_result[1], times, "filter-smoother", ex_data.states) |> display
 
 plot_trajectories(pfs_result[1], times, "filter-smoother", n_max=10) |> display
 
 check_log_scores(pfs_result[2], "trajectory weights")
 let dl = data_likelihood.(rows(pfs_result[1]), car_obs_model, Ref(obs_data.observations))
-    check_log_scores(dl + pfs_result[2], "data likelihood")
+    check_log_scores(pfs_result[2]-dl, "neg data likelihood")
 end
 let sl = map(rows(subsample(pfs_result[1], 50))) do r
         states_likelihood(r, times, x0_dist, true_motion_model, obs_data.controls)
@@ -187,14 +189,25 @@ let dl = data_likelihood.(rows(pfs_result[1]), car_obs_model, Ref(obs_data.obser
     end
     check_log_scores(dl .+ sl, "total likelihood")
 end
+
+let lws = [sum(x -> logpdf(Normal(), x), rand(Normal()) for _ in 1:100) for _ in 1:100]
+    check_log_scores(lws, "random walk")
+end
 ##-----------------------------------------------------------
 # dynamics fitting
 to_params(vec) = let
     local drag, mass, σ_pos, σ_pos′ = vec
-    (; drag, mass, σ_pos, σ_pos′)
+    (; drag, mass, σ_pos= abs(σ_pos), σ_pos′=abs(σ_pos′))
 end
 
 to_vec((; drag, mass, σ_pos, σ_pos′)) = [drag, mass, σ_pos, σ_pos′]
+
+# to_params(vec) = let
+#     local drag, mass = vec
+#     (; drag, mass, σ_pos=0.1, σ_pos′=0.2)
+# end
+
+# to_vec((; drag, mass, σ_pos, σ_pos′)) = [drag, mass]
 
 function log_softmax(x::AbstractArray{<:Real})
     u = maximum(x)
@@ -207,33 +220,35 @@ let x = rand(5)
     exp.(log_softmax(x)) ≈ softmax(x) 
 end
 
-# function sample_performance(log_prior, log_data_p; debug = false)
-#     # compute the importance wights of the samples under the new dynamics        
-#     local log_weights = log_softmax(log_prior .- log_data_p)
-#     if debug
-#         max_ratio = exp(maximum(log_weights) - minimum(log_weights))
-#         ess_prior = effective_particles(softmax(log_prior))
-#         ess = effective_particles(exp.(log_weights))
-#         @info sample_performance ess ess_prior max_ratio log_weights
-#     end
-#     # compute the (weighted) expectated data log probability
-#     logsumexp(log_weights .+ log_data_p)
-# end
-
-"""
-Compute the posterior average log data likelihood, ``∫ log(p(y|x)) p(x|y,f) dx``.
-"""
-function sample_performance(log_prior, log_data_p; debug = false)
+function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
     # compute the importance wights of the samples under the new dynamics        
-    local weights = softmax(log_prior)
+    local log_weights = log_softmax(log_prior .- log_data_p)
     if debug
-        max_ratio = maximum(weights)/minimum(weights)
-        ess = effective_particles(weights)
-        @info sample_performance ess max_ratio
+        n_samples = length(log_prior)
+        max_ratio = exp(maximum(log_weights) - minimum(log_weights))
+        ess_prior = effective_particles(softmax(log_prior))
+        ess_data_inv = effective_particles(softmax(-log_data_p))
+        ess = effective_particles(softmax(log_weights .+ log_data_p))
+        @info sample_performance n_samples ess ess_data_inv ess_prior max_ratio
     end
     # compute the (weighted) expectated data log probability
-    sum(weights .* log_data_p)
+    logsumexp(log_weights .+ log_data_p)
 end
+
+# """
+# Compute the posterior average log data likelihood, ``∫ log(p(y|x)) p(x|y,f) dx``.
+# """
+# function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
+#     # compute the importance wights of the samples under the new dynamics        
+#     local weights = softmax(log_prior)
+#     if debug
+#         max_ratio = maximum(weights)/minimum(weights)
+#         ess = effective_particles(weights)
+#         @info sample_performance ess max_ratio
+#     end
+#     # compute the (weighted) expectated data log probability
+#     sum(weights .* (log_data_p + log_state_p))
+# end
 
 function fit_dynamics(
         particles::Matrix, log_weights::Vector, times, x0_dist, (; controls, observations), 
@@ -246,12 +261,14 @@ function fit_dynamics(
 
     function objective(vec; use_λ::Bool=true)
         local params = to_params(vec)
+        local prior = logpdf(Normal(0.0, 0.5), params.σ_pos) + logpdf(Normal(0.0, 0.5), params.σ_pos′)
         local state_scores′ = states_likelihood.(
             trajectories, Ref(times), Ref(x0_dist), Ref(car_motion_model(params)), Ref(controls))
 
-        local perf = sample_performance(state_scores′ - state_scores + log_weights, data_scores)
+        local perf = sample_performance(state_scores′ - state_scores + log_weights, 
+            data_scores, state_scores′)
         local kl = 0.5mean((state_scores′ .- state_scores).^2)
-        perf - use_λ * λ * kl
+        prior + perf - use_λ * λ * kl
     end
 
     f_init = objective(params_guess; use_λ=false)
@@ -274,14 +291,21 @@ map_params = fit_dynamics(subsample(pfs_result[1], 200), subsample(pfs_result[2]
 ##-----------------------------------------------------------
 # iterative synthesis utilities
 function iterative_dyn_fitting(params₀, obs_data, iters; 
-        n_particles=10000, thining=50, trust_thresholds=(0.25, 0.75), plot_freq=10)
+        n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), plot_freq=10)
     
-    function sample_data(params)
+    function sample_data(params; debug=false)
         local system = params_to_system(params)
-        local particles, log_weights = filter_smoother(system, obs_data, n_particles; thining)
+        local particles, log_weights = filter_smoother(system, obs_data, n_particles; 
+            thining=1, track_weights=true, resample_threshold=1.0)
         local trajectories = rows(particles)
         local dl = data_likelihood.(trajectories, Ref(car_obs_model), Ref(obs_data.observations))
-        local perf = sample_performance(log_weights, dl; debug=true)
+        local sl = map(trajectories) do tr 
+            states_likelihood(
+                tr, times, system.x0_dist, system.motion_model, obs_data.controls)
+        end
+        local perf = sample_performance(log_weights, dl, sl; debug)
+        particles, log_weights, trajectories = subsample.(
+            (particles, log_weights, trajectories), Ref(max_trajs))
         (; particles, log_weights, trajectories, perf)
     end
     
@@ -293,7 +317,7 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
     λ_history = []
     λ = 1.0
     @showprogress for i in 1:iters
-        (; particles, log_weights, perf, trajectories) = sample_data(params_est)
+        (; particles, log_weights, perf, trajectories) = sample_data(params_est, debug=true)
         perf2 = sample_data(params_est).perf
 
         fit_r = fit_dynamics(particles, log_weights, times, x0_dist, obs_data, params_est; λ)
@@ -307,7 +331,7 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
             
             perfΔ = abs(perf2 - perf)
             if perfΔ > 0.5 * improve_pred
-                @warn "High performance variance" perfΔ
+                @info "High performance variance" perfΔ
             end
             λ_ratio = 1.5
             if ρ > trust_thresholds[2]
@@ -316,10 +340,10 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
                 λ *= λ_ratio
             end
         end
-        if ρ > 0.1
-            params_est = fit_r.params
+        if ρ < 0
+            @warn("Failed to improve the objective, reject the move.")
         else
-            @info("Failed to improve the objective, reject change.")
+            params_est = fit_r.params
         end
         push!(params_history, params_est)
         push!(traj_history, trajectories)
@@ -332,12 +356,12 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
     end
     (; params_history, traj_history, score_history)
 end
-
 ##-----------------------------------------------------------
 # perform iterative synthesis
 params = (; drag = 0.2, mass=1.5, σ_pos=0.1, σ_pos′=0.2)
-bad_params = (; drag = 1.0, mass=5.0, σ_pos=0.5, σ_pos′=0.8)
+bad_params = (; drag = 1.0, mass=6.0, σ_pos=0.4, σ_pos′=0.8)
 # bad_params = (; drag = 0.254553, mass= 1.42392, σ_pos=0.31645, σ_pos′=0.584295)
-syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, thining=20)
+syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, max_trajs=500)
 show(DataFrame(syn_result.params_history), allrows=true)
+plot(syn_result.score_history, title="log p(y|f)")
 ##-----------------------------------------------------------
