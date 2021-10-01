@@ -134,3 +134,10 @@ function forward_smoother(
 
     (; particles, weights, log_weights, ancestors)
 end
+
+function log_softmax(x::AbstractArray{<:Real})
+    u = maximum(x)
+    x = x .- u
+    dnum = logsumexp(x)
+    x .- dnum
+end
