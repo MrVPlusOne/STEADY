@@ -20,7 +20,7 @@ function prune_iteration! end
 struct NoPruner <: AbstractPruner end
 prune_iteration!(::NoPruner, ::EnumerationResult, types_to_prune, size; is_last) = []
 
-include("egraph_pruners.jl")
+include("pruners.jl")
 
 """
 Enumerate all program terms up until some AST size constraint `max_size`,

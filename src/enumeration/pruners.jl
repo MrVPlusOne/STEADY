@@ -237,7 +237,7 @@ prune_iteration!(pruner::IncrementalPruner, result::EnumerationResult, types_to_
             addexpr!(club.graph, special)
         end
     end
-
+    
     new_members = collect(TAST, result[size])
 
     kept, pruned, report = admit_members!(
