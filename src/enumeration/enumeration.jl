@@ -50,10 +50,20 @@ function enumerate_terms(
     found = Dict{PShape, Dict{Int, Dict{PUnit, Set{TAST}}}}()
     result = EnumerationResult(found, [], 0, 0, 0, 0)
 
+    prune_programs(size) = begin
+        result.pruning_time += @elapsed let
+            types_to_prune = types_with_size(size)
+            for x in prune_iteration!(pruner, result, types_to_prune, size, is_last=false)
+                prune!(result, x) 
+            end
+        end
+    end
+
     # size 1 programs consist of all variables
     foreach(vars) do v
         insert!(result, v, 1)
     end
+    prune_programs(1)
 
     signatures = env.signatures
     # construct larger programs from smaller ones
@@ -82,12 +92,7 @@ function enumerate_terms(
                 end
             end
         end
-        result.pruning_time += @elapsed let
-            types_to_prune = types_with_size(size)
-            for x in prune_iteration!(pruner, result, types_to_prune, size, is_last=false)
-                prune!(result, x) 
-            end
-        end
+        prune_programs(size)
     end
 
     result.pruning_time += @elapsed let 

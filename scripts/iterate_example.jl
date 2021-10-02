@@ -101,9 +101,10 @@ function car_motion_model((; drag, mass, σ_pos, σ_pos′))
     end
 end
 
+const wall_pos = 10.0
 function car_obs_model(state)
     (pos, pos′) = state
-    dis = 10.0 - pos
+    dis = wall_pos - pos
     v_mea = pos′
     SMvNormal(@SVector[dis, v_mea], @SVector[1.0, 0.3])
 end
@@ -356,4 +357,39 @@ bad_params = (; drag = 1.0, mass=6.0, σ_pos=0.4, σ_pos′=0.8)
 syn_result = iterative_dyn_fitting(params, obs_data, 200, n_particles=10000, max_trajs=500)
 show(DataFrame(syn_result.params_history), allrows=true)
 plot(syn_result.score_history, title="log p(y|f)")
+##-----------------------------------------------------------
+# full program synthesis
+shape_env = ℝenv()
+comp_env = ComponentEnv()
+components_scalar_arithmatic!(comp_env, can_grow=false)
+
+vdata = Car1D.variable_data()
+
+prior_p = let
+    x₀, x′₀ = ex_data.states[1]
+    syn_params = (;params.mass, params.drag)
+    others = (; wall=wall_pos)
+    logpdf(to_distribution(vdata), (;x₀, x′₀, params=syn_params, others))
+end
+if !isfinite(prior_p)
+    error("prior_p = $prior_p, some value may be out of its support.")
+end
+
+sketch = no_sketch(vdata.state′′_vars)
+prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
+
+params_dist = params_distribution(vdata)
+rand(params_dist)
+rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:100]
+pruner = IOPruner(; inputs=rand_inputs, comp_env)
+# pruner = RebootPruner(;comp_env.rules)
+senum = @time synthesis_enumeration(
+    vdata, sketch, Car1D.action_vars(), comp_env, 9; pruner)
+let rows = map(senum.enum_result.pruned) do r
+        (; r.pruned, r.reason)
+    end
+    show(DataFrame(rows), truncate=100)
+    println()
+end
+display(senum)
 ##-----------------------------------------------------------

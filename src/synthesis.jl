@@ -55,6 +55,10 @@ to_distribution(vdata::VariableData) = let
     DistrIterator(map(DistrIterator, all_dists))
 end
 
+params_distribution(vdata::VariableData) = begin
+    DistrIterator((;(v.name => dist for (v, dist) in vdata.dynamics_params)...))
+end
+
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
     check_type(var, value) = begin
         t = shape_env[var.type]

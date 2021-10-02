@@ -5,7 +5,7 @@ of the given [`PShape`](@ref).
 @kwdef(
 mutable struct EnumerationResult
     programs::Dict{PShape, Dict{Int, Dict{PUnit, Set{TAST}}}}
-    pruned::Vector{@NamedTuple{pruned::TAST, by::TAST, explain::Any}}
+    pruned::Vector{@NamedTuple{pruned::TAST, reason::Any}}
     n_created::Int
     n_deleted::Int
     total_time::Float64
@@ -54,7 +54,7 @@ Base.insert!(r::EnumerationResult, prog::TAST, size=ast_size(prog)) = begin
     r
 end
 
-prune!(r::EnumerationResult, (; pruned, by, explain)) = begin
+prune!(r::EnumerationResult, (; pruned, reason)) = begin
     p = pruned
     (; shape, unit) = p.type
     unit_map = r.programs[shape][ast_size(p)]
@@ -63,7 +63,7 @@ prune!(r::EnumerationResult, (; pruned, by, explain)) = begin
     delete!(ps, p)
     isempty(ps) && delete!(unit_map, unit)
     r.n_deleted += 1
-    push!(r.pruned, (; pruned, by, explain))
+    push!(r.pruned, (; pruned, reason))
     r
 end
 

@@ -39,7 +39,7 @@ function admit_members!(
     report = saturate!(graph, rules, params)
     
     kept = M[]
-    pruned = @NamedTuple{pruned::M, by::M}[]
+    pruned = @NamedTuple{pruned::M, reason::Any}[]
     pruned_classes = Tuple{EClassId, EClassId}[]
     
 
@@ -70,24 +70,15 @@ function admit_members!(
         else
             # pruned!
             @assert cost_f(exist_m) <= cost_f(m)
-            push!(pruned, (pruned=m, by=exist_m))
+            push!(pruned, (pruned=m, reason=exist_m))
             # TODO: this only works when exist_m ∈ new_members
             exist_id = member_ids[exist_m]
             @assert m_id != exist_id "m: $m, exist_m: $exist_m"
             push!(pruned_classes, (m_id, exist_id))
         end
     end
-    pruned_explain = 
-        map(zip(pruned, pruned_classes)) do ((; pruned, by), (a, b))
-            e = if hasfield(typeof(graph), :proof_forest) && graph.proof_forest !== nothing
-                Metatheory.EGraphs.explain_equality(graph.proof_forest, a, b)
-            else
-                nothing
-            end
-            (; pruned, by, explain=e)
-        end |> collect
     
-    (; kept, pruned_explain, report)
+    (; kept, pruned, report)
 end
 
 
@@ -113,6 +104,83 @@ end
 
 
 ## --- pruners ---
+"""
+Prune programs using their input-output behaviors on a given set of inputs. 
+"""
+@kwdef(
+struct IOPruner{In} <: AbstractPruner
+    inputs::Vector{In}
+    comp_env::ComponentEnv
+    tolerance::Float64 = 1e-10
+    "how many digits to use when rounding values in the IO vectors."
+    tol_digits::Int = floor(Int, -log10(tolerance))
+    prog_to_vec::Dict{TAST, Vector{<:Any}} = Dict{TAST, Vector{<:Any}}()
+    vec_to_prog::Dict{Vector{<:Any}, TAST} = Dict{Vector{<:Any}, TAST}()
+end)
+
+function round_values(v::Real; digits)
+    round(v; digits)
+end
+
+function round_values(v::AbstractVector; digits)
+    round.(v; digits)
+end
+
+function is_valid_value(v::Union{Real, AbstractVector})
+    isfinite(v)
+end
+
+
+function prune_iteration!(pruner::IOPruner, result::EnumerationResult, types_to_prune, size; is_last)
+    is_last && return []
+    
+    (; inputs, comp_env, prog_to_vec, vec_to_prog, tol_digits) = pruner
+    
+    pruned = []
+    function try_prune(prog)
+        local new_vec
+        @assert !haskey(prog_to_vec, prog)
+        if prog isa Call
+            arg_vecs = map(prog.args) do a
+                prog_to_vec[a]
+            end
+            f = comp_env.impl_dict[prog.f]
+            try
+                new_vec = f.(arg_vecs...)
+            catch e
+                if e isa Union{OverflowError, DomainError}
+                    return "evaluation error: $e"
+                else
+                    rethrow(e)
+                end
+            end
+        else
+            @assert prog isa Var
+            new_vec = getfield.(inputs, prog.name)
+        end
+        all(is_valid_value, new_vec) || return "invalid values: $new_vec"
+        
+        vec_rounded = round_values(new_vec; digits=tol_digits)
+        similar_p = get(vec_to_prog, vec_rounded, nothing)
+        similar_p === nothing || return "similar program: $similar_p"
+
+        prog_to_vec[prog] = new_vec
+        vec_to_prog[vec_rounded] = prog
+
+        return nothing
+    end
+
+    if size == 1
+        empty!(pruner.prog_to_vec) # reset the pruner
+        empty!(pruner.vec_to_prog) # reset the pruner
+    end
+    for prog in result[size]
+        outcome = try_prune(prog) 
+        outcome === nothing || push!(pruned, (pruned=prog, reason=outcome))
+    end
+    pruned
+end
+
 
 """
 Build a new e-graph at every iteration.
@@ -143,7 +211,7 @@ prune_iteration!(pruner::RebootPruner, result::EnumerationResult, types_to_prune
         push!(reports, report)
         pruned
     else
-        TAST[]
+        []
     end
 
 """
