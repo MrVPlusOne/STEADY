@@ -91,11 +91,11 @@ function plot_trajectories(trajectories, times, name; n_max=50)
     plot(p1, p2, layout=(2,1), size=(600, 800), legend=false)
 end
 
-function car_motion_model((; drag, mass, σ_pos, σ_pos′))
+function car_motion_model((; drag, mass, σ_pos, σ_pos′); f_x′′=Car1D.acceleration_f)
     (state, ctrl, Δt) -> begin
         (pos, pos′) = state
         f = ctrl[1]
-        (; pos′′) = Car1D.acceleration_f((;f, drag, mass, pos′))
+        (; pos′′) = f_x′′((;pos, pos′, f, drag, mass))
         μ = @SVector[pos + Δt * pos′,  pos′ + Δt * pos′′]
         SMvNormal(μ, @SVector[σ_pos * Δt, (abs(pos′) + 0.1) * σ_pos′ * Δt])
     end
@@ -124,6 +124,9 @@ car_controller = (s, z) -> begin
 end
 true_motion_model = car_motion_model(params)
 x0_dist = SMvNormal(@SVector[0.0, 0.0], @SVector[0.01, 0.5])
+params_dist = DistrIterator(
+    (drag=SUniform(0.0, 1.0), mass=SUniform(0.5, 5.0), 
+    σ_pos=Normal(), σ_pos′=Normal()))
 true_system = params_to_system(params)
 
 ex_data = simulate_trajectory(times, true_system, car_controller)
@@ -241,36 +244,49 @@ function expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
 end
 
 function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
-    expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
+    # expected_log_p(log_prior, log_data_p, log_state_p; debug)
+    expected_data_p(log_prior, log_data_p, log_state_p; debug)
 end
 
-function fit_dynamics(
-        particles::Matrix, log_weights::Vector, times, x0_dist, (; controls, observations), 
-        params_guess; λ::Float64)
+function fit_dynamics_params(
+    f_x′′::Function,
+    particles::Matrix, log_weights::Vector, 
+    x0_dist, params_dist,
+    times, (; controls, observations), 
+    params_guess::NamedTuple; λ::Float64
+)
     trajectories = rows(particles)
     data_scores = data_likelihood.(
         trajectories, Ref(car_obs_model), Ref(observations))
     state_scores = states_likelihood.(
-        trajectories, Ref(times), Ref(x0_dist), Ref(car_motion_model(params_guess)), Ref(controls))
+        trajectories, Ref(times), Ref(x0_dist), 
+        Ref(car_motion_model(params_guess; f_x′′)), Ref(controls))
+    p_bj = bijector(params_dist)
+    p_inv = inv(p_bj)
+    # p_bj = p_inv = identity
 
     function objective(vec; use_λ::Bool=true)
-        local params = to_params(vec)
-        local prior = logpdf(Normal(0.0, 0.5), params.σ_pos) + logpdf(Normal(0.0, 0.5), params.σ_pos′)
+        local params = to_params(vec) |> p_inv
+        local prior = logpdf(params_dist, params)
         local state_scores′ = states_likelihood.(
-            trajectories, Ref(times), Ref(x0_dist), Ref(car_motion_model(params)), Ref(controls))
+            trajectories, Ref(times), Ref(x0_dist), 
+            Ref(car_motion_model(params; f_x′′)), Ref(controls))
 
-        local perf = sample_performance(#=state_scores′ - state_scores=# + log_weights, 
+        local perf = sample_performance(state_scores′ - state_scores + log_weights, 
             data_scores, state_scores′)
         local kl = 0.5mean((state_scores′ .- state_scores).^2)
         prior + perf - use_λ * λ * kl
     end
 
-    f_init = objective(params_guess; use_λ=false)
+    pvec_guess = to_vec(p_bj(params_guess |> to_vec |> to_params))
+    f_init = objective(pvec_guess; use_λ=false)
     alg = Optim.LBFGS()
-    sol = Optim.maximize(objective, to_vec(params_guess), alg, autodiff=:forward)
+    optim_options = Optim.Options(x_abstol=1e-3)
+    sol = Optim.maximize(objective, pvec_guess, alg, autodiff=:forward, optim_options)
     Optim.converged(sol) || display(sol)
-    f_final = objective(Optim.maximizer(sol); use_λ=false)
-    params = Optim.maximizer(sol) |> to_params
+    pvec_final = Optim.maximizer(sol)
+    f_final = objective(pvec_final; use_λ=false)
+    params = pvec_final |> to_params |> p_inv
     (; f_init, f_final, params)
 end
 
@@ -278,9 +294,11 @@ as_real(x::Real) = x
 as_real(x::Dual) = x.value
 ##-----------------------------------------------------------
 # simple test
-map_params = fit_dynamics(subsample(pfs_result[1], 200), subsample(pfs_result[2], 200), 
-    times, x0_dist, obs_data,
-    (; drag = 0.5, mass=1.0, σ_pos=0.2, σ_pos′=0.4); 
+map_params = fit_dynamics_params(
+    Car1D.acceleration_f,
+    subsample(pfs_result[1], 200), subsample(pfs_result[2], 200), 
+    x0_dist, params_dist,
+    times, obs_data, (; drag = 0.5, mass=1.0, σ_pos=0.2, σ_pos′=0.4); 
     λ=1.0)
 ##-----------------------------------------------------------
 # iterative synthesis utilities
@@ -311,10 +329,14 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
     λ_history = []
     λ = 1.0
     @showprogress for i in 1:iters
-        (; particles, log_weights, perf, trajectories) = sample_data(params_est, debug=true)
+        (; particles, log_weights, perf, trajectories) = sample_data(params_est, debug=false)
         perf2 = sample_data(params_est).perf
 
-        fit_r = fit_dynamics(particles, log_weights, times, x0_dist, obs_data, params_est; λ)
+        fit_r = fit_dynamics_params(
+            Car1D.acceleration_f,
+            particles, log_weights, 
+            x0_dist, params_dist,
+            times, obs_data, params_est; λ)
         perf_new = sample_data(fit_r.params).perf
 
         begin
@@ -335,10 +357,9 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
             end
         end
         if ρ < 0
-            @warn("Failed to improve the objective, reject the move.")
-        else
-            params_est = fit_r.params
+            @warn("Failed to improve the objective.")
         end
+        params_est = fit_r.params
         push!(params_history, params_est)
         push!(traj_history, trajectories)
         push!(score_history, perf)
@@ -352,16 +373,21 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
 end
 ##-----------------------------------------------------------
 # perform iterative synthesis
-bad_params = (; drag = 1.0, mass=6.0, σ_pos=0.4, σ_pos′=0.8)
+bad_params = (; drag = 0.8, mass=4.6, σ_pos=0.4, σ_pos′=0.8)
 # bad_params = (; drag = 0.254553, mass= 1.42392, σ_pos=0.31645, σ_pos′=0.584295)
-syn_result = iterative_dyn_fitting(params, obs_data, 200, n_particles=10000, max_trajs=500)
+syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, max_trajs=500)
 show(DataFrame(syn_result.params_history), allrows=true)
 plot(syn_result.score_history, title="log p(y|f)")
 ##-----------------------------------------------------------
-# full program synthesis
+# program synthesis utilities
+
+
+##-----------------------------------------------------------
+# perform full program synthesis
 shape_env = ℝenv()
 comp_env = ComponentEnv()
-components_scalar_arithmatic!(comp_env, can_grow=false)
+components_scalar_arithmatic!(comp_env, can_grow=true)
+components_transcendentals!(comp_env, can_grow=true)
 
 vdata = Car1D.variable_data()
 
@@ -384,7 +410,7 @@ rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(param
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
 senum = @time synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 9; pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 8; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
