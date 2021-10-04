@@ -42,7 +42,7 @@ include("DSL.jl")
 include("components.jl")
 include("enumeration/enumeration.jl")
 include("compiler.jl")
-include("synthesis.jl")
+include("synthesis/synthesis.jl")
 include("Examples/Examples.jl")
 include("tests.jl")
 

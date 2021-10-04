@@ -96,14 +96,6 @@ to_measurement(values) = begin
     μ ± σ
 end
 
-max_by(f) = xs -> begin
-    ys = map(f, xs)
-    _, i = findmax(ys)
-    xs[i]
-end
-
-sort_by(f) = xs -> sort(xs, by=f)
-
 pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
 pretty_number(v::Measurement) = string(v)
 
@@ -124,7 +116,8 @@ Apply a tuple of functions to a NamedTuple of corresponding arguments. The resul
 NamedTuple.
 """
 @inline function zipmap(fs, xs::X)::X where {X<:NamedTuple}
-    @assert length(fs) == length(xs) "Need the same number of functions and values"
+    @assert length(fs) == length(xs) "Need the same number of functions and values.\
+        \nfs = $fs\nxs = $xs."
     t = ntuple(i -> fs[i](xs[i]), length(xs))
     NamedTuple{keys(xs)}(t)
 end
@@ -191,6 +184,7 @@ end
 # end
 
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
+to_svec(vec::NTuple{n, X}) where {n, X} = SVector{n, X}(vec)
 
 """
 Like `get!`, but can be used to directly access nested dictionaries.
@@ -254,3 +248,16 @@ A helper macro to find functions by name.
 @generated function find_func(T, args...)
     return Expr(:splatnew, :T, :args)
 end
+
+##-----------------------------------------------------------
+# convenient combinators
+Base.map(f) = xs -> map(f, xs)
+Base.filter(f) = xs -> filter(f, xs)
+max_by(f) = xs -> begin
+    ys = map(f, xs)
+    _, i = findmax(ys)
+    xs[i]
+end
+
+sort_by(f) = xs -> sort(xs, by=f)
+##-----------------------------------------------------------

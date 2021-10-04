@@ -51,24 +51,26 @@ function data_likelihood(states, obs_model, observations)
 end
 
 plot_states!(plt, states, times, name) = begin
-    plot!(plt, times, reduce(hcat, states)', label=["x ($name)" "v ($name)"])
+    @unzip xs, vs = states
+    plot!(plt, times, hcat(xs, vs), label=["x ($name)" "v ($name)"])
 end
 plot_states(states, times, name) = 
     plot_states!(plot(legend=:outerbottom), states, times, name)
 
-plot_particles(particles::Matrix, times, name, true_states=nothing) = let
-    @unzip y_mean, y_std = map(1:length(times)) do t
-        ys = particles[:, t]
-        mean(ys), 2std(ys)
+plot_particles(particles::Matrix, times, name, true_states=nothing) = 
+    let particles = (to_svec ∘ values).(particles)
+        @unzip y_mean, y_std = map(1:length(times)) do t
+            ys = particles[:, t]
+            mean(ys), 2std(ys)
+        end
+        to_data(vecs) = reduce(hcat, vecs)'
+        p = plot(times, to_data(y_mean), ribbon=to_data.((y_std, y_std)), 
+            label=["x ($name)" "v ($name)"])
+        if true_states !== nothing
+            plot_states!(p, true_states, times, "truth")
+        end
+        plot(p, legend=:outerbottom)
     end
-    to_data(vecs) = reduce(hcat, vecs)'
-    p = plot(times, to_data(y_mean), ribbon=to_data.((y_std, y_std)), 
-        label=["x ($name)" "v ($name)"])
-    if true_states !== nothing
-        plot_states!(p, true_states, times, "truth")
-    end
-    plot(p, legend=:outerbottom)
-end
 
 function subsample(xs, n_max)
     N = min(n_max, size(xs,1))
@@ -91,13 +93,16 @@ function plot_trajectories(trajectories, times, name; n_max=50)
     plot(p1, p2, layout=(2,1), size=(600, 800), legend=false)
 end
 
-function car_motion_model((; drag, mass, σ_pos, σ_pos′); f_x′′=Car1D.acceleration_f)
+function car_motion_model((; drag, mass); 
+    f_x′′=Car1D.acceleration_f, σ=(σ_pos=0.1, σ_pos′=0.2),
+)
     (state, ctrl, Δt) -> begin
         (pos, pos′) = state
         f = ctrl[1]
         (; pos′′) = f_x′′((;pos, pos′, f, drag, mass))
-        μ = @SVector[pos + Δt * pos′,  pos′ + Δt * pos′′]
-        SMvNormal(μ, @SVector[σ_pos * Δt, (abs(pos′) + 0.1) * σ_pos′ * Δt])
+        DistrIterator(
+            (pos=SNormal(pos + Δt * pos′, σ.σ_pos * Δt),
+            pos′=SNormal(pos′ + Δt * pos′′, (abs(pos′) + 0.1) * σ.σ_pos′ * Δt)))
     end
 end
 
@@ -111,23 +116,22 @@ end
 
 function params_to_system(params)
     StochasticSystem(x0_dist, car_motion_model(params), car_obs_model; 
-        X=SVector{2, Float64}, Y=SVector{2, Float64}, U=SVector{1, Float64})
+        X=typeof(rand(x0_dist)), Y=SVector{2, Float64}, U=SVector{1, Float64})
 end
 ##-----------------------------------------------------------
 # generate data
 Random.seed!(123)
 times = collect(0.0:0.1:8.0)
 T = length(times)
-params = (; drag = 0.2, mass=1.5, σ_pos=0.1, σ_pos′=0.2)
+params = (; mass=1.5, drag = 0.2) #, σ_pos=0.1, σ_pos′=0.2)
 car_controller = (s, z) -> begin
     @SVector[Car1D.controller((speed=z[2], sensor=z[1])).f]
 end
-true_motion_model = car_motion_model(params)
-x0_dist = SMvNormal(@SVector[0.0, 0.0], @SVector[0.01, 0.5])
-params_dist = DistrIterator(
-    (drag=SUniform(0.0, 1.0), mass=SUniform(0.5, 5.0), 
-    σ_pos=Normal(), σ_pos′=Normal()))
+vdata = Car1D.variable_data()
+x0_dist = init_state_distribution(vdata)
+params_dist = params_distribution(vdata)
 true_system = params_to_system(params)
+true_motion_model = true_system.motion_model
 
 ex_data = simulate_trajectory(times, true_system, car_controller)
 obs_data = (; times, ex_data.observations, ex_data.controls)
@@ -200,95 +204,11 @@ end
 ##-----------------------------------------------------------
 # dynamics fitting
 to_params(vec) = let
-    local drag, mass = vec#, σ_pos, σ_pos′ = vec
-    (; drag, mass, σ_pos=0.1, σ_pos′=0.2) # σ_pos= abs(σ_pos), σ_pos′=abs(σ_pos′))
+    local mass, drag = vec#, σ_pos, σ_pos′ = vec
+    (; mass, drag) # σ_pos= abs(σ_pos), σ_pos′=abs(σ_pos′))
 end
 
-to_vec((; drag, mass, σ_pos, σ_pos′)) = [drag, mass]#, σ_pos, σ_pos′]
-
-# to_params(vec) = let
-#     local drag, mass = vec
-#     (; drag, mass, σ_pos=0.1, σ_pos′=0.2)
-# end
-
-# to_vec((; drag, mass, σ_pos, σ_pos′)) = [drag, mass]
-
-function expected_data_p(log_prior, log_data_p, log_state_p; debug = false)
-    # compute the importance wights of the samples under the new dynamics        
-    local log_weights = log_softmax(log_prior .- log_data_p)
-    if debug
-        n_samples = length(log_prior)
-        max_ratio = exp(maximum(log_weights) - minimum(log_weights))
-        ess_prior = effective_particles(softmax(log_prior))
-        ess_data_inv = effective_particles(softmax(-log_data_p))
-        ess = effective_particles(softmax(log_weights .+ log_data_p))
-        @info expected_data_p n_samples ess ess_data_inv ess_prior max_ratio
-    end
-    # compute the (weighted) expectated data log probability
-    logsumexp(log_weights .+ log_data_p)
-end
-
-"""
-Compute the posterior average log data likelihood, ``∫ log(p(y|x)) p(x|y,f) dx``.
-"""
-function expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
-    # compute the importance wights of the samples under the new dynamics        
-    local weights = softmax(log_prior)
-    if debug
-        max_ratio = maximum(weights)/minimum(weights)
-        ess = effective_particles(weights)
-        @info expected_log_p ess max_ratio
-    end
-    # compute the (weighted) expectated data log probability
-    sum(weights .* (log_data_p + log_state_p))
-end
-
-function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
-    # expected_log_p(log_prior, log_data_p, log_state_p; debug)
-    expected_data_p(log_prior, log_data_p, log_state_p; debug)
-end
-
-function fit_dynamics_params(
-    f_x′′::Function,
-    particles::Matrix, log_weights::Vector, 
-    x0_dist, params_dist,
-    times, (; controls, observations), 
-    params_guess::NamedTuple; λ::Float64
-)
-    trajectories = rows(particles)
-    data_scores = data_likelihood.(
-        trajectories, Ref(car_obs_model), Ref(observations))
-    state_scores = states_likelihood.(
-        trajectories, Ref(times), Ref(x0_dist), 
-        Ref(car_motion_model(params_guess; f_x′′)), Ref(controls))
-    p_bj = bijector(params_dist)
-    p_inv = inv(p_bj)
-    # p_bj = p_inv = identity
-
-    function objective(vec; use_λ::Bool=true)
-        local params = to_params(vec) |> p_inv
-        local prior = logpdf(params_dist, params)
-        local state_scores′ = states_likelihood.(
-            trajectories, Ref(times), Ref(x0_dist), 
-            Ref(car_motion_model(params; f_x′′)), Ref(controls))
-
-        local perf = sample_performance(state_scores′ - state_scores + log_weights, 
-            data_scores, state_scores′)
-        local kl = 0.5mean((state_scores′ .- state_scores).^2)
-        prior + perf - use_λ * λ * kl
-    end
-
-    pvec_guess = to_vec(p_bj(params_guess |> to_vec |> to_params))
-    f_init = objective(pvec_guess; use_λ=false)
-    alg = Optim.LBFGS()
-    optim_options = Optim.Options(x_abstol=1e-3)
-    sol = Optim.maximize(objective, pvec_guess, alg, autodiff=:forward, optim_options)
-    Optim.converged(sol) || display(sol)
-    pvec_final = Optim.maximizer(sol)
-    f_final = objective(pvec_final; use_λ=false)
-    params = pvec_final |> to_params |> p_inv
-    (; f_init, f_final, params)
-end
+to_vec((; mass, drag, )) = [mass, drag]#, σ_pos, σ_pos′]
 
 as_real(x::Real) = x
 as_real(x::Dual) = x.value
@@ -298,30 +218,32 @@ map_params = fit_dynamics_params(
     Car1D.acceleration_f,
     subsample(pfs_result[1], 200), subsample(pfs_result[2], 200), 
     x0_dist, params_dist,
-    times, obs_data, (; drag = 0.5, mass=1.0, σ_pos=0.2, σ_pos′=0.4); 
+    times, obs_data, (; mass=1.0, drag = 0.5);
     λ=1.0)
 ##-----------------------------------------------------------
 # iterative synthesis utilities
+function sample_posterior_data(params, obs_data; n_particles, max_trajs, debug=false)
+    local system = params_to_system(params)
+    local particles, log_weights = filter_smoother(system, obs_data, n_particles; 
+        thining=1, track_weights=true, resample_threshold=1.0)
+    local trajectories = rows(particles)
+    local dl = data_likelihood.(trajectories, Ref(car_obs_model), Ref(obs_data.observations))
+    local sl = map(trajectories) do tr 
+        states_likelihood(
+            tr, times, system.x0_dist, system.motion_model, obs_data.controls)
+    end
+    local perf = sample_performance(log_weights, dl, sl; debug)
+    particles, log_weights, trajectories = subsample.(
+        (particles, log_weights, trajectories), Ref(max_trajs))
+    (; particles, log_weights, trajectories, perf)
+end
+
 function iterative_dyn_fitting(params₀, obs_data, iters; 
         n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), plot_freq=10)
-    
-    function sample_data(params; debug=false)
-        local system = params_to_system(params)
-        local particles, log_weights = filter_smoother(system, obs_data, n_particles; 
-            thining=1, track_weights=true, resample_threshold=1.0)
-        local trajectories = rows(particles)
-        local dl = data_likelihood.(trajectories, Ref(car_obs_model), Ref(obs_data.observations))
-        local sl = map(trajectories) do tr 
-            states_likelihood(
-                tr, times, system.x0_dist, system.motion_model, obs_data.controls)
-        end
-        local perf = sample_performance(log_weights, dl, sl; debug)
-        particles, log_weights, trajectories = subsample.(
-            (particles, log_weights, trajectories), Ref(max_trajs))
-        (; particles, log_weights, trajectories, perf)
-    end
-    
-    params_est = params₀
+    params_est::NamedTuple = params₀
+
+    sample_data = (params; debug=false) -> 
+        sample_posterior_data(params, obs_data; n_particles, max_trajs, debug)
 
     params_history = typeof(params_est)[]
     traj_history = []
@@ -329,7 +251,7 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
     λ_history = []
     λ = 1.0
     @showprogress for i in 1:iters
-        (; particles, log_weights, perf, trajectories) = sample_data(params_est, debug=false)
+        (; particles, log_weights, perf) = sample_data(params_est)
         perf2 = sample_data(params_est).perf
 
         fit_r = fit_dynamics_params(
@@ -361,7 +283,7 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
         end
         params_est = fit_r.params
         push!(params_history, params_est)
-        push!(traj_history, trajectories)
+        push!(traj_history, particles)
         push!(score_history, perf)
         push!(λ_history, λ)
         @show "iteration finished" λ perf params_est
@@ -373,23 +295,20 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
 end
 ##-----------------------------------------------------------
 # perform iterative synthesis
-bad_params = (; drag = 0.8, mass=4.6, σ_pos=0.4, σ_pos′=0.8)
-# bad_params = (; drag = 0.254553, mass= 1.42392, σ_pos=0.31645, σ_pos′=0.584295)
-syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, max_trajs=500)
-show(DataFrame(syn_result.params_history), allrows=true)
-plot(syn_result.score_history, title="log p(y|f)")
-##-----------------------------------------------------------
-# program synthesis utilities
-
-
+bad_params = (; mass=4.6, drag = 0.8)
+skip_iterative_synthesis = true
+if !skip_iterative_synthesis
+    @info "Starting iterative_dyn_fitting..."
+    syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, max_trajs=500)
+    show(DataFrame(syn_result.params_history), allrows=true)
+    plot(syn_result.score_history, title="log p(y|f)")
+end
 ##-----------------------------------------------------------
 # perform full program synthesis
 shape_env = ℝenv()
 comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
 components_transcendentals!(comp_env, can_grow=true)
-
-vdata = Car1D.variable_data()
 
 prior_p = let
     x₀, x′₀ = ex_data.states[1]
@@ -404,13 +323,12 @@ end
 sketch = no_sketch(vdata.state′′_vars)
 prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
 
-params_dist = params_distribution(vdata)
 rand(params_dist)
 rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:100]
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
 senum = @time synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 8; pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
@@ -418,4 +336,13 @@ let rows = map(senum.enum_result.pruned) do r
     println()
 end
 display(senum)
+##-----------------------------------------------------------
+# test synthesis iteration
+post_data=sample_posterior_data(params, obs_data; n_particles=10_000, max_trajs=200)
+@info "Starting fit_dynamics..."
+results = map(1:6) do i
+    fit_dynamics(senum, post_data.particles, post_data.log_weights, times, obs_data, 
+        nothing; λ=0.1, n_threads=6
+    )
+end
 ##-----------------------------------------------------------
