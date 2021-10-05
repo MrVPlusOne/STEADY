@@ -63,11 +63,10 @@ function enumerate_terms(
     foreach(vars) do v
         insert!(result, v, 1)
     end
-    prune_programs(1)
 
     signatures = env.signatures
     # construct larger programs from smaller ones
-    @showprogress desc="bottom_up_enum" for size in 2:max_size 
+    @showprogress desc="bottom_up_enum" for size in 1:max_size 
         for (f, sig) in signatures
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable

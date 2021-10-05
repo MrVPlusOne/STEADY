@@ -105,7 +105,7 @@ function fit_dynamics_iterative(
         push!(λ_history, λ)
 
         # TODO: generalize this
-        plot_freq = 5
+        plot_freq = 4
         if iter % plot_freq == 1
             plot_particles(particles, times, "iteration $iter", ex_data.states) |> display
         end
@@ -141,8 +141,8 @@ function fit_dynamics(
     )
 
     ctx = (; compile_ctx, 
-        particles, log_weights, x0_dist, params_dist, program_logp, times, optim_options, 
-        evals_per_program, obs_data=(; controls, observations), 
+        particles, log_weights, x0_dist, params_dist, program_logp, optim_options, 
+        evals_per_program, obs_data=(; times, controls, observations), 
         params_guess, λ, use_bijectors)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
@@ -188,12 +188,12 @@ function evaluate_dynamics(ctx, comps, f_x′′)
 end
 
 function evaluate_dynamics_once(ctx, comps, f_x′′)
-    (; particles, log_weights, x0_dist, params_dist, program_logp, times, obs_data) = ctx
+    (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
     (;  params_guess, λ, use_bijectors, optim_options) = ctx
     p₀ = params_guess === nothing ? rand(params_dist) : params_guess
     try
         local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
-            x0_dist, params_dist, times, obs_data, p₀; λ, use_bijectors, optim_options)
+            x0_dist, params_dist, obs_data, p₀; λ, use_bijectors, optim_options)
         if isnan(value.f_final)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
@@ -243,8 +243,8 @@ function expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
 end
 
 function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
-    # expected_log_p(log_prior, log_data_p, log_state_p; debug)
-    expected_data_p(log_prior, log_data_p, log_state_p; debug)
+    expected_log_p(log_prior, log_data_p, log_state_p; debug)
+    # expected_data_p(log_prior, log_data_p, log_state_p; debug)
 end
 
 function fit_dynamics_params(

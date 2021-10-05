@@ -308,7 +308,7 @@ if !skip_iterative_synthesis
     plot(syn_result.score_history, title="log p(y|f)")
 end
 ##-----------------------------------------------------------
-# perform full program synthesis
+# program enumeration test
 shape_env = ℝenv()
 comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
@@ -330,7 +330,7 @@ rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(param
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
 senum = @time synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 5; pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
@@ -338,9 +338,11 @@ let rows = map(senum.enum_result.pruned) do r
     println()
 end
 display(senum)
+senum.enum_result[sketch.holes[1].type] |> collect
 ##-----------------------------------------------------------
 # test synthesis iteration
-post_data=sample_posterior_data(true_params, x0_dist, obs_data; n_particles=10_000, max_trajs=100)
+post_data=sample_posterior_data(true_params, x0_dist, obs_data, Car1D.acceleration_f; 
+    n_particles=10_000, max_trajs=100)
 optim_options = Optim.Options(
     f_abstol=1e-4,
     iterations=100,
@@ -380,6 +382,7 @@ iter_result = let senum = synthesis_enumeration(
         use_bijectors=true, n_threads=5, use_distributed=false, 
         evals_per_program=20, 
         patience=100,
+        λ_multiplier=1.0,
     )
 end
 plot(iter_result.score_history)

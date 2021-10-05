@@ -115,7 +115,7 @@ struct IOPruner{In} <: AbstractPruner
     "how many digits to use when rounding values in the IO vectors."
     tol_digits::Int = floor(Int, -log10(tolerance))
     prog_to_vec::Dict{TAST, Vector{<:Any}} = Dict{TAST, Vector{<:Any}}()
-    vec_to_prog::Dict{Vector{<:Any}, TAST} = Dict{Vector{<:Any}, TAST}()
+    vec_to_prog::Dict{Tuple{PType, Vector{<:Any}}, TAST} = Dict{Tuple{PType, Vector{<:Any}}, TAST}()
 end)
 
 function round_values(v::Real; digits)
@@ -161,11 +161,11 @@ function prune_iteration!(pruner::IOPruner, result::EnumerationResult, types_to_
         all(is_valid_value, new_vec) || return "invalid values: $new_vec"
         
         vec_rounded = round_values(new_vec; digits=tol_digits)
-        similar_p = get(vec_to_prog, vec_rounded, nothing)
+        similar_p = get(vec_to_prog, (prog.type, vec_rounded), nothing)
         similar_p === nothing || return "similar program: $similar_p"
 
         prog_to_vec[prog] = new_vec
-        vec_to_prog[vec_rounded] = prog
+        vec_to_prog[(prog.type, vec_rounded)] = prog
 
         return nothing
     end
@@ -237,7 +237,7 @@ prune_iteration!(pruner::IncrementalPruner, result::EnumerationResult, types_to_
             addexpr!(club.graph, special)
         end
     end
-    
+
     new_members = collect(TAST, result[size])
 
     kept, pruned, report = admit_members!(
