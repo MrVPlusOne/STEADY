@@ -16,7 +16,9 @@ function fit_dynamics(
     particles::Matrix, log_weights::Vector, 
     times, (; controls, observations), 
     params_guess::Union{NamedTuple, Nothing}; 
-    λ::Float64, n_threads=6,
+    λ::Float64, use_bijectors=false,
+    n_threads=6,
+    use_distributed::Bool=false,
 )
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
@@ -35,22 +37,13 @@ function fit_dynamics(
 
     ctx = (; compile_ctx, 
         particles, log_weights, x0_dist, params_dist, times, 
-        obs_data=(; controls, observations), params_guess, λ)
+        obs_data=(; controls, observations), params_guess, λ, use_bijectors)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
         showspeed=true, output=stdout)
-    eval_task(e) = let
-        local r = evaluate_dynamics(ctx, e)
-        next!(progress)
-        r
-    end
-    if n_threads <= 1
-        eval_results = map(eval_task, all_comps)
-    else
-        pool = ThreadPools.QueuePool(2, n_threads)
-        eval_results = ThreadPools.tmap(eval_task, pool, all_comps)
-        close(pool)
-    end
+
+    eval_results = parallel_map(evaluate_dynamics, all_comps, ctx; 
+        progress, n_threads, use_distributed)
 
     err_progs = eval_results |> filter(r -> r.status == :errored) |> collect
     succeeded = eval_results |> filter(r -> r.status == :success) |> map(r -> r.result)
@@ -74,11 +67,12 @@ function evaluate_dynamics(ctx, comps)
 end
 
 function evaluate_dynamics(ctx, comps, f_x′′)
-    (; particles, log_weights, x0_dist, params_dist, times, obs_data, params_guess, λ) = ctx
+    (; particles, log_weights, x0_dist, params_dist, times, obs_data) = ctx
+    (;  params_guess, λ, use_bijectors) = ctx
     p₀ = params_guess === nothing ? rand(params_dist) : params_guess
     try
         local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
-            x0_dist, params_dist, times, obs_data, p₀; λ)
+            x0_dist, params_dist, times, obs_data, p₀; λ, use_bijectors)
         if isnan(value.f_final)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
@@ -180,7 +174,8 @@ function fit_dynamics_params(
     f_init = -loss(pvec_guess; use_λ=false)
     alg = Optim.LBFGS()
     optim_options = Optim.Options(
-        x_abstol=1e-3, outer_x_abstol=1e-3, outer_f_abstol=0.01, outer_iterations=30)
+        x_abstol=1e-3, f_abstol=1e-3, iterations=500,
+        outer_x_abstol=1e-3, outer_f_abstol=0.001, outer_iterations=50)
     
     if use_bijectors
         sol = optimize_no_tag(loss, pvec_guess, optim_options)

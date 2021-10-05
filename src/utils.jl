@@ -261,3 +261,43 @@ end
 
 sort_by(f) = xs -> sort(xs, by=f)
 ##-----------------------------------------------------------
+using Distributed
+using ProgressMeter: Progress, next!
+
+const _distributed_work_ctx = Ref{Any}(nothing)
+
+"""
+# Arguments
+- `f(ctx, x)`: the context-dependent task to be performed.
+"""
+function parallel_map(f, xs, ctx;
+    progress::Progress,
+    n_threads::Integer=Threads.nthreads(), 
+    use_distributed::Bool=false,
+)
+    if use_distributed
+        length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
+        @everywhere SEDL._distributed_work_ctx[] = $ctx
+        f_task = x -> let ctx = _eval_ctx_prob[]
+            f(ctx, x)
+        end
+        try
+            eval_results = progress_pmap(f_task, xs; progress)
+        finally
+            @everywhere SEDL._distributed_work_ctx[] = nothing
+        end
+    else
+        eval_task(e) = let r = f(ctx, e)
+            next!(progress)
+            r
+        end
+        if n_threads <= 1
+            eval_results = map(eval_task, xs)
+        else
+            pool = ThreadPools.QueuePool(2, n_threads)
+            eval_results = ThreadPools.tmap(eval_task, pool, xs)
+            close(pool)
+        end
+    end
+    eval_results
+end

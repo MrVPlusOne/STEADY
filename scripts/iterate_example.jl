@@ -341,8 +341,11 @@ display(senum)
 post_data=sample_posterior_data(params, obs_data; n_particles=10_000, max_trajs=200)
 @info "Starting fit_dynamics..."
 results = map(1:6) do i
-    fit_dynamics(senum, post_data.particles, post_data.log_weights, times, obs_data, 
-        nothing; λ=0.1, n_threads=6
+    r = fit_dynamics(senum, post_data.particles, post_data.log_weights, times, obs_data, 
+        nothing; λ=0.1, use_bijectors=false, n_threads=5, use_distributed=false,
     )
+    display(r)
+    r
 end
+foreach(display, results)
 ##-----------------------------------------------------------

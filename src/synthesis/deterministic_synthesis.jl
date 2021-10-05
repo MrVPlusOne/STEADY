@@ -44,27 +44,11 @@ function map_synthesis(
         prior_dists, times, actions, program_logp, data_likelihood,
     )
     
-    to_eval = all_comps
     progress = Progress(length(all_comps), desc="evaluating", 
         showspeed=true, output=stdout)
 
-    if use_distributed
-        length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
-        @everywhere SEDL._eval_ctx[] = $ctx
-        eval_results = progress_pmap(evaluate_prog_distributed, to_eval; progress)
-    else
-        eval_task(e) = let
-            evaluate_prog(ctx, e)
-            next!(progress)
-        end
-        if n_threads <= 1
-            eval_results = map(eval_task, to_eval)
-        else
-            pool = ThreadPools.QueuePool(2, n_threads)
-            eval_results = ThreadPools.tmap(eval_task, pool, to_eval)
-            close(pool)
-        end
-    end
+    eval_results = parallel_map(evaluate_prog, all_comps, ctx; 
+        progress, n_threads, use_distributed)
     err_progs = eval_results |> Filter(r -> r.status == :errored) |> collect
     succeeded = filter(r -> r.status == :success, eval_results)
     isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
@@ -85,11 +69,6 @@ function map_synthesis(
     MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
-const _eval_ctx = Ref{Any}(nothing)
-function evaluate_prog_distributed(comps)
-    ctx = _eval_ctx[]
-    evaluate_prog(ctx, comps)
-end
 
 function evaluate_prog(ctx, comps)
     compile_ctx = ctx.compile_ctx
