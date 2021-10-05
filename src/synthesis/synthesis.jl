@@ -178,9 +178,8 @@ struct MapSynthesisResult{R}
 end
 
 get_top_results(r::MapSynthesisResult, top_k::Int) = begin
-    rows = map(Iterators.take(r.sorted_results, top_k)) do (; logp, f_x′′, MAP_est)
-        (; params, others) = MAP_est
-        (; logp, f_x′′=(x -> x.ast).(f_x′′) , params, others)
+    rows = map(Iterators.take(r.sorted_results, top_k)) do (; logp, f_x′′, params)
+        (; logp, f_x′′=(x -> x.ast).(f_x′′) , params)
     end
     rows
 end

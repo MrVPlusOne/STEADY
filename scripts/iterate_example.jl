@@ -114,8 +114,8 @@ function car_obs_model(state)
     SMvNormal(@SVector[dis, v_mea], @SVector[1.0, 0.3])
 end
 
-function params_to_system(params)
-    StochasticSystem(x0_dist, car_motion_model(params), car_obs_model; 
+function params_to_system(params, x0_dist, f_x′′=Car1D.acceleration_f)
+    StochasticSystem(x0_dist, car_motion_model(params; f_x′′), car_obs_model; 
         X=typeof(rand(x0_dist)), Y=SVector{2, Float64}, U=SVector{1, Float64})
 end
 ##-----------------------------------------------------------
@@ -123,14 +123,14 @@ end
 Random.seed!(123)
 times = collect(0.0:0.1:8.0)
 T = length(times)
-params = (; mass=1.5, drag = 0.2) #, σ_pos=0.1, σ_pos′=0.2)
+true_params = (; mass=1.5, drag = 0.5) #, σ_pos=0.1, σ_pos′=0.2)
 car_controller = (s, z) -> begin
     @SVector[Car1D.controller((speed=z[2], sensor=z[1])).f]
 end
 vdata = Car1D.variable_data()
 x0_dist = init_state_distribution(vdata)
 params_dist = params_distribution(vdata)
-true_system = params_to_system(params)
+true_system = params_to_system(true_params, x0_dist)
 true_motion_model = true_system.motion_model
 
 ex_data = simulate_trajectory(times, true_system, car_controller)
@@ -218,12 +218,13 @@ map_params = fit_dynamics_params(
     Car1D.acceleration_f,
     subsample(pfs_result[1], 200), subsample(pfs_result[2], 200), 
     x0_dist, params_dist,
-    times, obs_data, (; mass=1.0, drag = 0.5);
+    obs_data, (; mass=1.0, drag = 0.5);
+    optim_options = Optim.Options(f_abstol=1e-4),
     λ=1.0)
 ##-----------------------------------------------------------
 # iterative synthesis utilities
-function sample_posterior_data(params, obs_data; n_particles, max_trajs, debug=false)
-    local system = params_to_system(params)
+function sample_posterior_data(params, x0_dist, obs_data, f_x′′; n_particles, max_trajs, debug=false)
+    local system = params_to_system(params, x0_dist, f_x′′)
     local particles, log_weights = filter_smoother(system, obs_data, n_particles; 
         thining=1, track_weights=true, resample_threshold=1.0)
     local trajectories = rows(particles)
@@ -239,11 +240,14 @@ function sample_posterior_data(params, obs_data; n_particles, max_trajs, debug=f
 end
 
 function iterative_dyn_fitting(params₀, obs_data, iters; 
-        n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), plot_freq=10)
+        n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), 
+        optim_options=Optim.Options(x_abstol=1e-3),
+        plot_freq=10)
     params_est::NamedTuple = params₀
 
     sample_data = (params; debug=false) -> 
-        sample_posterior_data(params, obs_data; n_particles, max_trajs, debug)
+        sample_posterior_data(params, x0_dist, obs_data, Car1D.acceleration_f; 
+            n_particles, max_trajs, debug)
 
     params_history = typeof(params_est)[]
     traj_history = []
@@ -258,7 +262,7 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
             Car1D.acceleration_f,
             particles, log_weights, 
             x0_dist, params_dist,
-            times, obs_data, params_est; λ)
+            times, obs_data, params_est; λ, optim_options)
         perf_new = sample_data(fit_r.params).perf
 
         begin
@@ -312,7 +316,7 @@ components_transcendentals!(comp_env, can_grow=true)
 
 prior_p = let
     x₀, x′₀ = ex_data.states[1]
-    syn_params = (;params.mass, params.drag)
+    syn_params = (;true_params.mass, true_params.drag)
     others = (; wall=wall_pos)
     logpdf(to_distribution(vdata), (;x₀, x′₀, params=syn_params, others))
 end
@@ -321,14 +325,12 @@ if !isfinite(prior_p)
 end
 
 sketch = no_sketch(vdata.state′′_vars)
-prog_logp(comps) = log(0.5) * sum(ast_size.(comps))  # weakly penealize larger programs
-
 rand(params_dist)
-rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:100]
+rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:200]
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
 senum = @time synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
+    vdata, sketch, Car1D.action_vars(), comp_env, 5; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
@@ -338,14 +340,48 @@ end
 display(senum)
 ##-----------------------------------------------------------
 # test synthesis iteration
-post_data=sample_posterior_data(params, obs_data; n_particles=10_000, max_trajs=200)
+post_data=sample_posterior_data(true_params, x0_dist, obs_data; n_particles=10_000, max_trajs=100)
+optim_options = Optim.Options(
+    f_abstol=1e-4,
+    iterations=100,
+    outer_iterations=40, 
+    time_limit=2.0)
 @info "Starting fit_dynamics..."
-results = map(1:6) do i
-    r = fit_dynamics(senum, post_data.particles, post_data.log_weights, times, obs_data, 
-        nothing; λ=0.1, use_bijectors=false, n_threads=5, use_distributed=false,
+syn_result = fit_dynamics(senum, post_data.particles, post_data.log_weights, 
+    obs_data, nothing; λ=1.0, use_bijectors=true, n_threads=5, use_distributed=false, 
+    evals_per_program=20, optim_options, program_logp=prog_size_prior(0.2),
+)
+display(syn_result)
+map(syn_result.sorted_results) do (logp, f_x′′, params)
+    (logp, f_x′′.ast, params)
+end |> DataFrame
+##-----------------------------------------------------------
+# test full synthesis
+@info "Starting full synthesis..."
+mini_sketch = DynamicsSketch(
+    [Var(:drag_acc, ℝ, PUnits.Acceleration)], 
+    ((; mass, f), (; drag_acc)) -> begin
+        f / mass - drag_acc
+    end
+)
+
+iter_result = let senum = synthesis_enumeration(
+        vdata, mini_sketch, Car1D.action_vars(), comp_env, 5; pruner)
+        println("Candidate programs:")
+    
+    f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
+    params_guess = nothing # (mass=3.0, drag=0.8,)
+
+    display(senum.enum_result[mini_sketch.holes[1].type] |> collect)
+
+    fit_dynamics_iterative(senum, obs_data, f_x′′_guess, params_guess;
+        program_logp=prog_size_prior(0.2),
+        optim_options, 
+        use_bijectors=true, n_threads=5, use_distributed=false, 
+        evals_per_program=20, 
+        patience=100,
     )
-    display(r)
-    r
 end
-foreach(display, results)
+plot(iter_result.score_history)
+iter_result.dyn_history
 ##-----------------------------------------------------------

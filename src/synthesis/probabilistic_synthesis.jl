@@ -11,14 +11,119 @@ function synthesis_enumeration(enumerator::DynamicsEnumerator, inputs, max_ast_s
         vdata, sketch, action_vars, comp_env, max_ast_size; pruner)
 end
 
+"""
+Synthesize the dynamics using an Expectation Maximization-style loop.  
+"""
+function fit_dynamics_iterative(
+    senum::SynthesisEnumerationResult,
+    obs_data::NamedTuple{(:times, :observations, :controls)},
+    f_x′′_guess::Function, 
+    params_guess::Union{NamedTuple, Nothing}; 
+    program_logp::Function,
+    optim_options::Optim.Options,
+    n_trajs::Int=100, n_particles::Int=10_000,
+    trust_thresholds=(0.25, 0.75), λ_multiplier=2.0,
+    max_iters::Int=100, patience::Int=10,
+    λ0::Float64=1.0, 
+    use_bijectors=false,
+    evals_per_program=10,
+    use_distributed::Bool=false,
+    n_threads=6,
+)
+    vdata = senum.vdata
+    x0_dist = init_state_distribution(vdata)
+    params_dist = params_distribution(vdata)
+
+    dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
+        (f_x′′_guess, p_est)
+    end
+    λ = λ0
+
+    dyn_history, score_history, λ_history = [], [], []
+    best_dyn=nothing
+    best_iter=0
+
+    # TODO: generalize this
+    function sample_data((f_x′′, params); debug=false) 
+        sample_posterior_data(params, x0_dist, obs_data, f_x′′; 
+            n_particles, max_trajs=n_trajs, debug)
+    end
+
+    for iter in 1:max_iters
+        if iter - best_iter > patience
+            @info "Synthesis stopped because no better solutino was found in the \
+                last $patience iterations."
+            break
+        end
+
+        # TODO: record time taken
+        (; particles, log_weights, perf) = sample_data(dyn_est)
+        perf2 = sample_data(dyn_est).perf
+        perfΔ = abs(perf2 - perf)
+        if perfΔ > 1.0
+            @info "High performance variance" perfΔ
+        end
+
+        fit_r = fit_dynamics(
+            senum,
+            particles, log_weights, 
+            obs_data,
+            params_guess;
+            program_logp, λ, use_bijectors, optim_options,
+            evals_per_program, use_distributed, n_threads
+        )
+        println("Iteration $iter:")
+        display(fit_r)
+        show_top_results(fit_r, 4)
+        sol = fit_r.best_result
+        dyn_new = (sol.f_x′′, sol.params)
+        perf_new = sample_data(dyn_new).perf
+
+        if best_dyn === nothing || perf_new > best_dyn.perf
+            best_dyn = (dyn=dyn_new, perf=perf_new)
+            best_iter = iter
+        end
+
+        improve_actual = perf_new - perf
+        improve_pred = sol.f_final - sol.f_init
+        ρ = improve_actual / improve_pred
+        
+        if ρ > trust_thresholds[2]
+            λ /= λ_multiplier
+        elseif ρ < trust_thresholds[1]
+            λ *= λ_multiplier
+        end
+        if ρ < 0
+            @warn("Failed to improve the objective.")
+        end
+        dyn_est = dyn_new
+
+        @info "Optimal synthesis finished." ρ λ improve_actual improve_pred perf_old=perf perf_new
+
+        push!(dyn_history, dyn_est)
+        push!(score_history, perf)
+        push!(λ_history, λ)
+
+        # TODO: generalize this
+        plot_freq = 5
+        if iter % plot_freq == 1
+            plot_particles(particles, times, "iteration $iter", ex_data.states) |> display
+        end
+    end
+    (; best_dyn, dyn_history, score_history, λ_history)
+end
+
 function fit_dynamics(
     senum::SynthesisEnumerationResult,
     particles::Matrix, log_weights::Vector, 
-    times, (; controls, observations), 
+    (; times, observations, controls), 
     params_guess::Union{NamedTuple, Nothing}; 
+    program_logp::Function,
     λ::Float64, use_bijectors=false,
-    n_threads=6,
+    optim_options::Optim.Options,
+    evals_per_program=10,
     use_distributed::Bool=false,
+    n_threads=6,
 )
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
@@ -36,8 +141,9 @@ function fit_dynamics(
     )
 
     ctx = (; compile_ctx, 
-        particles, log_weights, x0_dist, params_dist, times, 
-        obs_data=(; controls, observations), params_guess, λ, use_bijectors)
+        particles, log_weights, x0_dist, params_dist, program_logp, times, optim_options, 
+        evals_per_program, obs_data=(; controls, observations), 
+        params_guess, λ, use_bijectors)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
         showspeed=true, output=stdout)
@@ -45,7 +151,7 @@ function fit_dynamics(
     eval_results = parallel_map(evaluate_dynamics, all_comps, ctx; 
         progress, n_threads, use_distributed)
 
-    err_progs = eval_results |> filter(r -> r.status == :errored) |> collect
+    err_progs = eval_results |> filter(r -> r.status == :errored)
     succeeded = eval_results |> filter(r -> r.status == :success) |> map(r -> r.result)
     isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
         "First 5 errored programs: $(Iterators.take(err_progs, 5) |> collect)")
@@ -67,17 +173,34 @@ function evaluate_dynamics(ctx, comps)
 end
 
 function evaluate_dynamics(ctx, comps, f_x′′)
-    (; particles, log_weights, x0_dist, params_dist, times, obs_data) = ctx
-    (;  params_guess, λ, use_bijectors) = ctx
+    n = ctx.evals_per_program
+    results = map(1:n) do _
+        evaluate_dynamics_once(ctx, comps, f_x′′)
+    end
+    succeeded = results |> filter(x -> x.status == :success)
+    if isempty(succeeded)
+        errors = results |> map(x -> x.error) |> unique
+        (; status= :errored, program=comps, errors)
+    else
+        result = succeeded |> map(x -> x.result) |> max_by(x -> x.logp)
+        (; status= :success, result)
+    end
+end
+
+function evaluate_dynamics_once(ctx, comps, f_x′′)
+    (; particles, log_weights, x0_dist, params_dist, program_logp, times, obs_data) = ctx
+    (;  params_guess, λ, use_bijectors, optim_options) = ctx
     p₀ = params_guess === nothing ? rand(params_dist) : params_guess
     try
         local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
-            x0_dist, params_dist, times, obs_data, p₀; λ, use_bijectors)
+            x0_dist, params_dist, times, obs_data, p₀; λ, use_bijectors, optim_options)
         if isnan(value.f_final)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
         stats = merge(value.stats, (time=time,))
-        return (status= :success, result=(; logp=value.f_final, f_x′′, value.params, stats))
+        logp = program_logp(comps) + value.f_final
+        result=(; logp, f_x′′, value.params, value.f_init, value.f_final, stats)
+        return (status= :success, result)
     catch err
         if err isa Union{OverflowError, DomainError, BadLossError}
             return (status= :errored, program=comps, error=err)
@@ -116,19 +239,22 @@ function expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
     end
     # compute the (weighted) expectated data log probability
     sum(weights .* (log_data_p + log_state_p))
+    # mean(log_data_p + log_state_p)
 end
 
 function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
-    expected_log_p(log_prior, log_data_p, log_state_p; debug)
-    # expected_data_p(log_prior, log_data_p, log_state_p; debug)
+    # expected_log_p(log_prior, log_data_p, log_state_p; debug)
+    expected_data_p(log_prior, log_data_p, log_state_p; debug)
 end
 
 function fit_dynamics_params(
     f_x′′::Function,
     particles::Matrix, log_weights::Vector, 
     x0_dist, params_dist,
-    times, (; controls, observations), 
-    params_guess::NamedTuple; λ::Float64,
+    (;times, observations, controls), 
+    params_guess::NamedTuple; 
+    λ::Float64,
+    optim_options::Optim.Options,
     use_bijectors=false,
 )
     @assert isfinite(logpdf(params_dist, params_guess))
@@ -173,9 +299,6 @@ function fit_dynamics_params(
     pvec_guess = structure_to_vec(p_bj(params_guess))
     f_init = -loss(pvec_guess; use_λ=false)
     alg = Optim.LBFGS()
-    optim_options = Optim.Options(
-        x_abstol=1e-3, f_abstol=1e-3, iterations=500,
-        outer_x_abstol=1e-3, outer_f_abstol=0.001, outer_iterations=50)
     
     if use_bijectors
         sol = optimize_no_tag(loss, pvec_guess, optim_options)
@@ -183,7 +306,6 @@ function fit_dynamics_params(
         sol = optimize_bounded(loss, pvec_guess, (lower, upper), optim_options)
     end
     
-    Optim.converged(sol) || display(sol)
     pvec_final = Optim.minimizer(sol)
     f_final = -loss(pvec_final; use_λ=false)
     params = vec_to_params(pvec_final)
