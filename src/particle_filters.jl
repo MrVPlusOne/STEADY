@@ -3,6 +3,7 @@ using StatsBase: countmap
 
 struct StochasticSystem{X, U, Y, X0_Dist, Motion, ObsM}
     x0_dist::X0_Dist
+    "motion_model(x, control, Δt) -> distribution_of_x′"
     motion_model::Motion
     obs_model::ObsM
 end
@@ -88,7 +89,7 @@ end
 Similar to particle filters, but try to track the data likelihood of the entire trajectory 
 by not resetting weights to 0 during resampling.
 """
-function forward_smoother(
+function forward_filter_tracked(
     system::StochasticSystem{X}, (; times, controls, observations), n_particles; 
     resample_threshold::Float64 = 0.5,    
 ) where X
@@ -133,6 +134,81 @@ function forward_smoother(
     softmax!(@views(weights[:, T]), current_lw)
 
     (; particles, weights, log_weights, ancestors)
+end
+
+"""
+Sample smooting trajecotries by tracking the ancestors of a particle filter.
+"""
+function filter_smoother(system, data, n_particles; 
+    resample_threshold=1.0, thining=10, track_weights=false
+)
+    pf = track_weights ? forward_filter_tracked : forward_filter
+    (; particles, log_weights, ancestors) = pf(system, data, n_particles; resample_threshold)
+    trajs = particle_trajectories(particles, ancestors)
+    trajectories = trajs[1:thining:end,:]
+    log_weights = log_weights[1:thining:end, end]
+    log_weights .-= logsumexp(log_weights)
+    (; trajectories, log_weights)
+end
+
+"""
+Particle smoother based on the Forward filtering-backward sampling algorithm.
+"""
+function ffbs_smoother(
+    system::StochasticSystem{X}, (; times, controls, observations); 
+    n_particles, n_trajs,
+    resample_threshold::Float64 = 0.5,
+    show_progress=true,
+) where X
+    function forward_logp(x_t, x_t′, t)
+        local Δt = times[t+1]-times[t]
+        local d = system.motion_model(x_t, controls[t], Δt)
+        logpdf(d, x_t′)
+    end
+
+    (particles, log_weights) = forward_filter(
+        system, (; times, controls, observations), n_particles; resample_threshold)
+    backward_sample(forward_logp, particles, log_weights, n_trajs; show_progress)
+end
+
+
+"""
+Performs the backward recursion of the Forward filtering-backward sampling algorithm
+to sample from the smoothing distribution.
+
+## Arguments
+- `forward_logp(x_t, x_t′, t)` should return the log likelihood of the transition dynamics.
+"""
+function backward_sample(
+    forward_logp::Function,
+    filter_particles::Matrix{P}, 
+    filter_log_weights::Matrix{<:Real}, 
+    n_trajs::Integer;
+    show_progress=true,
+) where P
+    M = n_trajs
+    N, T = size(filter_particles)
+    particles = Matrix{P}(undef, M, T)
+    weights = [softmax(filter_log_weights[:, T]) for _ in 1:M]
+
+    particles[:, T] .= (
+        let j = rand(Categorical(weights[j]))
+            filter_particles[j, T]
+        end for j in 1:M)
+
+    progress = Progress(T-1, desc="backward_sample", enabled=show_progress)
+    for t in T-1:-1:1
+        Threads.@threads for j in 1:M
+            weights[j] .= @views(filter_log_weights[:, t]) .+
+                forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
+            softmax!(weights[j])
+            j′ = rand(Categorical(weights[j]))
+            particles[j, t] = filter_particles[j′, t]
+        end
+        next!(progress)
+    end
+    log_weights = fill(log(1/M), M)
+    particles, log_weights
 end
 
 function log_softmax(x::AbstractArray{<:Real})

@@ -178,8 +178,8 @@ struct MapSynthesisResult{R}
 end
 
 get_top_results(r::MapSynthesisResult, top_k::Int) = begin
-    rows = map(Iterators.take(r.sorted_results, top_k)) do (; logp, f_x′′, params)
-        (; logp, f_x′′=(x -> x.ast).(f_x′′) , params)
+    rows = map(Iterators.take(r.sorted_results, top_k)) do (; score, f_x′′, params)
+        (; score, f_x′′=(x -> x.ast).(f_x′′) , params)
     end
     rows
 end
@@ -206,8 +206,8 @@ Base.show(io::IO, ::MIME"text/plain", r::MapSynthesisResult) = begin
     end
     print(io, Dedent())
     println(io, "Best estimation found:", Indent())
-    let (; logp, f_x′′, params) = r.best_result
-        println(io, "logp: $logp")
+    let (; score, f_x′′, params) = r.best_result
+        println(io, "score: $score")
         println(io, "expressions: $(f_x′′.ast)")
         println(io, "params: $(params)")
     end

@@ -96,6 +96,20 @@ to_measurement(values) = begin
     μ ± σ
 end
 
+"""
+```jldoctest
+julia> to_measurement([(a=1,b=2),(a=3,b=6)])
+(a = 2.0 ± 1.4, b = 4.0 ± 2.8)
+```
+"""
+to_measurement(values::AbstractVector{<:NamedTuple}) = begin
+    vec_values = map(structure_to_vec, values)
+    template = values[1]
+    μ = mean(vec_values)
+    σ = std(vec_values)
+    structure_from_vec(template, μ .± σ)
+end
+
 pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
 pretty_number(v::Measurement) = string(v)
 

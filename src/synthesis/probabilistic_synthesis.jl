@@ -45,8 +45,8 @@ function fit_dynamics_iterative(
 
     # TODO: generalize this
     function sample_data((f_x′′, params); debug=false) 
-        sample_posterior_data(params, x0_dist, obs_data, f_x′′; 
-            n_particles, max_trajs=n_trajs, debug)
+        system = params_to_system(params, x0_dist, f_x′′, σ=(σ_pos=0.2, σ_pos′=0.6))
+        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug)
     end
 
     for iter in 1:max_iters
@@ -61,7 +61,7 @@ function fit_dynamics_iterative(
         perf2 = sample_data(dyn_est).perf
         perfΔ = abs(perf2 - perf)
         if perfΔ > 1.0
-            @info "High performance variance" perfΔ
+            @info "High performance variance" perfΔ perf perf2
         end
 
         fit_r = fit_dynamics(
@@ -85,7 +85,7 @@ function fit_dynamics_iterative(
         end
 
         improve_actual = perf_new - perf
-        improve_pred = sol.f_final - sol.f_init
+        improve_pred = sol.f_final.logp - sol.f_init.logp
         ρ = improve_actual / improve_pred
         
         if ρ > trust_thresholds[2]
@@ -98,15 +98,16 @@ function fit_dynamics_iterative(
         end
         dyn_est = dyn_new
 
-        @info "Optimal synthesis finished." ρ λ improve_actual improve_pred perf_old=perf perf_new
+        @info "Optimization details:" sol.f_final improve_pred improve_actual ρ
+        @info "Optimal synthesis finished." λ perf_old=perf perf_new
 
         push!(dyn_history, dyn_est)
         push!(score_history, perf)
         push!(λ_history, λ)
 
-        # TODO: generalize this
         plot_freq = 4
         if iter % plot_freq == 1
+            # TODO: generalize this
             plot_particles(particles, times, "iteration $iter", ex_data.states) |> display
         end
     end
@@ -155,7 +156,7 @@ function fit_dynamics(
     succeeded = eval_results |> filter(r -> r.status == :success) |> map(r -> r.result)
     isempty(succeeded) && error("Synthesis failed to produce any valid solution.\n" * 
         "First 5 errored programs: $(Iterators.take(err_progs, 5) |> collect)")
-    sorted_results = succeeded |> sort_by(r -> -r.logp)
+    sorted_results = succeeded |> sort_by(r -> -r.score)
     best_result = sorted_results[1]
     @unzip_named (times, :time), (iterations, :iterations), (converges, :converged) =
         map(r -> r.stats, succeeded)
@@ -182,7 +183,7 @@ function evaluate_dynamics(ctx, comps, f_x′′)
         errors = results |> map(x -> x.error) |> unique
         (; status= :errored, program=comps, errors)
     else
-        result = succeeded |> map(x -> x.result) |> max_by(x -> x.logp)
+        result = succeeded |> map(x -> x.result) |> max_by(x -> x.score)
         (; status= :success, result)
     end
 end
@@ -194,12 +195,12 @@ function evaluate_dynamics_once(ctx, comps, f_x′′)
     try
         local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
             x0_dist, params_dist, obs_data, p₀; λ, use_bijectors, optim_options)
-        if isnan(value.f_final)
+        if isnan(value.f_final.score)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
         stats = merge(value.stats, (time=time,))
-        logp = program_logp(comps) + value.f_final
-        result=(; logp, f_x′′, value.params, value.f_init, value.f_final, stats)
+        score = program_logp(comps) + value.f_final.score
+        result=(; score, f_x′′, value.params, value.f_init, value.f_final, stats)
         return (status= :success, result)
     catch err
         if err isa Union{OverflowError, DomainError, BadLossError}
@@ -229,17 +230,23 @@ end
 """
 Compute the posterior average log data likelihood, ``∫ log(p(y|x)) p(x|y,f) dx``.
 """
-function expected_log_p(log_prior, log_data_p, log_state_p; debug = false)
+function expected_log_p(log_prior, log_data_p, log_state_p; debug::Bool = false)
     # compute the importance wights of the samples under the new dynamics        
     local weights = softmax(log_prior)
-    if debug
-        max_ratio = maximum(weights)/minimum(weights)
-        ess = effective_particles(weights)
-        @info expected_log_p ess max_ratio
-    end
     # compute the (weighted) expectated data log probability
-    sum(weights .* (log_data_p + log_state_p))
+    perf = sum(weights .* (log_data_p + log_state_p))
     # mean(log_data_p + log_state_p)
+    if debug
+        max_piror_ratio = maximum(weights)/minimum(weights)
+        ess_prior = effective_particles(weights)
+        ess_data = effective_particles(softmax(log_data_p))
+        ess_state = effective_particles(softmax(log_state_p))
+        ess_total = effective_particles(softmax(log_data_p + log_state_p))
+        stats = (;max_piror_ratio, ess_prior, ess_data, ess_state, ess_total)
+    else
+        stats = ()
+    end
+    (; perf, stats)
 end
 
 function sample_performance(log_prior, log_data_p, log_state_p; debug = false)
@@ -283,22 +290,27 @@ function fit_dynamics_params(
         values
     end
 
-    function loss(vec; use_λ::Bool=true)
+    function loss(vec; return_details::Bool=false)
         local params = vec_to_params(vec)
         local prior = logpdf(params_dist, params)
         local state_scores′ = states_likelihood.(
             trajectories, Ref(times), Ref(x0_dist), 
             Ref(car_motion_model(params; f_x′′)), Ref(controls))
 
-        local perf = sample_performance(state_scores′ - state_scores + log_weights, 
-            data_scores, state_scores′)
+        local logp = sample_performance(state_scores′ - state_scores + log_weights, 
+            data_scores, state_scores′).perf + prior
         local kl = 0.5mean((state_scores′ .- state_scores).^2)
-        -(prior + perf - use_λ * λ * kl)
+        local regularization = -λ * kl
+        local score = logp + regularization
+        if return_details
+            (; score, regularization, logp)
+        else
+            -score
+        end
     end
 
     pvec_guess = structure_to_vec(p_bj(params_guess))
-    f_init = -loss(pvec_guess; use_λ=false)
-    alg = Optim.LBFGS()
+    f_init = loss(pvec_guess; return_details=true)
     
     if use_bijectors
         sol = optimize_no_tag(loss, pvec_guess, optim_options)
@@ -307,7 +319,7 @@ function fit_dynamics_params(
     end
     
     pvec_final = Optim.minimizer(sol)
-    f_final = -loss(pvec_final; use_λ=false)
+    f_final = loss(pvec_final; return_details=true)
     params = vec_to_params(pvec_final)
     stats = (converged=Optim.converged(sol), iterations=Optim.iterations(sol))
     (; f_init, f_final, params, stats)
