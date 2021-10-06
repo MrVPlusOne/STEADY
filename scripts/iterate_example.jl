@@ -364,18 +364,19 @@ end |> DataFrame
 ##-----------------------------------------------------------
 # test full synthesis
 @info "Starting full synthesis..."
+
 mini_sketch = DynamicsSketch(
     [Var(:drag_acc, ℝ, PUnits.Acceleration)], 
-    ((; mass, f), (; drag_acc)) -> begin
-        f / mass - drag_acc
-    end
+    ((; mass, f), (; drag_acc)) -> (pos′′= f / mass - drag_acc,),
 )
 
 iter_result = let senum = synthesis_enumeration(
         vdata, mini_sketch, Car1D.action_vars(), comp_env, 5; pruner)
         println("Candidate programs:")
     
-    f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
+    # f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
+    f_x′′_guess = compile_sketch((x -> 0.0,), :(x -> 0.0), vdata.state_vars[1],
+        Val((:drag_acc,)), Val((:pos′′,)), mini_core)
     params_guess = nothing # (mass=3.0, drag=0.8,)
 
     display(senum.enum_result[mini_sketch.holes[1].type] |> collect)

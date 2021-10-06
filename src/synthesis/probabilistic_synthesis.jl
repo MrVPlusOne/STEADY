@@ -46,7 +46,8 @@ function fit_dynamics_iterative(
     # TODO: generalize this
     function sample_data((f_x′′, params); debug=false) 
         system = params_to_system(params, x0_dist, f_x′′, σ=(σ_pos=0.2, σ_pos′=0.6))
-        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug)
+        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug, 
+        use_ffbs=true)
     end
 
     for iter in 1:max_iters
@@ -58,11 +59,11 @@ function fit_dynamics_iterative(
 
         # TODO: record time taken
         (; particles, log_weights, perf) = sample_data(dyn_est)
-        perf2 = sample_data(dyn_est).perf
-        perfΔ = abs(perf2 - perf)
-        if perfΔ > 1.0
-            @info "High performance variance" perfΔ perf perf2
-        end
+        # perf2 = sample_data(dyn_est).perf
+        # perfΔ = abs(perf2 - perf)
+        # if perfΔ > 1.0
+        #     @info "High performance variance" perfΔ perf perf2
+        # end
 
         fit_r = fit_dynamics(
             senum,
@@ -234,8 +235,8 @@ function expected_log_p(log_prior, log_data_p, log_state_p; debug::Bool = false)
     # compute the importance wights of the samples under the new dynamics        
     local weights = softmax(log_prior)
     # compute the (weighted) expectated data log probability
-    perf = sum(weights .* (log_data_p + log_state_p))
-    # mean(log_data_p + log_state_p)
+    # perf = sum(weights .* (log_data_p + log_state_p))
+    perf = mean(log_data_p + log_state_p)
     if debug
         max_piror_ratio = maximum(weights)/minimum(weights)
         ess_prior = effective_particles(weights)

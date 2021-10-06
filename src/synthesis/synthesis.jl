@@ -37,7 +37,7 @@ compile_sketch(
 ) where {hole_names, output_names} = begin
     f = input -> let
         hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
-        NamedTuple{output_names}(combine(input, hole_values))
+        NamedTuple{output_names}(combine(input, hole_values)::NamedTuple)
     end
     CompiledFunc(f, ast, julia, any_return_type)
 end

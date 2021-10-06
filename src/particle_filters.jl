@@ -199,8 +199,12 @@ function backward_sample(
     progress = Progress(T-1, desc="backward_sample", enabled=show_progress)
     for t in T-1:-1:1
         Threads.@threads for j in 1:M
-            weights[j] .= @views(filter_log_weights[:, t]) .+
-                forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
+            # weights[j] .= @views(filter_log_weights[:, t]) .+
+            #     forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
+            for k in 1:N
+                weights[j][k] = filter_log_weights[k, t] + 
+                    forward_logp(filter_particles[k, t], particles[j, t+1], t)
+            end
             softmax!(weights[j])
             j′ = rand(Categorical(weights[j]))
             particles[j, t] = filter_particles[j′, t]
