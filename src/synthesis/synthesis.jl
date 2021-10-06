@@ -21,19 +21,25 @@ export compile_sketch
 "Combine sketch hole expressions into an executable Julia function."
 compile_sketch(
     comps::Tuple{Vararg{TAST}}, 
-    ::Val{hole_names},
-    ::Val{output_names},
+    hn::Val{hole_names},
+    on::Val{output_names},
     (;shape_env, comp_env, combine, check_gradient),
 ) where {hole_names, output_names} = begin
-    # TODO: Check the inferred return types 
     funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
-    ast = (; (=>).(hole_names, comps)...)
     julia = Expr(:tuple, (x -> x.julia).(funcs))
+    ast = (; (=>).(hole_names, comps)...)
+    compile_sketch(funcs, julia, ast, hn, on, combine)
+end
+
+compile_sketch(
+    funcs::Tuple{Vararg{Function}}, julia, ast, 
+    ::Val{hole_names}, ::Val{output_names}, combine,
+) where {hole_names, output_names} = begin
     f = input -> let
         hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
         NamedTuple{output_names}(combine(input, hole_values))
     end
-    CompiledFunc(ast, julia, f)
+    CompiledFunc(f, ast, julia, any_return_type)
 end
 
 export VariableData

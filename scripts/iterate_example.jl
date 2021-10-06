@@ -99,8 +99,7 @@ function car_motion_model((; drag, mass);
     (state, ctrl, Δt) -> begin
         (pos, pos′) = state
         f = ctrl[1]
-        (; pos′′) = call_T(f_x′′, (;pos, pos′, f, drag, mass), 
-            NamedTuple{(:pos′′,), Tuple{typeof(drag)}})
+        (; pos′′) = f_x′′((;pos, pos′, f, drag, mass))
         DistrIterator(
             (pos=SNormal(pos + Δt * pos′, σ.σ_pos * Δt),
             pos′=SNormal(pos′ + Δt * pos′′, (abs(pos′) + 0.1) * σ.σ_pos′ * Δt)))
@@ -223,12 +222,12 @@ function sample_posterior_data(system::StochasticSystem, obs_data;
 end
 
 function check_performance_variance(
-    f_x′′, params, x0_dist, obs_data; 
+    system, obs_data; 
     n_particles, n_trajs, use_ffbs, repeats=50, 
 )
     @unzip_named (perfs, :perf), (stats, :stats) = map(1:repeats) do _
         print(".")
-        sample_posterior_data(params, x0_dist, obs_data, f_x′′; 
+        sample_posterior_data(system, obs_data; 
             n_particles, max_trajs=n_trajs, use_ffbs, debug=true)
     end
     println()
@@ -242,8 +241,8 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
     params_est::NamedTuple = params₀
 
     sample_data = (params; debug=false) -> 
-        sample_posterior_data(params, x0_dist, obs_data, Car1D.acceleration_f; 
-            n_particles, max_trajs, debug)
+        sample_posterior_data(params_to_system(params, x0_dist, Car1D.acceleration_f), 
+            obs_data; n_particles, max_trajs, debug)
 
     params_history = typeof(params_est)[]
     traj_history = []
@@ -295,10 +294,13 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
 end
 ##-----------------------------------------------------------
 # check posterior sampling variance
-check_performance_variance(Car1D.acceleration_f, (mass=8.0, drag=0.3), x0_dist, obs_data;
-    n_particles=10_000, n_trajs=200, use_ffbs=false)
-check_performance_variance(Car1D.acceleration_f, (mass=8.0, drag=0.3), x0_dist, obs_data;
-    n_particles=10_000, n_trajs=200, use_ffbs=true)
+skip_variance_checking = true
+if !skip_variance_checking
+    check_performance_variance(bad_system, obs_data;
+        n_particles=10_000, n_trajs=200, use_ffbs=false)
+    check_performance_variance(bad_system, obs_data;
+        n_particles=10_000, n_trajs=200, use_ffbs=true)
+end
 ##-----------------------------------------------------------
 # perform iterative synthesis
 bad_params = (; mass=4.6, drag = 0.8)
@@ -343,7 +345,7 @@ display(senum)
 senum.enum_result[sketch.holes[1].type] |> collect
 ##-----------------------------------------------------------
 # test synthesis iteration
-post_data=sample_posterior_data(true_params, x0_dist, obs_data, Car1D.acceleration_f; 
+post_data=sample_posterior_data(true_system, obs_data; 
     n_particles=10_000, max_trajs=100)
 optim_options = Optim.Options(
     f_abstol=1e-4,

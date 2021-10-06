@@ -20,13 +20,12 @@ function structure_to_vec!(arr, v::Union{AbstractVector, Tuple, NamedTuple})
     arr
 end
 
-function promote_numbers_type(v::Union{Tuple, NamedTuple})
-    rec(x::Real) = typeof(x)
-    rec(::AbstractVector{T}) where {T <: Real} = T
-    rec(v::AbstractVector) = rec(v[1])
-    rec(v::Union{Tuple, NamedTuple}) = Base.promote_eltype(rec.(values(v))...)
-    Base.promote_eltype(rec.(values(v))...)
-end
+promote_numbers_type(x::Real) = typeof(x)
+promote_numbers_type(v::AbstractVector{T}) where T = 
+    T <: Real ? T : promote_numbers_type(v[1])
+promote_numbers_type(v::Union{Tuple, NamedTuple}) = 
+    Base.promote_type(promote_numbers_type.(values(v))...)
+
 
 function structure_from_vec(template::NamedTuple{S}, vec)::NamedTuple{S} where S
     NamedTuple{keys(template)}(structure_from_vec(values(template), vec))

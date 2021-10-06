@@ -1,7 +1,13 @@
-struct CompiledFunc{AST} <: Function
+struct CompiledFunc{return_type, F, AST} <: Function
     ast::AST
     julia::Expr
-    f::Function
+    f::F
+    """
+    `compute_ret_type(args)->return_type` computes the expected return type of `impl` when
+    called on the argumetns.
+    """
+    CompiledFunc(impl::Function, ast, julia, compute_ret_type::Function) = 
+        new{compute_ret_type, typeof(impl), typeof(ast)}(ast, julia, impl)
 end
 
 (cf::CompiledFunc)(args::NamedTuple) = cf.f(args)
@@ -86,11 +92,39 @@ function compile(
     end
     (prev_result !== nothing) && return prev_result
     f_ex = :(args -> $body_ex)
-    cf = CompiledFunc(prog, body_ex, @RuntimeGeneratedFunction(f_ex))
+    cf = CompiledFunc(
+        @RuntimeGeneratedFunction(f_ex), 
+        prog, body_ex, 
+        TAST_return_type(Val(prog.type.shape.name)))
     lock(compile_cache_lock) do
         compile_cache[body_ex] = cf
     end
 end
+
+"""
+Compute the return type using the expected `PShape`.
+"""
+function TAST_return_type(vs::Val{p_shape}) where p_shape
+    @assert p_shape isa Symbol
+    (args::NamedTuple) -> begin
+        num_type = promote_numbers_type(args)
+        @assert isconcretetype(num_type) "could not infer a concrete number type for \
+            the arguments $args"
+        _return_type(vs, num_type)
+    end
+end
+
+_return_type(::Val{:Void}, ::Type{T}) where T = Tuple{}
+_return_type(::Val{:ℝ}, ::Type{T}) where T = T
+_return_type(::Val{:Void}, ::Type{T}) where T = SVector{2, T}
+
+"""
+Do not specify the return type and only rely on the compiler to infer.
+"""
+function any_return_type(args)
+    Any
+end
+
 
 """
 Compiles a `TAST` expression into the corresponding julia function that can be 
