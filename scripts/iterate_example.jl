@@ -374,9 +374,7 @@ iter_result = let senum = synthesis_enumeration(
         vdata, mini_sketch, Car1D.action_vars(), comp_env, 5; pruner)
         println("Candidate programs:")
     
-    # f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
-    f_x′′_guess = compile_sketch((x -> 0.0,), :(x -> 0.0), vdata.state_vars[1],
-        Val((:drag_acc,)), Val((:pos′′,)), mini_core)
+    f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
     params_guess = nothing # (mass=3.0, drag=0.8,)
 
     display(senum.enum_result[mini_sketch.holes[1].type] |> collect)
@@ -387,7 +385,7 @@ iter_result = let senum = synthesis_enumeration(
         use_bijectors=true, n_threads=5, use_distributed=false, 
         evals_per_program=20, 
         patience=100,
-        λ_multiplier=1.0,
+        λ_multiplier=1.5,
     )
 end
 plot(iter_result.score_history)

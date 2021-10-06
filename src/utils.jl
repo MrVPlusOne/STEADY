@@ -274,6 +274,12 @@ max_by(f) = xs -> begin
 end
 
 sort_by(f) = xs -> sort(xs, by=f)
+
+"""
+    map_optional(f, x) = x === nothing ? nothing : f(x)
+"""
+map_optional(f, ::Nothing) = nothing
+map_optional(f, x) = f(x)
 ##-----------------------------------------------------------
 using Distributed
 using ProgressMeter: Progress, next!

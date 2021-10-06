@@ -34,21 +34,22 @@ function fit_dynamics_iterative(
     x0_dist = init_state_distribution(vdata)
     params_dist = params_distribution(vdata)
 
-    dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
-        (f_x′′_guess, p_est)
-    end
-    λ = λ0
-
-    dyn_history, score_history, λ_history = [], [], []
-    best_dyn=nothing
-    best_iter=0
-
     # TODO: generalize this
     function sample_data((f_x′′, params); debug=false) 
         system = params_to_system(params, x0_dist, f_x′′, σ=(σ_pos=0.2, σ_pos′=0.6))
         sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug, 
         use_ffbs=true)
     end
+
+    dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
+        (f_x′′_guess, p_est)
+    end
+    λ = λ0
+    
+    dyn_history, score_history, λ_history = [], [], []
+    previous_result = nothing
+    best_dyn=nothing
+    best_iter=0
 
     for iter in 1:max_iters
         if iter - best_iter > patience
@@ -69,7 +70,7 @@ function fit_dynamics_iterative(
             senum,
             particles, log_weights, 
             obs_data,
-            params_guess;
+            previous_result;
             program_logp, λ, use_bijectors, optim_options,
             evals_per_program, use_distributed, n_threads
         )
@@ -98,6 +99,7 @@ function fit_dynamics_iterative(
             @warn("Failed to improve the objective.")
         end
         dyn_est = dyn_new
+        previous_result = fit_r
 
         @info "Optimization details:" sol.f_final improve_pred improve_actual ρ
         @info "Optimal synthesis finished." λ perf_old=perf perf_new
@@ -119,7 +121,7 @@ function fit_dynamics(
     senum::SynthesisEnumerationResult,
     particles::Matrix, log_weights::Vector, 
     (; times, observations, controls), 
-    params_guess::Union{NamedTuple, Nothing}; 
+    previous_result::Union{MapSynthesisResult, Nothing}; 
     program_logp::Function,
     λ::Float64, use_bijectors=false,
     optim_options::Optim.Options,
@@ -142,10 +144,14 @@ function fit_dynamics(
         shape_env, comp_env, sketch.combine, check_gradient=false,
     )
 
+    ast_to_params = map_optional(previous_result) do pv
+        Dict(f_x′′.ast => params for (; f_x′′, params) in pv.sorted_results)
+    end
+
     ctx = (; compile_ctx, 
         particles, log_weights, x0_dist, params_dist, program_logp, optim_options, 
         evals_per_program, obs_data=(; times, controls, observations), 
-        params_guess, λ, use_bijectors)
+        ast_to_params, λ, use_bijectors)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
         showspeed=true, output=stdout)
@@ -176,8 +182,15 @@ end
 
 function evaluate_dynamics(ctx, comps, f_x′′)
     n = ctx.evals_per_program
-    results = map(1:n) do _
-        evaluate_dynamics_once(ctx, comps, f_x′′)
+    (; ast_to_params, params_dist) = ctx
+    results = map(1:n) do i
+        params_guess = if ast_to_params !== nothing && i == 1
+            # try the previous parameters first
+            ast_to_params[f_x′′.ast]
+        else
+            rand(params_dist)
+        end
+        evaluate_dynamics_once(ctx, comps, f_x′′, params_guess)
     end
     succeeded = results |> filter(x -> x.status == :success)
     if isempty(succeeded)
@@ -189,13 +202,12 @@ function evaluate_dynamics(ctx, comps, f_x′′)
     end
 end
 
-function evaluate_dynamics_once(ctx, comps, f_x′′)
+function evaluate_dynamics_once(ctx, comps, f_x′′, params_guess)
     (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
-    (;  params_guess, λ, use_bijectors, optim_options) = ctx
-    p₀ = params_guess === nothing ? rand(params_dist) : params_guess
+    (; λ, use_bijectors, optim_options) = ctx
     try
         local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
-            x0_dist, params_dist, obs_data, p₀; λ, use_bijectors, optim_options)
+            x0_dist, params_dist, obs_data, params_guess; λ, use_bijectors, optim_options)
         if isnan(value.f_final.score)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
