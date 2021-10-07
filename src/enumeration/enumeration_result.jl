@@ -84,7 +84,7 @@ function show_programs(io::IO, r::EnumerationResult; max_programs::Int=20)
 end
 
 Base.show(io::IO, ::MIME"text/plain", r::EnumerationResult) = begin
-    io = IOIndents.IOIndent(io)
+    io = IOIndent(io)
     println(io, "=== Enumeration result ===")
     println(io, "Stats:", Indent())
     println(io, "n_total: ", pretty_number(r.n_created-r.n_deleted))

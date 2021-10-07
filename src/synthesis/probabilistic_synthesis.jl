@@ -11,6 +11,15 @@ function synthesis_enumeration(enumerator::DynamicsEnumerator, inputs, max_ast_s
         vdata, sketch, action_vars, comp_env, max_ast_size; pruner)
 end
 
+@kwdef(
+struct DynamicsFittingSettings
+    optim_options::Optim.Options=Optim.Options(f_abstol=1e-4)
+    use_bijectors::Bool=true
+    evals_per_program::Int=10
+    use_distributed::Bool=false
+    n_threads::Int=6
+end)
+
 """
 Synthesize the dynamics using an Expectation Maximization-style loop.  
 """
@@ -18,17 +27,14 @@ function fit_dynamics_iterative(
     senum::SynthesisEnumerationResult,
     obs_data::NamedTuple{(:times, :observations, :controls)},
     f_x′′_guess::Function, 
-    params_guess::Union{NamedTuple, Nothing}; 
+    params_guess::Union{NamedTuple, Nothing},
+    σ_guess::NamedTuple; 
     program_logp::Function,
-    optim_options::Optim.Options,
     n_trajs::Int=100, n_particles::Int=10_000,
+    fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     trust_thresholds=(0.25, 0.75), λ_multiplier=2.0,
     max_iters::Int=100, patience::Int=10,
     λ0::Float64=1.0, 
-    use_bijectors=false,
-    evals_per_program=10,
-    use_distributed::Bool=false,
-    n_threads=6,
 )
     vdata = senum.vdata
     x0_dist = init_state_distribution(vdata)
@@ -36,9 +42,9 @@ function fit_dynamics_iterative(
 
     # TODO: generalize this
     function sample_data((f_x′′, params); debug=false) 
-        system = params_to_system(params, x0_dist, f_x′′, σ=(σ_pos=0.2, σ_pos′=0.6))
+        system = car1d_system(params, x0_dist, f_x′′, σ_guess)
         sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug, 
-        use_ffbs=true)
+            use_ffbs=true)
     end
 
     dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
@@ -67,12 +73,8 @@ function fit_dynamics_iterative(
         # end
 
         fit_r = fit_dynamics(
-            senum,
-            particles, log_weights, 
-            obs_data,
-            previous_result;
-            program_logp, λ, use_bijectors, optim_options,
-            evals_per_program, use_distributed, n_threads
+            senum, particles, log_weights, obs_data, previous_result;
+            σ_guess, program_logp, λ, fit_settings,
         )
         println("Iteration $iter:")
         display(fit_r)
@@ -87,7 +89,7 @@ function fit_dynamics_iterative(
         end
 
         improve_actual = perf_new - perf
-        improve_pred = sol.f_final.logp - sol.f_init.logp
+        improve_pred = sol.f_final.perf - sol.f_init.perf
         ρ = improve_actual / improve_pred
         
         if ρ > trust_thresholds[2]
@@ -122,12 +124,10 @@ function fit_dynamics(
     particles::Matrix, log_weights::Vector, 
     (; times, observations, controls), 
     previous_result::Union{MapSynthesisResult, Nothing}; 
+    σ_guess::NamedTuple,
     program_logp::Function,
-    λ::Float64, use_bijectors=false,
-    optim_options::Optim.Options,
-    evals_per_program=10,
-    use_distributed::Bool=false,
-    n_threads=6,
+    λ::Float64, 
+    fit_settings::DynamicsFittingSettings,
 )
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
@@ -148,10 +148,12 @@ function fit_dynamics(
         Dict(f_x′′.ast => params for (; f_x′′, params) in pv.sorted_results)
     end
 
+    (; evals_per_program, use_bijectors, n_threads, use_distributed) = fit_settings
+
     ctx = (; compile_ctx, 
         particles, log_weights, x0_dist, params_dist, program_logp, optim_options, 
-        evals_per_program, obs_data=(; times, controls, observations), 
-        ast_to_params, λ, use_bijectors)
+        obs_data=(; times, controls, observations), 
+        ast_to_params, λ, σ_guess, use_bijectors, evals_per_program)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
         showspeed=true, output=stdout)
@@ -204,10 +206,12 @@ end
 
 function evaluate_dynamics_once(ctx, comps, f_x′′, params_guess)
     (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
-    (; λ, use_bijectors, optim_options) = ctx
+    (; λ, use_bijectors, optim_options, σ_guess) = ctx
     try
-        local (; value, time) = @ltimed fit_dynamics_params(f_x′′, particles, log_weights, 
-            x0_dist, params_dist, obs_data, params_guess; λ, use_bijectors, optim_options)
+        local (; value, time) = @ltimed fit_dynamics_params(
+            f_x′′, particles, log_weights, 
+            x0_dist, params_dist, obs_data, params_guess, σ_guess; 
+            λ, use_bijectors, optim_options)
         if isnan(value.f_final.score)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
@@ -271,8 +275,9 @@ function fit_dynamics_params(
     f_x′′::Function,
     particles::Matrix, log_weights::Vector, 
     x0_dist, params_dist,
-    (;times, observations, controls), 
-    params_guess::NamedTuple; 
+    obs_data, 
+    params_guess::NamedTuple, 
+    σ_guess::NamedTuple; 
     λ::Float64,
     optim_options::Optim.Options,
     use_bijectors=false,
@@ -280,11 +285,11 @@ function fit_dynamics_params(
     @assert isfinite(logpdf(params_dist, params_guess))
 
     trajectories = rows(particles)
+    sys_guess = car1d_system(params_guess, x0_dist, f_x′′, σ_guess)
     data_scores = data_likelihood.(
-        trajectories, Ref(car_obs_model), Ref(observations))
+        Ref(sys_guess), Ref(obs_data), trajectories)
     state_scores = states_likelihood.(
-        trajectories, Ref(times), Ref(x0_dist), 
-        Ref(car_motion_model(params_guess; f_x′′)), Ref(controls))
+        Ref(sys_guess), Ref(obs_data), trajectories)
     
     if use_bijectors
         p_bj = bijector(params_dist)
@@ -306,17 +311,17 @@ function fit_dynamics_params(
     function loss(vec; return_details::Bool=false)
         local params = vec_to_params(vec)
         local prior = logpdf(params_dist, params)
+        local sys_new = car1d_system(params, x0_dist, f_x′′, σ_guess)
         local state_scores′ = states_likelihood.(
-            trajectories, Ref(times), Ref(x0_dist), 
-            Ref(car_motion_model(params; f_x′′)), Ref(controls))
+            Ref(sys_new), Ref(obs_data), trajectories)
 
-        local logp = sample_performance(state_scores′ - state_scores + log_weights, 
-            data_scores, state_scores′).perf + prior
+        local perf = sample_performance(state_scores′ - state_scores + log_weights, 
+            data_scores, state_scores′).perf
         local kl = 0.5mean((state_scores′ .- state_scores).^2)
         local regularization = -λ * kl
-        local score = logp + regularization
+        local score = perf + prior + regularization
         if return_details
-            (; score, regularization, logp)
+            (; score, perf, prior, regularization)
         else
             -score
         end

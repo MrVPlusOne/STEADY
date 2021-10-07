@@ -1,25 +1,6 @@
 using ProgressMeter: Progress, next!, @showprogress, progress_pmap
 
 include("enumeration_result.jl")
-
-"""
-Should implement the following functions
-- [`prune_postprocess!`](@ref)
-- [`prune_iteration!`](@ref)
-"""
-abstract type AbstractPruner end
-
-"""
-    prune_iteration!(::AbstractPruner, ::EnumerationResult, types_to_prune, current_size; is_last) -> to_prune
-prune programs by directly mutating the given `result`.
-
-If `types_to_prune` is empty, will prune expressions of all types.
-"""
-function prune_iteration! end
-
-struct NoPruner <: AbstractPruner end
-prune_iteration!(::NoPruner, ::EnumerationResult, types_to_prune, size; is_last) = []
-
 include("pruners.jl")
 
 """
@@ -49,11 +30,21 @@ function enumerate_terms(
     # stores all found programs, indexed by: shape -> ast_size -> unit
     found = Dict{PShape, Dict{Int, Dict{PUnit, Set{TAST}}}}()
     result = EnumerationResult(found, [], 0, 0, 0, 0)
+    reset!(pruner)
 
-    prune_programs(size) = begin
-        result.pruning_time += @elapsed let
+    prune_single!(prog, size) = begin
+        result.pruning_time += @elapsed begin
+            reason = prune_immediately!(pruner, prog, size)
+            if reason !== nothing
+                prune!(result, (; pruned=prog, reason))
+            end
+        end
+    end
+
+    prune_batch(size; is_last) = begin
+        result.pruning_time += @elapsed begin
             types_to_prune = types_with_size(size)
-            for x in prune_iteration!(pruner, result, types_to_prune, size, is_last=false)
+            for x in prune_iteration!(pruner, result, types_to_prune, size; is_last)
                 prune!(result, x) 
             end
         end
@@ -62,12 +53,13 @@ function enumerate_terms(
     # size 1 programs consist of all variables
     foreach(vars) do v
         insert!(result, v, 1)
+        prune_single!(v, 1)
     end
 
-    signatures = env.signatures
     # construct larger programs from smaller ones
     @showprogress desc="bottom_up_enum" for size in 1:max_size 
-        for (f, sig) in signatures
+        for f in env.names
+            sig = env.signatures[f]
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
             sizes_for_arg = [keys(found[s]) for s in arg_shapes]
@@ -87,19 +79,15 @@ function enumerate_terms(
                     for args in Iterators.product(arg_candidates...)
                         prog = Call(f, args, rtype)
                         insert!(result, prog, size)
+                        prune_single!(prog, size)
                     end
                 end
             end
         end
-        prune_programs(size)
+        prune_batch(size, is_last=false)
     end
 
-    result.pruning_time += @elapsed let 
-        types_to_prune = types_with_size(max_size)
-        for x in prune_iteration!(pruner, result, types_to_prune, max_size, is_last=true)
-            prune!(result, x) 
-        end
-    end
+    prune_batch(size, is_last=true)
     result.total_time += time() - start_time
     result
 end
@@ -115,9 +103,9 @@ function enumerate_types(
     end
 
     # first, enumerate all types under the size constraint
-    signatures = env.signatures
     @showprogress desc="enumerate_all_types" for size in 2:max_size 
-        for (_, sig) in signatures
+        for name in env.names
+            sig = env.signatures[name]
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
             sizes_for_arg = [keys(found[s]) for s in arg_shapes]
@@ -138,7 +126,6 @@ function enumerate_types(
             end
         end
     end
-
 
     # then, remove all the types not needed for `outputs`
     # entry (s, t) means type t is needed at ast size s

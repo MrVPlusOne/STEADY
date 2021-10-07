@@ -131,6 +131,7 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
     n_interest = prod(count_len(enum_result[v.type]) for v in holes)
     search_details = join((count_len(enum_result[v.type]) for v in holes), " * ")
 
+    io = IOIndent(io)
     println(io, "===== Synthesis enumeration result =====")
     println(io, "search_space: $(pretty_number(n_interest)) = $search_details")
     println(io, "n_components: ", length(comp_env.signatures))
@@ -138,6 +139,14 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
     println(io, "states: $state_vars")
     println(io, "actions: $action_vars")
     println(io, "params: $param_vars")
+
+    println(io, "Candidate expressions:", Indent())
+    for h in holes
+        println(io, "---- For $h ----")
+        show(io, DataFrame((expression=e,) for e in enum_result[h.type]))
+        println(io)
+    end
+    print(io, Dedent())
 
     show(io, mime, enum_result)
 end

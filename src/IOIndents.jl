@@ -35,6 +35,7 @@ indent_string!(io::IOIndent, str::String) = (io.indent_str = str; io)
 alignment_char!(io::IOIndent, chr::Char) = (io.align_char = chr; io)
 
 IOIndent(io::IO) = IOIndent{typeof(io)}(io, 0, Int[], 0, false, "    ", ' ')
+IOIndent(io::IOIndent) = io
 
 convert(::Type{IOIndent}, io::IOIndent) = io
 

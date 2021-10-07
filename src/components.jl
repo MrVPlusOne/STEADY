@@ -29,15 +29,19 @@ end
 
 """
 A environment that stores the set of component functions available for synthesis.
+Use `add_component!` and `push!` to add new `ComponentFunc` into teh environment.
+
+Note that components added earlier are preferred during the synthesis.
 """
 struct ComponentEnv
+    names::Vector{Symbol}
     "Julia functions that implement the corresponding components."
     impl_dict::Dict{Symbol, Function}
     signatures::Dict{Symbol, FuncSignature}
     rules::Vector{AbstractRule}
 end
 
-ComponentEnv() = ComponentEnv(Dict(), Dict(), [])
+ComponentEnv() = ComponentEnv([], Dict(), Dict(), [])
 Base.show(io::IO, env::ComponentEnv) = begin
     print(io, "ComponentEnv(components=$(keys(env.impl_dict)))")
 end
@@ -45,11 +49,11 @@ end
 Base.show(io::IO ,::MIME"text/plain", env::ComponentEnv) = begin
     n = length(env.impl_dict)
     println(io, "ComponentEnv with $n components:")
-    for (name, sig) in env.signatures
+    for name in env.names
+        sig = env.signatures[name]
         println(io, "  $name: $sig")
     end
 end
-
 
 Base.insert!(d::Dict, k, v) = d[k] = v
 
@@ -66,6 +70,7 @@ function add_component!(
 )::ComponentEnv
     (; name, impl, shape_sig, unit_sig) = comp
     @assert !(name in keys(env.impl_dict)) "Component '$name' already present in the environment."
+    push!(env.names, name)
     insert!(env.impl_dict, name, impl)
     insert!(env.signatures, name, FuncSignature(shape_sig, unit_sig))
     env
