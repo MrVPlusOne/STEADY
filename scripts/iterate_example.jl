@@ -122,7 +122,7 @@ end
 ##-----------------------------------------------------------
 # generate data
 Random.seed!(123)
-times = collect(0.0:0.1:8.0)
+times = collect(0.0:0.1:10.0)
 T = length(times)
 true_params = (; mass=1.5, drag = 0.5) #, σ_pos=0.1, σ_pos′=0.2)
 true_σ = (σ_pos=0.1, σ_pos′=0.2)
@@ -204,12 +204,14 @@ map_params = fit_dynamics_params(
 # iterative synthesis utilities
 function sample_posterior_data(
     system::StochasticSystem, obs_data; 
-    use_ffbs=true, n_particles, max_trajs, debug=false
+    use_ffbs=true, n_particles, max_trajs, debug=false,
+    progress_offset=0,
 )
     resample_threshold = 1.0
     local particles, log_weights = 
         if use_ffbs
-            ffbs_smoother(system, obs_data; n_particles, n_trajs=max_trajs, resample_threshold)
+            ffbs_smoother(system, obs_data; 
+                n_particles, n_trajs=max_trajs, resample_threshold, progress_offset)
         else
             filter_smoother(system, obs_data, n_particles; 
                 thining=n_particles ÷ max_trajs, track_weights=false, resample_threshold)
@@ -376,22 +378,18 @@ iter_result = let senum = synthesis_enumeration(
     
     f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
     params_guess = nothing # (mass=3.0, drag=0.8,)
+    σ_guess = big_σ
 
     display(senum.enum_result[mini_sketch.holes[1].type] |> collect)
 
-    fit_dynamics_iterative(senum, obs_data, f_x′′_guess, params_guess, big_σ;
+    @time fit_dynamics_iterative(senum, obs_data, f_x′′_guess, params_guess, σ_guess;
         program_logp=prog_size_prior(0.2), fit_settings,
         patience=100,
-        λ_multiplier=1.5,
+        λ_multiplier=1.0, λ0=0.0,
     )
 end
 plot(iter_result.score_history, xlabel="iterations", title="score history") |> display
 for (i, (f, params)) in enumerate(iter_result.dyn_history)
     println((; i, f.ast, params))
-end
-##-----------------------------------------------------------
-let senum = synthesis_enumeration(
-        vdata, mini_sketch, Car1D.action_vars(), comp_env, 6; pruner)
-    senum
 end
 ##-----------------------------------------------------------

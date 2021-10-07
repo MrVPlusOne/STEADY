@@ -1,3 +1,5 @@
+using ProgressLogging: @progress
+
 struct DynamicsEnumerator
     comp_env::ComponentEnv
     vdata::VariableData
@@ -57,28 +59,23 @@ function fit_dynamics_iterative(
     best_dyn=nothing
     best_iter=0
 
-    for iter in 1:max_iters
+    @progress "fit_dynamics_iterative" for iter in 1:max_iters
         if iter - best_iter > patience
             @info "Synthesis stopped because no better solutino was found in the \
                 last $patience iterations."
             break
         end
 
-        # TODO: record time taken
         (; particles, log_weights, perf) = sample_data(dyn_est)
-        # perf2 = sample_data(dyn_est).perf
-        # perfΔ = abs(perf2 - perf)
-        # if perfΔ > 1.0
-        #     @info "High performance variance" perfΔ perf perf2
-        # end
 
         fit_r = fit_dynamics(
             senum, particles, log_weights, obs_data, previous_result;
-            σ_guess, program_logp, λ, fit_settings,
+            σ_guess, program_logp, λ, fit_settings, 
         )
         println("Iteration $iter:")
         display(fit_r)
         show_top_results(fit_r, 4)
+        println()
         sol = fit_r.best_result
         dyn_new = (sol.f_x′′, sol.params)
         perf_new = sample_data(dyn_new).perf
@@ -128,6 +125,7 @@ function fit_dynamics(
     program_logp::Function,
     λ::Float64, 
     fit_settings::DynamicsFittingSettings,
+    progress_offset::Int=0,
 )
     (; vdata, sketch, comp_env, enum_result, param_vars) = senum
     (; state_vars, state′′_vars) = vdata
@@ -156,7 +154,7 @@ function fit_dynamics(
         ast_to_params, λ, σ_guess, use_bijectors, evals_per_program)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
-        showspeed=true, output=stdout)
+        offset=progress_offset, showspeed=true, output=stdout)
 
     eval_results = parallel_map(evaluate_dynamics, all_comps, ctx; 
         progress, n_threads, use_distributed)

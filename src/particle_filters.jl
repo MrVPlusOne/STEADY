@@ -158,7 +158,7 @@ function ffbs_smoother(
     system::StochasticSystem{X}, (; times, controls, observations); 
     n_particles, n_trajs,
     resample_threshold::Float64 = 0.5,
-    show_progress=true,
+    progress_offset=0,
 ) where X
     function forward_logp(x_t, x_t′, t)
         local Δt = times[t+1]-times[t]
@@ -168,7 +168,7 @@ function ffbs_smoother(
 
     (particles, log_weights) = forward_filter(
         system, (; times, controls, observations), n_particles; resample_threshold)
-    backward_sample(forward_logp, particles, log_weights, n_trajs; show_progress)
+    backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
 end
 
 
@@ -184,7 +184,7 @@ function backward_sample(
     filter_particles::Matrix{P}, 
     filter_log_weights::Matrix{<:Real}, 
     n_trajs::Integer;
-    show_progress=true,
+    progress_offset=0,
 ) where P
     M = n_trajs
     N, T = size(filter_particles)
@@ -196,7 +196,7 @@ function backward_sample(
             filter_particles[j, T]
         end for j in 1:M)
 
-    progress = Progress(T-1, desc="backward_sample", enabled=show_progress)
+    progress = Progress(T-1, desc="backward_sample", offset=progress_offset, output=stdout)
     for t in T-1:-1:1
         Threads.@threads for j in 1:M
             # weights[j] .= @views(filter_log_weights[:, t]) .+
