@@ -3,9 +3,6 @@ using Distributions
 using StatsPlots
 using ProgressMeter
 using StatsFuns: softmax, logsumexp, logsubexp
-# using Gen
-# using LowLevelParticleFilters
-# import LowLevelParticleFilters as PF
 import Random
 ##-----------------------------------------------------------
 function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), controller)
@@ -172,55 +169,40 @@ pf_result = @time forward_filter(bad_system, obs_data, 10000, resample_threshold
 plot_particles(pf_result.particles, times, "particle filter", ex_data.states) |> display
 
 pfs_result = @time filter_smoother(bad_system, obs_data, 10000; 
-    resample_threshold=1.0, track_weights=false)
+    resample_threshold=0.5)
 plot_particles(pfs_result[1], times, "filter-smoother", ex_data.states) |> display
 
 ffbs_result = @time ffbs_smoother(bad_system, obs_data; n_particles=10_000, n_trajs=200,
-    resample_threshold=1.0)
+    resample_threshold=0.5)
 plot_particles(ffbs_result[1], times, "FFBS", ex_data.states) |> display
-##-----------------------------------------------------------
-# dynamics fitting
-to_params(vec) = let
-    local mass, drag = vec#, σ_pos, σ_pos′ = vec
-    (; mass, drag) # σ_pos= abs(σ_pos), σ_pos′=abs(σ_pos′))
-end
-
-to_vec((; mass, drag, )) = [mass, drag]#, σ_pos, σ_pos′]
-
-as_real(x::Real) = x
-as_real(x::Dual) = x.value
 ##-----------------------------------------------------------
 # simple test
 map_params = fit_dynamics_params(
     Car1D.acceleration_f,
-    subsample(pfs_result[1], 200), subsample(pfs_result[2], 200), 
+    subsample(ffbs_result.particles, 200), subsample(ffbs_result.log_weights, 200), 
     x0_dist, params_dist,
     obs_data, 
     (; mass=1.0, drag = 0.5),
     true_σ;
     optim_options = Optim.Options(f_abstol=1e-4),
-    λ=1.0)
+)
 ##-----------------------------------------------------------
 # iterative synthesis utilities
 function sample_posterior_data(
     system::StochasticSystem, obs_data; 
     use_ffbs=true, n_particles, max_trajs, resample_threshold = 0.5,
-    debug=false,
     progress_offset=0,
 )
-    local particles, log_weights = 
+    local (; particles, log_weights, log_obs) = 
         if use_ffbs
             ffbs_smoother(system, obs_data; 
                 n_particles, n_trajs=max_trajs, resample_threshold, progress_offset)
         else
             filter_smoother(system, obs_data, n_particles; 
-                thining=n_particles ÷ max_trajs, track_weights=false, resample_threshold)
+                thining=n_particles ÷ max_trajs, resample_threshold)
         end
     local trajectories = rows(particles)
-    local dl = data_likelihood.(Ref(system), Ref(obs_data), trajectories)
-    local sl = states_likelihood.(Ref(system), Ref(obs_data), trajectories)
-    local s = sample_performance(log_weights, dl, sl; debug)
-    (; particles, log_weights, trajectories, s...)
+    (; particles, log_weights, trajectories, log_obs)
 end
 
 function check_performance_variance(
@@ -229,72 +211,12 @@ function check_performance_variance(
 )
     @unzip_named (perfs, :perf), (stats, :stats) = map(1:repeats) do _
         print(".")
-        sample_posterior_data(system, obs_data; 
-            n_particles, max_trajs=n_trajs, use_ffbs, debug=true)
+        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, use_ffbs)
     end
     println()
     (; perf = to_measurement(perfs), stats=to_measurement(stats))
 end
 
-function iterative_dyn_fitting(params₀, σ_guess, obs_data, iters; 
-        n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), 
-        optim_options=Optim.Options(x_abstol=1e-3),
-        plot_freq=10)
-    params_est::NamedTuple = params₀
-
-    sample_data = (params; debug=false) -> 
-        sample_posterior_data(car1d_system(params, x0_dist, Car1D.acceleration_f, big_σ), 
-            obs_data; n_particles, max_trajs, debug)
-
-    params_history = typeof(params_est)[]
-    traj_history = []
-    score_history = []
-    λ_history = []
-    λ = 1.0
-    @showprogress for i in 1:iters
-        (; particles, log_weights, perf) = sample_data(params_est)
-        perf2 = sample_data(params_est).perf
-
-        fit_r = fit_dynamics_params(
-            Car1D.acceleration_f,
-            particles, log_weights, 
-            x0_dist, params_dist,
-            obs_data, params_est, σ_guess; 
-            λ, optim_options)
-        perf_new = sample_data(fit_r.params).perf
-
-        begin
-            improve_actual = perf_new - perf
-            improve_pred = fit_r.f_final - fit_r.f_init
-            ρ = improve_actual / improve_pred
-            @info "optimization finished." ρ improve_actual improve_pred
-            
-            perfΔ = abs(perf2 - perf)
-            if perfΔ > 0.5 * improve_pred
-                @info "High performance variance" perfΔ
-            end
-            λ_ratio = 1.5
-            if ρ > trust_thresholds[2]
-                λ /= λ_ratio
-            elseif ρ < trust_thresholds[1]
-                λ *= λ_ratio
-            end
-        end
-        if ρ < 0
-            @warn("Failed to improve the objective.")
-        end
-        params_est = fit_r.params
-        push!(params_history, params_est)
-        push!(traj_history, particles)
-        push!(score_history, perf)
-        push!(λ_history, λ)
-        @show "iteration finished" λ perf params_est
-        if i % plot_freq == 1
-            plot_particles(particles, times, "iteration $i", ex_data.states) |> display
-        end
-    end
-    (; params_history, traj_history, score_history)
-end
 ##-----------------------------------------------------------
 # check posterior sampling variance
 skip_variance_checking = true
@@ -303,16 +225,6 @@ if !skip_variance_checking
         n_particles=10_000, n_trajs=200, use_ffbs=false)
     check_performance_variance(bad_system, obs_data;
         n_particles=10_000, n_trajs=200, use_ffbs=true)
-end
-##-----------------------------------------------------------
-# perform iterative synthesis
-bad_params = (; mass=4.6, drag = 0.8)
-skip_iterative_synthesis = true
-if !skip_iterative_synthesis
-    @info "Starting iterative_dyn_fitting..."
-    syn_result = iterative_dyn_fitting(bad_params, obs_data, 200, n_particles=10000, max_trajs=500)
-    show(DataFrame(syn_result.params_history), allrows=true)
-    plot(syn_result.score_history, title="log p(y|f)")
 end
 ##-----------------------------------------------------------
 # program enumeration test
@@ -360,37 +272,42 @@ fit_settings = DynamicsFittingSettings(; optim_options)
 syn_result = fit_dynamics(
     senum, post_data.particles, post_data.log_weights, obs_data, nothing; 
     σ_guess = true_σ,
-    λ=1.0, program_logp=prog_size_prior(0.2), fit_settings,
+    program_logp=prog_size_prior(0.2), fit_settings,
 )
 display(syn_result)
-map(syn_result.sorted_results) do (logp, f_x′′, params)
-    (logp, f_x′′.ast, params)
+map(syn_result.sorted_results) do (; score, f_x′′, params)
+    (score, f_x′′.ast, params)
 end |> DataFrame
 ##-----------------------------------------------------------
 # test full synthesis
 @info "full synthesis started..."
-mini_sketch = DynamicsSketch(
-    [Var(:drag_acc, ℝ, PUnits.Acceleration)], 
-    ((; mass, f), (; drag_acc)) -> (pos′′= f / mass - drag_acc,),
-)
+# mini_sketch = DynamicsSketch(
+#     [Var(:drag_acc, ℝ, PUnits.Acceleration)], 
+#     ((; mass, f), (; drag_acc)) -> (pos′′= f / mass - drag_acc,),
+# )
 
 iter_result = let senum = synthesis_enumeration(
-        vdata, mini_sketch, Car1D.action_vars(), comp_env, 5; pruner)
+        vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
     
-    f_x′′_guess((; mass, f)) = (pos′′= f / mass,)
+    comps_guess = let f = Var(:f, ℝ, PUnits.Force), mass = Var(:mass, ℝ, PUnits.Mass) 
+        (f / mass, )
+    end
     params_guess = nothing # (mass=3.0, drag=0.8,)
     σ_guess = big_σ
 
-    display(senum.enum_result[mini_sketch.holes[1].type] |> collect)
+    display(senum.enum_result[sketch.holes[1].type] |> collect)
 
-    @time fit_dynamics_iterative(senum, obs_data, f_x′′_guess, params_guess, σ_guess;
+    @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess, σ_guess;
         program_logp=prog_size_prior(0.2), fit_settings,
-        patience=100,
-        λ_multiplier=1.0, λ0=0.0,
+        max_iters=100,
     )
 end
-plot(iter_result.score_history, xlabel="iterations", title="score history") |> display
-for (i, (f, params)) in enumerate(iter_result.dyn_history)
-    println((; i, f.ast, params))
+plot(iter_result.logp_history, xlabel="iterations", title="log p(observations)", 
+    legend=false) |> display
+let rows = []
+    for (i, (f, params)) in enumerate(iter_result.dyn_history)
+        (i % 5 == 1) && push!(rows, (; i, f.ast.pos′′, params))
+    end
+    show(DataFrame(rows), truncate=100)
 end
 ##-----------------------------------------------------------

@@ -57,98 +57,53 @@ function forward_filter(
     particles[:, 1] .= (rand(x0_dist) for _ in 1:N)
     ancestors[:, :] .= 1:N
     
-    # log weights at the current time step
-    current_lw = logpdf.(obs_model.(@views(particles[:, 1])), Ref(observations[1]))
-    bins_buffer = zeros(Float64, N)
+    current_lw = fill(-log(N), N) # log weights at the current time step
+    current_w = exp.(current_lw)
+    log_obs::Float64 = 0.0  # estimation of the log observation likelihood
+    bins_buffer = zeros(Float64, N) # used for systematic resampling
 
-    for t in 1:T-1
-        w_vec = @views weights[:, t]
-        softmax!(w_vec, current_lw)
-        log_weights[:, t] = current_lw
-        
-        # optionally resample
-        if effective_particles(w_vec) < N * resample_threshold
-            indices = @views(ancestors[:, t])
-            resample!(indices, w_vec, bins_buffer)
-            current_lw .= 0.0
-            particles[:, t] = particles[indices, t]
-        end
-
-        Δt = times[t+1] - times[t]
-        u = controls[t]
-        particles[:, t+1] .= rand.(motion_model.(@views(particles[:, t]), Ref(u), Δt))
-        current_lw .+= logpdf.(obs_model.(@views(particles[:, t+1])), Ref(observations[t+1]))
-    end
-    log_weights[:, T] = current_lw
-    softmax!(@views(weights[:, T]), current_lw)
-
-    (; particles, weights, log_weights, ancestors)
-end
-
-"""
-Similar to particle filters, but try to track the data likelihood of the entire trajectory 
-by not resetting weights to 0 during resampling.
-"""
-function forward_filter_tracked(
-    system::StochasticSystem{X}, (; times, controls, observations), n_particles; 
-    resample_threshold::Float64 = 0.5,    
-) where X
-    T, N = length(times), n_particles
-    (; x0_dist, motion_model, obs_model) = system
-    
-    particles = Matrix{X}(undef, N, T)
-    ancestors = Matrix{Int}(undef, N, T)
-    log_weights = Matrix{Float64}(undef, N, T) # unnormalized log weights
-    weights = Matrix{Float64}(undef, N, T) # normalized probabilities
-
-    particles[:, 1] .= (rand(x0_dist) for _ in 1:N)
-    ancestors[:, :] .= 1:N
-    
-    # log weights at the current time step
-    current_lw = logpdf.(obs_model.(@views(particles[:, 1])), Ref(observations[1]))
-    bins_buffer = zeros(Float64, N)
-
-    for t in 1:T-1
-        w_vec = @views weights[:, t]
-        softmax!(w_vec, current_lw)
-        log_weights[:, t] = current_lw
-        
-        # optionally resample
-        if effective_particles(w_vec) < N * resample_threshold
-            indices = @views(ancestors[:, t])
-            resample!(indices, w_vec, bins_buffer)
-            index_to_log_n = Dict(i => -log(n) for (i, n) in countmap(indices))
-            for i in 1:N
-                ancestor = indices[i]
-                current_lw[i] = log_weights[ancestor, t] + index_to_log_n[ancestor]
+    for t in 1:T
+        if t > 1 
+            # optionally resample
+            if effective_particles(current_w) < N * resample_threshold
+                indices = @views(ancestors[:, t-1])
+                resample!(indices, current_w, bins_buffer)
+                current_lw .= -log(N)
+                particles[:, t-1] = particles[indices, t-1]
             end
-            particles[:, t] = particles[indices, t]
+            Δt = times[t] - times[t-1]
+            u = controls[t-1]
+            particles[:, t] .= rand.(motion_model.(@views(particles[:, t-1]), Ref(u), Δt))
         end
 
-        Δt = times[t+1] - times[t]
-        u = controls[t]
-        particles[:, t+1] .= rand.(motion_model.(@views(particles[:, t]), Ref(u), Δt))
-        current_lw .+= logpdf.(obs_model.(@views(particles[:, t+1])), Ref(observations[t+1]))
-    end
-    log_weights[:, T] = current_lw
-    softmax!(@views(weights[:, T]), current_lw)
+        current_lw .+= logpdf.(obs_model.(@views(particles[:, t])), Ref(observations[t]))
 
-    (; particles, weights, log_weights, ancestors)
+        log_z_t = logsumexp(current_lw)
+        current_lw .-= log_z_t
+        current_w .= exp.(current_lw)
+        log_weights[:, t] = current_lw
+        weights[:, t] = current_w
+        log_obs += log_z_t
+    end
+
+    log_obs::Float64
+    (; particles, weights, log_weights, ancestors, log_obs)
 end
+
 
 """
 Sample smooting trajecotries by tracking the ancestors of a particle filter.
 """
 function filter_smoother(system, data, n_particles; 
-    resample_threshold=1.0, thining=10, track_weights=false
+    resample_threshold=1.0, thining=10,
 )
-    pf = track_weights ? forward_filter_tracked : forward_filter
-    (; particles, log_weights, ancestors) = pf(system, data, n_particles; resample_threshold)
+    (; particles, log_weights, ancestors, log_obs) = forward_filter(
+        system, data, n_particles; resample_threshold)
     trajs = particle_trajectories(particles, ancestors)
     trajectories = trajs[1:thining:end,:]
     log_weights = log_weights[1:thining:end, end]
     log_weights .-= logsumexp(log_weights)
-    (; trajectories, log_weights)
+    (; trajectories, log_weights, log_obs)
 end
 
 """
@@ -166,9 +121,11 @@ function ffbs_smoother(
         logpdf(d, x_t′)
     end
 
-    (particles, log_weights) = forward_filter(
+    (; particles, log_weights, log_obs) = forward_filter(
         system, (; times, controls, observations), n_particles; resample_threshold)
-    backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
+    log_obs::Float64
+    sampled = backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
+    merge(sampled, (; log_obs))
 end
 
 
@@ -199,12 +156,8 @@ function backward_sample(
     progress = Progress(T-1, desc="backward_sample", offset=progress_offset, output=stdout)
     for t in T-1:-1:1
         Threads.@threads for j in 1:M
-            # weights[j] .= @views(filter_log_weights[:, t]) .+
-            #     forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
-            for k in 1:N
-                weights[j][k] = filter_log_weights[k, t] + 
-                    forward_logp(filter_particles[k, t], particles[j, t+1], t)
-            end
+            weights[j] .= @views(filter_log_weights[:, t]) .+
+                forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
             softmax!(weights[j])
             j′ = rand(Categorical(weights[j]))
             particles[j, t] = filter_particles[j′, t]
@@ -212,7 +165,7 @@ function backward_sample(
         next!(progress)
     end
     log_weights = fill(log(1/M), M)
-    particles, log_weights
+    (; particles, log_weights)
 end
 
 function log_softmax(x::AbstractArray{<:Real})

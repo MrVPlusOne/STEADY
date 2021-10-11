@@ -211,3 +211,25 @@ end
 derivative(v:: Symbol) = Symbol(v, "′")
 derivative(v::Var, t::PUnit = PUnits.Time) = 
     Var(derivative(v.name), PType(v.type.shape, v.type.unit / t))
+
+##-----------------------------------------------------------
+# AST construction helpers
+Base.:+(e1::TAST, e2::TAST) = begin
+    @assert e1.type == e2.type
+    Call(:+, (e1, e2), e1.type)
+end
+
+Base.:-(e1::TAST, e2::TAST) = begin
+    @assert e1.type == e2.type
+    Call(:-, (e1, e2), e1.type)
+end
+
+Base.:*(e1::TAST, e2::TAST) = begin
+    @assert e1.type.shape == e2.type.shape
+    Call(:*, (e1, e2), e1.type.unit * e2.type.unit)
+end
+
+Base.:/(e1::TAST, e2::TAST) = begin
+    @assert e1.type.shape == e2.type.shape
+    Call(:/, (e1, e2), PType(e1.type.shape, e1.type.unit / e2.type.unit))
+end

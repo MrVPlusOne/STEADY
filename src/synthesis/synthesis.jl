@@ -9,7 +9,7 @@ A sketch for second-order system dynamics.
 """
 struct DynamicsSketch{F}
     holes::Vector{Var}
-    "combine(inputs::NamedTuple, hole_values::Tuple) -> accelerations::Tuple"
+    "combine(inputs::NamedTuple, hole_values::NamedTuple) -> accelerations::NamedTuple"
     combine::F
 end
 
