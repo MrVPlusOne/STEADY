@@ -32,7 +32,7 @@ function fit_dynamics_iterative(
     params_guess::Union{NamedTuple, Nothing},
     σ_guess::NamedTuple; 
     program_logp::Function,
-    n_trajs::Int=100, n_particles::Int=10_000,
+    n_trajs::Int=100, n_particles::Int=10_000, resample_threshold=0.5,
     fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     trust_thresholds=(0.25, 0.75), λ_multiplier=2.0,
     max_iters::Int=100, patience::Int=10,
@@ -45,8 +45,8 @@ function fit_dynamics_iterative(
     # TODO: generalize this
     function sample_data((f_x′′, params); debug=false) 
         system = car1d_system(params, x0_dist, f_x′′, σ_guess)
-        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, debug, 
-            use_ffbs=true)
+        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, 
+        resample_threshold, debug, use_ffbs=true)
     end
 
     dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
@@ -306,6 +306,7 @@ function fit_dynamics_params(
         values
     end
 
+    # Maximize
     function loss(vec; return_details::Bool=false)
         local params = vec_to_params(vec)
         local prior = logpdf(params_dist, params)

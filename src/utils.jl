@@ -3,7 +3,6 @@ export max_by, sort_by
 export rotate2d, rotation2D, °
 
 using MacroTools: @capture
-using Cthulhu
 using ForwardDiff: Dual
 import LineSearches
 

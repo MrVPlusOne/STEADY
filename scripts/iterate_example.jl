@@ -204,10 +204,10 @@ map_params = fit_dynamics_params(
 # iterative synthesis utilities
 function sample_posterior_data(
     system::StochasticSystem, obs_data; 
-    use_ffbs=true, n_particles, max_trajs, debug=false,
+    use_ffbs=true, n_particles, max_trajs, resample_threshold = 0.5,
+    debug=false,
     progress_offset=0,
 )
-    resample_threshold = 1.0
     local particles, log_weights = 
         if use_ffbs
             ffbs_smoother(system, obs_data; 
@@ -236,7 +236,7 @@ function check_performance_variance(
     (; perf = to_measurement(perfs), stats=to_measurement(stats))
 end
 
-function iterative_dyn_fitting(params₀, obs_data, iters; 
+function iterative_dyn_fitting(params₀, σ_guess, obs_data, iters; 
         n_particles=10000, max_trajs=500, trust_thresholds=(0.25, 0.75), 
         optim_options=Optim.Options(x_abstol=1e-3),
         plot_freq=10)
@@ -259,7 +259,8 @@ function iterative_dyn_fitting(params₀, obs_data, iters;
             Car1D.acceleration_f,
             particles, log_weights, 
             x0_dist, params_dist,
-            obs_data, params_est; λ, optim_options)
+            obs_data, params_est, σ_guess; 
+            λ, optim_options)
         perf_new = sample_data(fit_r.params).perf
 
         begin
