@@ -57,17 +57,24 @@ function fit_dynamics_iterative(
         (f_x′′ = f_x′′_guess, params = p_est, comps = comps_guess)
     end
     
-    dyn_history, logp_history = [], [], []
+    dyn_history, logp_history, improve_pred_hisotry = NamedTuple[], Float64[], Float64[]
     previous_result = nothing
 
     @progress "fit_dynamics_iterative" for iter in 1:max_iters
-        (; params, comps) = dyn_est
+        (; f_x′′, params, comps) = dyn_est
         (; particles, log_weights, log_obs) = sample_data(dyn_est)
         log_prior = program_logp(comps) + logpdf(params_dist, params)
         log_p::Float64 = log_prior + log_obs
 
         push!(dyn_history, dyn_est)
         push!(logp_history, log_p)
+
+        score_old = let
+            sys_new = car1d_system(params, x0_dist, f_x′′, σ_guess)
+            state_scores = states_likelihood.(
+                Ref(sys_new), Ref(obs_data), rows(particles))
+            sum(state_scores .* softmax(log_weights)) + log_prior
+        end
 
         plot_freq = 4
         if iter % plot_freq == 1
@@ -91,10 +98,12 @@ function fit_dynamics_iterative(
         dyn_est = (; sol.f_x′′, sol.params, sol.comps)
         previous_result = fit_r
 
-        @info "Iteration $iter:" log_p sol.f_init sol.f_final
+        improve_pred = sol.score - score_old
+        push!(improve_pred_hisotry, improve_pred)
+        @info "Iteration $iter:" log_p improve_pred
     end
 
-    (; dyn_est, dyn_history, logp_history)
+    (; dyn_est, dyn_history, logp_history, improve_pred_hisotry)
 end
 
 function fit_dynamics(

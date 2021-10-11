@@ -6,7 +6,7 @@ using MacroTools: @capture
 using ForwardDiff: Dual
 import LineSearches
 
-specific_elems(xs::AbstractVector{T}) where T = 
+specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
 
 count_len(iters) = count(_ -> true, iters)

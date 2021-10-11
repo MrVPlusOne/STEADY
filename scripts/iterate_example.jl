@@ -299,11 +299,20 @@ iter_result = let senum = synthesis_enumeration(
 
     @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess, σ_guess;
         program_logp=prog_size_prior(0.2), fit_settings,
-        max_iters=100,
+        max_iters=20,
     )
 end
 plot(iter_result.logp_history, xlabel="iterations", title="log p(observations)", 
     legend=false) |> display
+let 
+    (; logp_history, improve_pred_hisotry) = iter_result
+    improve_actual = logp_history[2:end] .- logp_history[1:end-1]
+    data = hcat(improve_actual, improve_pred_hisotry) |> specific_elems
+    @show data
+    plot(data, xlabel="iterations", ylabel="iteration improvement", 
+        label=["est. actual" "predicted"])
+    hline!([0.0], label="y=0", line=:dash)
+end
 let rows = []
     for (i, (f, params)) in enumerate(iter_result.dyn_history)
         (i % 5 == 1) && push!(rows, (; i, f.ast.pos′′, params))
