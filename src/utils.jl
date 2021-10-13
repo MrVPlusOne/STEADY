@@ -1,10 +1,13 @@
 export specific_elems, count_len, @unzip, @unzip_named
 export max_by, sort_by
 export rotate2d, rotation2D, °
+export Optional
 
 using MacroTools: @capture
 using ForwardDiff: Dual
 import LineSearches
+
+const Optional{X} = Union{X, Nothing}
 
 specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)

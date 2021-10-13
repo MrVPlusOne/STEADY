@@ -10,13 +10,13 @@ Pos = Var(:pos, ℝ, PUnits.Length)
 Power = Var(:f, ℝ, PUnits.Force)
 Drag = Var(:drag, ℝ, PUnits.Force / PUnits.Speed)
 Mass = Var(:mass, ℝ, PUnits.Mass)
-Wall = Var(:wall, ℝ, PUnits.Length)
 
 state_vars() = [Pos]
 action_vars() = [Power]
 param_vars() = [Drag, Mass]
 
 variable_data() = VariableData(
+    Val(2),
     states = OrderedDict(
         Pos => (SNormal(0.0, 0.01), SNormal(0.0, 1.0)),
     ),
@@ -24,9 +24,7 @@ variable_data() = VariableData(
         Mass => SUniform(0.5, 5.0),
         Drag => SUniform(0.0, 1.0),
     ),
-    others = OrderedDict(
-        Wall.name => SNormal(25.0, 25.0),
-    ),
+    action_vars = [Power],
 )
 
 acceleration_f((; f, drag, mass, pos′)) = begin

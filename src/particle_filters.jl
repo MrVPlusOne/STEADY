@@ -1,18 +1,64 @@
 using StatsFuns: softmax!
 using StatsBase: countmap
 
-struct StochasticSystem{X, U, Y, X0_Dist, Motion, ObsM}
+export simulate_trajectory, states_likelihood, data_likelihood
+
+function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), controller)
+    T = length(times)
+    state = rand(x0_dist)
+
+    states = []
+    observations = []
+    controls = []
+
+    for t in 1:T
+        y = rand(obs_model(state))
+        u = controller(state, y)
+
+        push!(states, state)
+        push!(observations, y)
+        push!(controls, u)
+
+        if t < T
+            Δt = times[t+1] - times[t]
+            state = rand(motion_model(state, u, Δt))
+        end
+    end
+
+    (states=specific_elems(states), 
+        observations=specific_elems(observations), 
+        controls=specific_elems(controls))
+end
+
+function states_likelihood((; x0_dist, motion_model), (;times, controls), states)
+    p = logpdf(x0_dist, states[1])
+    for i in 1:length(states)-1
+        Δt = times[i+1]-times[i]
+        state_distr = motion_model(states[i], controls[i], Δt)
+        p += logpdf(state_distr, states[i+1])
+    end
+    p    
+end
+
+function data_likelihood((; obs_model), (; observations), states)
+    sum(logpdf(obs_model(states[i]), observations[i]) for i in 1:length(states))
+end
+
+struct MarkovSystem{X, X0_Dist, Motion, ObsM}
     x0_dist::X0_Dist
     "motion_model(x, control, Δt) -> distribution_of_x′"
     motion_model::Motion
+    "obs_model(x) -> distribtion_of_y"
     obs_model::ObsM
 end
 
-StochasticSystem(x0_dist::A, motion_model::B, obs_model::C; X, U, Y) where {A,B,C} = 
-    StochasticSystem{X, U, Y, A, B, C}(x0_dist, motion_model, obs_model)
+MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A,B,C} = begin
+    X = typeof(rand(x0_dist))
+    MarkovSystem{X, A, B, C}(x0_dist, motion_model, obs_model)
+end
 
-Base.show(io::IO, sys::StochasticSystem) = begin
-    print(io, "StochasticSystem", (; sys.x0_dist, sys.motion_model, sys.obs_model))
+Base.show(io::IO, sys::MarkovSystem) = begin
+    print(io, "MarkovSystem", (; sys.x0_dist, sys.motion_model, sys.obs_model))
 end
 
 effective_particles(weights::AbstractVector) = 1/sum(abs2, weights)
@@ -43,7 +89,7 @@ end
 Run particle filters forward in time
 """
 function forward_filter(
-    system::StochasticSystem{X}, (; times, controls, observations), n_particles; 
+    system::MarkovSystem{X}, (; times, controls, observations), n_particles; 
     resample_threshold::Float64 = 0.5,    
 ) where X
     T, N = length(times), n_particles
@@ -110,7 +156,7 @@ end
 Particle smoother based on the Forward filtering-backward sampling algorithm.
 """
 function ffbs_smoother(
-    system::StochasticSystem{X}, (; times, controls, observations); 
+    system::MarkovSystem{X}, (; times, controls, observations); 
     n_particles, n_trajs,
     resample_threshold::Float64 = 0.5,
     progress_offset=0,
@@ -164,8 +210,7 @@ function backward_sample(
         end
         next!(progress)
     end
-    log_weights = fill(log(1/M), M)
-    (; particles, log_weights)
+    (; particles, log_weights=nothing)
 end
 
 function log_softmax(x::AbstractArray{<:Real})

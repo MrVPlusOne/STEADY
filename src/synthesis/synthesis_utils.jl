@@ -1,3 +1,14 @@
+export prog_size_prior
+function prog_size_prior(decay::Float64)
+    (comps) -> log(decay) * sum(map(ast_size, comps); init=0) 
+end
+
+Base.size(v::Transducers.ProgressLoggingFoldable) = size(v.foldable)
+
+function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real where ks
+    sum(logpdf.(values(dist), values(v)))
+end
+
 function structure_to_vec(v::Union{Tuple, NamedTuple})
     T = promote_numbers_type(v)
     vec = Vector{T}(undef, n_numbers(v))

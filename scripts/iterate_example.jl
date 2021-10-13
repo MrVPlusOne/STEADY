@@ -5,49 +5,6 @@ using ProgressMeter
 using StatsFuns: softmax, logsumexp, logsubexp
 import Random
 ##-----------------------------------------------------------
-function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), controller)
-    T = length(times)
-    state = rand(x0_dist)
-
-    states = []
-    observations = []
-    controls = []
-
-    for t in 1:T
-        y = rand(obs_model(state))
-        u = controller(state, y)
-
-        push!(states, state)
-        push!(observations, y)
-        push!(controls, u)
-
-        if t < T
-            Δt = times[t+1] - times[t]
-            state = rand(motion_model(state, u, Δt))
-        end
-    end
-
-    (states=specific_elems(states), 
-        observations=specific_elems(observations), 
-        controls=specific_elems(controls))
-end
-
-function states_likelihood(system, (;times, controls), states)
-    (; x0_dist, motion_model) = system
-    p = logpdf(x0_dist, states[1])
-    for i in 1:length(states)-1
-        Δt = times[i+1]-times[i]
-        state_distr = motion_model(states[i], controls[i], Δt)
-        p += logpdf(state_distr, states[i+1])
-    end
-    p    
-end
-
-function data_likelihood(system, (; observations), states)
-    sum(logpdf(system.obs_model(states[i]), observations[i])
-        for i in 1:length(states))
-end
-
 plot_states!(plt, states, times, name) = begin
     @unzip xs, vs = states
     plot!(plt, times, hcat(xs, vs), label=["x ($name)" "v ($name)"])
@@ -104,17 +61,26 @@ function car_motion_model((; drag, mass);
     end
 end
 
+car1d_sketch((; σ_pos, σ_pos′)) = DynamicsSketch(
+    [Var(:pos′′, ℝ, PUnits.Acceleration)],
+    (inputs, (; pos′′)) -> begin
+        (; Δt, pos, pos′) = inputs
+        DistrIterator(
+            (pos=SNormal(pos + Δt * pos′, σ_pos * Δt),
+            pos′=SNormal(pos′ + Δt * pos′′, (abs(pos′) + 0.1) * σ_pos′ * Δt)))
+    end
+)
+
 const wall_pos = 10.0
 function car_obs_model(state)
     (pos, pos′) = state
     dis = wall_pos - pos
     v_mea = pos′
-    SMvNormal(@SVector[dis, v_mea], @SVector[1.0, 0.3])
+    DistrIterator((dis=Normal(dis, 1.0), v_mea=Normal(v_mea, 0.3)))
 end
 
 function car1d_system(params, x0_dist, f_x′′, σ::NamedTuple)
-    StochasticSystem(x0_dist, car_motion_model(params; f_x′′, σ), car_obs_model; 
-        X=typeof(rand(x0_dist)), Y=SVector{2, Float64}, U=SVector{1, Float64})
+    MarkovSystem(x0_dist, car_motion_model(params; f_x′′, σ), car_obs_model)
 end
 ##-----------------------------------------------------------
 # generate data
@@ -126,7 +92,7 @@ true_σ = (σ_pos=0.1, σ_pos′=0.2)
 bad_params = (; mass=6.0, drag = 0.85)
 big_σ = (σ_pos=0.2, σ_pos′=0.4)
 car_controller = (s, z) -> begin
-    @SVector[Car1D.controller((speed=z[2], sensor=z[1])).f]
+    Car1D.controller((speed=z[2], sensor=z[1]))
 end
 vdata = Car1D.variable_data()
 x0_dist = init_state_distribution(vdata)
@@ -177,48 +143,28 @@ ffbs_result = @time ffbs_smoother(bad_system, obs_data; n_particles=10_000, n_tr
 plot_particles(ffbs_result[1], times, "FFBS", ex_data.states) |> display
 ##-----------------------------------------------------------
 # simple test
-map_params = fit_dynamics_params(
-    Car1D.acceleration_f,
+map_params = @time fit_dynamics_params(
+    car_motion_model,
     subsample(ffbs_result.particles, 200), subsample(ffbs_result.log_weights, 200), 
     x0_dist, params_dist,
     obs_data, 
-    (; mass=1.0, drag = 0.5),
-    true_σ;
+    (; mass=1.0, drag = 0.5);
     optim_options = Optim.Options(f_abstol=1e-4),
 )
 ##-----------------------------------------------------------
-# iterative synthesis utilities
-function sample_posterior_data(
-    system::StochasticSystem, obs_data; 
-    use_ffbs=true, n_particles, max_trajs, resample_threshold = 0.5,
-    progress_offset=0,
-)
-    local (; particles, log_weights, log_obs) = 
-        if use_ffbs
-            ffbs_smoother(system, obs_data; 
-                n_particles, n_trajs=max_trajs, resample_threshold, progress_offset)
-        else
-            filter_smoother(system, obs_data, n_particles; 
-                thining=n_particles ÷ max_trajs, resample_threshold)
-        end
-    local trajectories = rows(particles)
-    (; particles, log_weights, trajectories, log_obs)
-end
-
+# check posterior sampling variance
 function check_performance_variance(
     system, obs_data; 
     n_particles, n_trajs, use_ffbs, repeats=50, 
 )
     @unzip_named (perfs, :perf), (stats, :stats) = map(1:repeats) do _
         print(".")
-        sample_posterior_data(system, obs_data; n_particles, max_trajs=n_trajs, use_ffbs)
+        ffbs_smoother(system, obs_data; n_particles, n_trajs)
     end
     println()
     (; perf = to_measurement(perfs), stats=to_measurement(stats))
 end
 
-##-----------------------------------------------------------
-# check posterior sampling variance
 skip_variance_checking = true
 if !skip_variance_checking
     check_performance_variance(bad_system, obs_data;
@@ -233,23 +179,22 @@ comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
 components_transcendentals!(comp_env, can_grow=true)
 
+good_sketch = car1d_sketch(big_σ)
+
 prior_p = let
-    x₀, x′₀ = ex_data.states[1]
+    x₀ = ex_data.states[1]
     syn_params = (;true_params.mass, true_params.drag)
-    others = (; wall=wall_pos)
-    logpdf(to_distribution(vdata), (;x₀, x′₀, params=syn_params, others))
+    logpdf(to_distribution(vdata), (;x₀, params=syn_params))
 end
 if !isfinite(prior_p)
     error("prior_p = $prior_p, some value may be out of its support.")
 end
 
-sketch = no_sketch(vdata.state′′_vars)
 rand(params_dist)
 rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:200]
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
-senum = @time synthesis_enumeration(
-    vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
+senum = @time synthesis_enumeration(vdata, good_sketch, shape_env, comp_env, 7; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
@@ -259,8 +204,7 @@ end
 display(senum)
 ##-----------------------------------------------------------
 # test synthesis iteration
-post_data=sample_posterior_data(true_system, obs_data; 
-    n_particles=10_000, max_trajs=100)
+post_data=ffbs_smoother(true_system, obs_data; n_particles=10_000, n_trajs=100)
 optim_options = Optim.Options(
     f_abstol=1e-4,
     iterations=100,
@@ -271,33 +215,27 @@ fit_settings = DynamicsFittingSettings(; optim_options)
 @info "fit_dynamics started..."
 syn_result = fit_dynamics(
     senum, post_data.particles, post_data.log_weights, obs_data, nothing; 
-    σ_guess = true_σ,
     program_logp=prog_size_prior(0.2), fit_settings,
 )
 display(syn_result)
-map(syn_result.sorted_results) do (; score, f_x′′, params)
-    (score, f_x′′.ast, params)
+map(syn_result.sorted_results) do (; score, comps, params)
+    (score, comps, params)
 end |> DataFrame
 ##-----------------------------------------------------------
 # test full synthesis
 @info "full synthesis started..."
-# mini_sketch = DynamicsSketch(
-#     [Var(:drag_acc, ℝ, PUnits.Acceleration)], 
-#     ((; mass, f), (; drag_acc)) -> (pos′′= f / mass - drag_acc,),
-# )
-
 iter_result = let senum = synthesis_enumeration(
-        vdata, sketch, Car1D.action_vars(), comp_env, 7; pruner)
+        vdata, good_sketch, shape_env, comp_env, 7; pruner)
     
     comps_guess = let f = Var(:f, ℝ, PUnits.Force), mass = Var(:mass, ℝ, PUnits.Mass) 
-        (f / mass, )
+        (pos′′ = f / mass,)
     end
     params_guess = nothing # (mass=3.0, drag=0.8,)
-    σ_guess = big_σ
 
-    display(senum.enum_result[sketch.holes[1].type] |> collect)
+    display(senum.enum_result[good_sketch.holes[1].type] |> collect)
 
-    @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess, σ_guess;
+    @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess;
+        obs_model=car_obs_model,
         program_logp=prog_size_prior(0.2), fit_settings,
         max_iters=20,
     )
@@ -311,11 +249,11 @@ let
     @show data
     plot(data, xlabel="iterations", ylabel="iteration improvement", 
         label=["est. actual" "predicted"])
-    hline!([0.0], label="y=0", line=:dash)
+    hline!([0.0], label="y=0", line=:dash) |> display
 end
 let rows = []
-    for (i, (f, params)) in enumerate(iter_result.dyn_history)
-        (i % 5 == 1) && push!(rows, (; i, f.ast.pos′′, params))
+    for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
+        (i % 5 == 1) && push!(rows, (; i, comps, params))
     end
     show(DataFrame(rows), truncate=100)
 end

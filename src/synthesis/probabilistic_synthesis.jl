@@ -1,18 +1,5 @@
 using ProgressLogging: @progress
 
-struct DynamicsEnumerator
-    comp_env::ComponentEnv
-    vdata::VariableData
-    action_vars::Vector{Var}
-end
-
-function synthesis_enumeration(enumerator::DynamicsEnumerator, inputs, max_ast_size)
-    (; comp_env, vdata, action_vars) = enumerator
-    pruner = IOPruner(; inputs, comp_env)
-    synthesis_enumeration(
-        vdata, sketch, action_vars, comp_env, max_ast_size; pruner)
-end
-
 @kwdef(
 struct DynamicsFittingSettings
     optim_options::Optim.Options=Optim.Options(f_abstol=1e-4)
@@ -29,39 +16,45 @@ end
 
 """
 Synthesize the dynamics using an Expectation Maximization-style loop.  
+
+## Arguments
+- `transition_dynamics((;x...,u...,params...,Δt), holes) -> distribution_of_x′`.
+- `obs_model(x) -> distribtion_of_y`.
+- `particle_smoother(stochastic_system, obs_data) -> sample_result`.
 """
 function fit_dynamics_iterative(
     senum::SynthesisEnumerationResult,
     obs_data::NamedTuple{(:times, :observations, :controls)},
-    comps_guess::Tuple{Vararg{TAST}}, 
-    params_guess::Union{NamedTuple, Nothing},
-    σ_guess::NamedTuple; 
+    comps_guess::NamedTuple, 
+    params_guess::Union{NamedTuple, Nothing};
+    obs_model::Function,
     program_logp::Function,
-    n_trajs::Int=100, n_particles::Int=10_000, resample_threshold=0.5,
+    particle_smoother::Function = (system, obs_data) -> 
+        ffbs_smoother(system, obs_data; n_particles=10_000, n_trajs=100),
     fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     max_iters::Int=100,
 )
-    vdata = senum.vdata
+    (; vdata, sketch) = senum
     x0_dist = init_state_distribution(vdata)
     params_dist = params_distribution(vdata)
 
-    # TODO: generalize this
-    function sample_data((; f_x′′, params)) 
-        system = car1d_system(params, x0_dist, f_x′′, σ_guess)
-        ffbs_smoother(system, obs_data; n_particles, n_trajs, resample_threshold)
+    function sample_data((; motion_model, params)) 
+        local mm = motion_model(params)
+        local system = MarkovSystem(x0_dist, mm, obs_model)
+        particle_smoother(system, obs_data)
     end
 
     dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
-        compile_ctx = mk_compile_ctx(senum.sketch, senum.vdata.state′′_vars, senum.comp_env)
-        f_x′′_guess = compile_dynamics(compile_ctx, comps_guess)
-        (f_x′′ = f_x′′_guess, params = p_est, comps = comps_guess)
+        compile_ctx = (; senum.shape_env, senum.comp_env, sketch.combine_holes)
+        (motion_model = compile_motion_model(comps_guess, compile_ctx), 
+            params = p_est, comps = comps_guess)
     end
     
     dyn_history, logp_history, improve_pred_hisotry = NamedTuple[], Float64[], Float64[]
     previous_result = nothing
 
     @progress "fit_dynamics_iterative" for iter in 1:max_iters
-        (; f_x′′, params, comps) = dyn_est
+        (; motion_model, params, comps) = dyn_est
         (; particles, log_weights, log_obs) = sample_data(dyn_est)
         log_prior = program_logp(comps) + logpdf(params_dist, params)
         log_p::Float64 = log_prior + log_obs
@@ -70,10 +63,12 @@ function fit_dynamics_iterative(
         push!(logp_history, log_p)
 
         score_old = let
-            sys_new = car1d_system(params, x0_dist, f_x′′, σ_guess)
+            system = (; motion_model=motion_model(params), x0_dist)
             state_scores = states_likelihood.(
-                Ref(sys_new), Ref(obs_data), rows(particles))
-            sum(state_scores .* softmax(log_weights)) + log_prior
+                Ref(system), Ref(obs_data), rows(particles))
+            local weights = log_weights === nothing ? 
+                1 / length(state_scores) : softmax(log_weights)
+            sum(state_scores .* weights) + log_prior
         end
 
         plot_freq = 4
@@ -88,14 +83,14 @@ function fit_dynamics_iterative(
         
         fit_r = fit_dynamics(
             senum, particles, log_weights, obs_data, previous_result;
-            σ_guess, program_logp, fit_settings, 
+            program_logp, fit_settings, 
         )
         display(fit_r)
         show_top_results(fit_r, 4)
 
         sol = fit_r.best_result
         
-        dyn_est = (; sol.f_x′′, sol.params, sol.comps)
+        dyn_est = (; sol.motion_model, sol.params, sol.comps)
         previous_result = fit_r
 
         improve_pred = sol.score - score_old
@@ -108,33 +103,33 @@ end
 
 function fit_dynamics(
     senum::SynthesisEnumerationResult,
-    particles::Matrix, log_weights::Vector, 
+    particles::Matrix, log_weights::Optional{Vector},
     (; times, observations, controls), 
     previous_result::Union{MapSynthesisResult, Nothing}; 
-    σ_guess::NamedTuple,
     program_logp::Function,
     fit_settings::DynamicsFittingSettings,
     progress_offset::Int=0,
 )
-    (; vdata, sketch, comp_env, enum_result) = senum
-    (; state′′_vars) = vdata
+    (; vdata, sketch, shape_env, comp_env, enum_result) = senum
 
-    all_comps = collect(Iterators.product((enum_result[v.type] for v in sketch.holes)...))
+    hole_names = tuple((v.name for v in sketch.holes)...)
+    all_comps = Iterators.product((enum_result[v.type] for v in sketch.holes)...) |>
+        map(comps -> NamedTuple{hole_names}(comps)) |> collect
     params_dist = params_distribution(vdata)
     x0_dist = init_state_distribution(vdata)
 
     ast_to_params = map_optional(previous_result) do pv
-        Dict(f_x′′.ast => params for (; f_x′′, params) in pv.sorted_results)
+        Dict(comps => params for (; comps, params) in pv.sorted_results)
     end
 
     (; evals_per_program, use_bijectors, n_threads, use_distributed) = fit_settings
     
-    compile_ctx = mk_compile_ctx(sketch, state′′_vars, comp_env)
+    compile_ctx = (; shape_env, comp_env, sketch.combine_holes)
 
     ctx = (; compile_ctx, 
         particles, log_weights, x0_dist, params_dist, program_logp, optim_options, 
         obs_data=(; times, controls, observations), 
-        ast_to_params, σ_guess, use_bijectors, evals_per_program)
+        ast_to_params, use_bijectors, evals_per_program)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
         offset=progress_offset, showspeed=true, output=stdout)
@@ -156,35 +151,19 @@ function fit_dynamics(
     MapSynthesisResult(best_result, stats, err_progs, sorted_results)
 end
 
-function compile_dynamics(compile_ctx, comps)
-    (; hole_names, output_names) = compile_ctx
-    compile_sketch(comps, hole_names, output_names, compile_ctx)
-end
-
-function mk_compile_ctx(sketch, state′′_vars, comp_env)
-    (
-        hole_names = Val(Tuple(v.name for v in sketch.holes)),
-        output_names = Val(tuple((v.name for v in state′′_vars)...)),
-        shape_env, comp_env, sketch.combine, check_gradient=false,
-    )
-end
 
 function evaluate_dynamics(ctx, comps)
-    f_x′′ = compile_dynamics(ctx.compile_ctx, comps)
-    evaluate_dynamics(ctx, comps, f_x′′)
-end
-
-function evaluate_dynamics(ctx, comps, f_x′′)
+    motion_model = compile_motion_model(comps, ctx.compile_ctx)
     n = ctx.evals_per_program
     (; ast_to_params, params_dist) = ctx
     results = map(1:n) do i
         params_guess = if ast_to_params !== nothing && i == 1
             # try the previous parameters first
-            ast_to_params[f_x′′.ast]
+            ast_to_params[comps]
         else
             rand(params_dist)
         end
-        evaluate_dynamics_once(ctx, comps, f_x′′, params_guess)
+        evaluate_dynamics_once(ctx, comps, motion_model, params_guess)
     end
     succeeded = results |> filter(x -> x.status == :success)
     if isempty(succeeded)
@@ -196,45 +175,48 @@ function evaluate_dynamics(ctx, comps, f_x′′)
     end
 end
 
-function evaluate_dynamics_once(ctx, comps, f_x′′, params_guess)
+function evaluate_dynamics_once(ctx, comps, motion_model, params_guess)
     (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
-    (; use_bijectors, optim_options, σ_guess) = ctx
+    (; use_bijectors, optim_options) = ctx
     try
         local (; value, time) = @ltimed fit_dynamics_params(
-            f_x′′, particles, log_weights, 
-            x0_dist, params_dist, obs_data, params_guess, σ_guess; 
+            motion_model, particles, log_weights, 
+            x0_dist, params_dist, obs_data, params_guess; 
             use_bijectors, optim_options)
         if isnan(value.f_final)
             return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
         end
         stats = merge(value.stats, (time=time,))
         score = program_logp(comps) + value.f_final
-        result=(; score, f_x′′, comps, value.params, value.f_init, value.f_final, stats)
+        result=(; score, comps, motion_model, value.params, value.f_init, value.f_final, stats)
         return (status= :success, result)
     catch err
         if err isa Union{OverflowError, DomainError, BadLossError}
             return (status= :errored, program=comps, error=err)
         else
-            @error "Unexpected error encountered during dynamics evaluation" comps f_x′′
+            @error "Unexpected error encountered during dynamics evaluation" comps f_holes
             rethrow()
         end
     end
 end
 
+"""
+## Arguments
+- `motion_model(params)(x::NamedTuple, u::NamedTuple, Δt::Real) -> distribution_of_x`
+"""
 function fit_dynamics_params(
-    f_x′′::Function,
-    particles::Matrix, log_weights::Vector, 
+    motion_model::Function,
+    particles::Matrix, log_weights::Optional{Vector},
     x0_dist, params_dist,
     obs_data, 
-    params_guess::NamedTuple, 
-    σ_guess::NamedTuple; 
+    params_guess::NamedTuple; 
     optim_options::Optim.Options,
     use_bijectors=false,
 )
     @assert isfinite(logpdf(params_dist, params_guess))
 
     trajectories = rows(particles)
-    traj_weights = softmax(log_weights)
+    traj_weights = log_weights === nothing ? 1 / length(trajectories) : softmax(log_weights)
     
     if use_bijectors
         p_bj = bijector(params_dist)
@@ -257,7 +239,7 @@ function fit_dynamics_params(
     function loss(vec)
         local params = vec_to_params(vec)
         local prior = logpdf(params_dist, params)
-        local sys_new = car1d_system(params, x0_dist, f_x′′, σ_guess)
+        local sys_new = (; motion_model = motion_model(params), x0_dist)
         local state_scores′ = states_likelihood.(
             Ref(sys_new), Ref(obs_data), trajectories)
 
@@ -278,4 +260,20 @@ function fit_dynamics_params(
     params = vec_to_params(pvec_final)
     stats = (converged=Optim.converged(sol), iterations=Optim.iterations(sol))
     (; f_init, f_final, params, stats)
+end
+
+function compile_motion_model(
+    comps::NamedTuple,
+    (; shape_env, comp_env, combine_holes),
+)
+    funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient=false), comps)
+    to_motion_model(funcs, combine_holes)
+end
+
+function to_motion_model(hole_fs::NamedTuple, combine_holes)
+    (params) -> (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
+        local inputs = merge(x, u, params, (;Δt))
+        local holes = map(f -> f(inputs), hole_fs)
+        combine_holes(inputs, holes)::GDistr
+    end
 end
