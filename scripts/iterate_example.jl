@@ -27,6 +27,7 @@ plot_particles(particles::Matrix, times, name, true_states=nothing) =
         plot(p, legend=:outerbottom)
     end
 
+subsample(::Nothing, n_max) = nothing
 function subsample(xs, n_max)
     N = min(n_max, size(xs,1))
     thining = size(xs,1) ÷ N
@@ -222,8 +223,24 @@ map(syn_result.sorted_results) do (; score, comps, params)
     (score, comps, params)
 end |> DataFrame
 ##-----------------------------------------------------------
-# test full synthesis
+# optionally config the full synthesis
 @info "full synthesis started..."
+infer_variance = true
+if infer_variance
+    good_sketch = DynamicsSketch(
+        [Var(:pos′′, ℝ, PUnits.Acceleration)],
+        (inputs, (; pos′′)) -> begin
+            (; Δt, pos, pos′, σ_pos, σ_pos′) = inputs
+            DistrIterator(
+                (pos=SNormal(pos + Δt * pos′, σ_pos * Δt),
+                pos′=SNormal(pos′ + Δt * pos′′, (abs(pos′) + 0.1) * σ_pos′ * Δt)))
+    end)
+
+    vdata.dynamics_params[Var(:σ_pos, ℝ, PUnits.Length)] = PertBeta(0.0, 0.25, 0.5)
+    vdata.dynamics_params[Var(:σ_pos′, ℝ, PUnits.Speed)] = PertBeta(0.0, 0.25, 0.5)
+end
+##-----------------------------------------------------------
+# run full synthesis
 iter_result = let senum = synthesis_enumeration(
         vdata, good_sketch, shape_env, comp_env, 7; pruner)
     
@@ -237,7 +254,7 @@ iter_result = let senum = synthesis_enumeration(
     @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess;
         obs_model=car_obs_model,
         program_logp=prog_size_prior(0.2), fit_settings,
-        max_iters=20,
+        max_iters=600,
     )
 end
 plot(iter_result.logp_history, xlabel="iterations", title="log p(observations)", 
@@ -248,12 +265,12 @@ let
     data = hcat(improve_actual, improve_pred_hisotry) |> specific_elems
     @show data
     plot(data, xlabel="iterations", ylabel="iteration improvement", 
-        label=["est. actual" "predicted"])
+        label=["est. actual" "predicted"], ylims=[-0.5, 0.5])
     hline!([0.0], label="y=0", line=:dash) |> display
 end
-let rows = []
+let rows=[], step=length(iter_result.dyn_history)÷10
     for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
-        (i % 5 == 1) && push!(rows, (; i, comps, params))
+        (i % 50 == 1) && push!(rows, (; i, comps, params))
     end
     show(DataFrame(rows), truncate=100)
 end

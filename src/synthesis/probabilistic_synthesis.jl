@@ -53,7 +53,7 @@ function fit_dynamics_iterative(
     dyn_history, logp_history, improve_pred_hisotry = NamedTuple[], Float64[], Float64[]
     previous_result = nothing
 
-    @progress "fit_dynamics_iterative" for iter in 1:max_iters
+    @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         (; motion_model, params, comps) = dyn_est
         (; particles, log_weights, log_obs) = sample_data(dyn_est)
         log_prior = program_logp(comps) + logpdf(params_dist, params)
@@ -77,7 +77,7 @@ function fit_dynamics_iterative(
             plot_particles(particles, times, "iteration $iter", ex_data.states) |> display
         end
 
-        if iter == max_iters
+        if iter == max_iters+1
             break
         end
         
