@@ -20,7 +20,7 @@ variable_data() = VariableData(
     states = OrderedDict(
         Pos => (SNormal(0.0, 0.01), SNormal(0.0, 1.0)),
     ),
-    dynamics_params = OrderedDict(
+    dynamics = OrderedDict(
         Mass => SUniform(0.5, 5.0),
         Drag => SUniform(0.0, 1.0),
     ),

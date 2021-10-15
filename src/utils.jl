@@ -1,7 +1,7 @@
 export specific_elems, count_len, @unzip, @unzip_named
 export max_by, sort_by
 export rotate2d, rotation2D, °
-export Optional
+export Optional, map_optional
 
 using MacroTools: @capture
 using ForwardDiff: Dual
@@ -88,7 +88,7 @@ end
      sin(θ)  cos(θ)]
 )
 
-rotate2d(θ, v) = rotation2D(θ) * v
+rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
 
 const ° = π / 180
 

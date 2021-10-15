@@ -1,5 +1,6 @@
 export GDistr, DistrIterator
-export SMvNormal, SMvUniform, SUniform, SNormal
+export SMvNormal, SMvUniform, SUniform, SNormal, CircularNormal
+export PertBeta, DistrTransform
 export score
 
 import Distributions: rand, logpdf, extrema
@@ -227,6 +228,70 @@ score(d::CircularNormal, x) = let
     dis = min(dis, 2π-dis)
     score(Normal(0.0, d.σ), dis)
 end
+
+
+"""
+Perform a bijective transformation to a distribution to obtain a new one.
+Should implement the following
+- `forward_transform(::DistrMap, x) -> y`: performs the forward transformation to a sample.
+- `inverse_transform(::DistrMap, y) -> x`: performs the inverse transformation to a sample.
+- `DistrMap.core::GDistr`: get the underlying distribution being transformed.
+"""
+abstract type DistrTransform <: StaticDistr end
+
+function forward_transform end
+function inverse_transform end
+
+rand(rng::AbstractRNG, d::DistrTransform) = 
+    forward_transform(d, rand(rng, d.core))
+
+logpdf(d::DistrTransform, x) = 
+    logpdf(d.core, inverse_transform(d, x))
+
+"""
+Rotate a 2D-distribution counter-clockwise by `θ`.
+"""
+struct Rotate2dDistr{N<:Real, D<:GDistr} <: DistrTransform
+    θ::N
+    core::D
+end
+
+Rotate2dDistr(θ, d::Rotate2dDistr) = Rotate2dDistr(θ+d.θ, d.core)
+
+Base.show(io::IO, ::Type{<:Rotate2dDistr}) = print(io, "Rotate2dDistr{...}")
+Base.show(io::IO, d::Rotate2dDistr) = 
+    print(io, "rotate2d($(d.θ), $(d.core))")
+
+forward_transform(d::Rotate2dDistr, x) = rotate2d(d.θ, x)
+inverse_transform(d::Rotate2dDistr, x) = rotate2d(-d.θ, x)
+
+"""
+Rotate a 2D-distribution counter-clockwise by `θ`.
+"""
+rotate2d(θ, d::GDistr) = Rotate2dDistr(θ, d)
+
+
+"""
+Shift the mean of a distribution by `x`.
+"""
+struct ShiftDistr{N, D<:GDistr} <: DistrTransform
+    shift::N
+    core::D
+end
+
+ShiftDistr(shift, core::ShiftDistr) = ShiftDistr(shift + core.shift, core.core) 
+
+Base.show(io::IO, ::Type{<:ShiftDistr}) = print(io, "ShiftDistr{...}")
+Base.show(io::IO, d::ShiftDistr) = 
+    print(io, "ShiftDistr($(d.shift), $(d.core))")
+
+forward_transform(d::ShiftDistr, x) = x + d.shift
+inverse_transform(d::ShiftDistr, x) = x - d.shift
+
+Base.:+(d::GDistr, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
+Base.:+(x::Union{Real, AbstractVector}, d::GDistr) = ShiftDistr(x, d) 
+
+
 
 # copied from https://github.com/oxinabox/ProjectManagement.jl/blob/da3de128ebc031b695bcb1795b53bcfeba617d87/src/timing_distributions.jl
 """

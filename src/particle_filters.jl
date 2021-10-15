@@ -1,4 +1,4 @@
-using StatsFuns: softmax!
+using StatsFuns: softmax!, logsumexp, softmax
 using StatsBase: countmap
 
 export simulate_trajectory, states_likelihood, data_likelihood
@@ -13,7 +13,7 @@ function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), contro
 
     for t in 1:T
         y = rand(obs_model(state))
-        u = controller(state, y)
+        u = controller(state, y, times[t])
 
         push!(states, state)
         push!(observations, y)

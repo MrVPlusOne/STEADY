@@ -50,19 +50,28 @@ value.
 - `dynamics_params`: maps each dynamics parameters to its prior distribution.
 - `action_vars`: a vector holding the action variables.
 """
-@kwdef(
 struct VariableData{system_order}
-    states::OrderedDict{Var, GDistr}  
-    dynamics_params::OrderedDict{Var, GDistr}
+    states::OrderedDict{Var, <:GDistr}  
+    dynamics_params::OrderedDict{Var, <:GDistr}
     action_vars::Vector{Var}
-    param_vars::Vector{Var} = keys(dynamics_params) |> collect
+    param_vars::Vector{Var}
+    state_vars::Vector{Var}
+end
+
+function VariableData(;
+    states::OrderedDict{Var, <:GDistr},
+    params::OrderedDict{Var, <:GDistr},
+    action_vars::Vector{Var},
+)
+    param_vars::Vector{Var} = keys(params) |> collect
     state_vars::Vector{Var} = keys(states) |> collect
-end)
+    VariableData{1}(states, params, action_vars, param_vars, state_vars)
+end
 
 function VariableData(
     ::Val{order};
     states::OrderedDict{Var, <:NTuple{order, GDistr}},
-    dynamics_params::OrderedDict{Var, <:GDistr},
+    params::OrderedDict{Var, <:GDistr},
     action_vars::Vector{Var},
     t_unit::PUnit=PUnits.Time,
 ) where order
@@ -75,7 +84,7 @@ function VariableData(
     end
     VariableData{order}(; 
         states = OrderedDict(new_states),
-        dynamics_params,
+        params,
         action_vars,
     )
 end
