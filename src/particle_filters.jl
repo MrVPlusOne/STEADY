@@ -90,7 +90,7 @@ Run particle filters forward in time
 """
 function forward_filter(
     system::MarkovSystem{X}, (; times, controls, observations), n_particles; 
-    resample_threshold::Float64 = 0.5,    
+    resample_threshold::Float64 = 0.5, score_f=logpdf,   
 ) where X
     T, N = length(times), n_particles
     (; x0_dist, motion_model, obs_model) = system
@@ -122,7 +122,7 @@ function forward_filter(
             particles[:, t] .= rand.(motion_model.(@views(particles[:, t-1]), Ref(u), Δt))
         end
 
-        current_lw .+= logpdf.(obs_model.(@views(particles[:, t])), Ref(observations[t]))
+        current_lw .+= score_f.(obs_model.(@views(particles[:, t])), Ref(observations[t]))
 
         log_z_t = logsumexp(current_lw)
         current_lw .-= log_z_t
@@ -141,10 +141,10 @@ end
 Sample smooting trajecotries by tracking the ancestors of a particle filter.
 """
 function filter_smoother(system, data, n_particles; 
-    resample_threshold=1.0, thining=10,
+    resample_threshold=1.0, thining=10, score_f=logpdf,
 )
     (; particles, log_weights, ancestors, log_obs) = forward_filter(
-        system, data, n_particles; resample_threshold)
+        system, data, n_particles; resample_threshold, score_f)
     trajs = particle_trajectories(particles, ancestors)
     trajectories = trajs[1:thining:end,:]
     log_weights = log_weights[1:thining:end, end]
@@ -159,16 +159,17 @@ function ffbs_smoother(
     system::MarkovSystem{X}, (; times, controls, observations); 
     n_particles, n_trajs,
     resample_threshold::Float64 = 0.5,
+    score_f=logpdf,
     progress_offset=0,
 ) where X
     function forward_logp(x_t, x_t′, t)
         local Δt = times[t+1]-times[t]
         local d = system.motion_model(x_t, controls[t], Δt)
-        logpdf(d, x_t′)
+        score_f(d, x_t′)
     end
 
     (; particles, log_weights, log_obs) = forward_filter(
-        system, (; times, controls, observations), n_particles; resample_threshold)
+        system, (; times, controls, observations), n_particles; resample_threshold, score_f)
     log_obs::Float64
     sampled = backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
     merge(sampled, (; log_obs))

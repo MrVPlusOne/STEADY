@@ -1,4 +1,5 @@
 include("Car1D.jl")
+include("Car2D.jl")
 include("Rocket2D.jl")
 
 export generate_data

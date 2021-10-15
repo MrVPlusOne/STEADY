@@ -16,15 +16,15 @@ Base.show(io::IO, ::Type{<:Uniform}) = print(io, "Uniform{...}")
 
 
 """
-    score(distribution, value) -> log_p_score
+    log_score(distribution, value) -> log_p_score
 Returns a score equals to `logpdf` plus a constant. During optimization, this can be 
 used in place of `logpdf` to reduce the computational cost.
 """
-function score end
+function log_score end
 
-score(d::Distribution, x) = logpdf(d, x)
+log_score(d::Distribution, x) = logpdf(d, x)
 
-score(d::Normal, x) = let
+log_score(d::Normal, x) = let
     (; μ, σ) = d
     -abs2((x - μ) / σ)/2 - log(σ)
 end
@@ -73,10 +73,17 @@ true
 struct DistrIterator{Iter}
     distributions::Iter
 
-    DistrIterator(distributions::Iter) where Iter = begin
-        foreach(distributions) do d
-            d isa GDistr || throw(
-                ArgumentError("Expect value of type `$GDistr`, but got: $d"))
+    DistrIterator(distributions::Iter) where Iter = begin 
+        if Iter <: AbstractVector
+            eltype(distributions) <: GDistr || throw(ArgumentError(
+                "Expect value of type `$GDistr`, but got eltype: $(eltype(distributions))"
+            ))
+        else
+            all(map(d -> d isa GDistr, distributions)) ||
+                foreach(distributions) do d
+                    d isa GDistr || throw(
+                        ArgumentError("Expect value of type `$GDistr`, but got: $d"))
+                end
         end
         new{Iter}(distributions)
     end
@@ -90,15 +97,15 @@ logpdf(diter::DistrIterator, xs) = let
         @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
             distributions: $(diter.distributions)\nvalues:$xs"
     end
-    sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+    sum(map(logpdf, diter.distributions, xs))::Real
 end
 
-score(diter::DistrIterator, xs) = let
+log_score(diter::DistrIterator, xs) = let
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
         @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
             distributions: $(diter.distributions)\nvalues:$xs"
     end
-    sum(score(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+    sum(map(log_score, diter.distributions, xs))::Real
 end
 
 Base.show(io::IO, di::DistrIterator) = 
@@ -167,6 +174,8 @@ struct SMvUniform{n, T} <: StaticDistr
     uniforms::StaticVector{n, Uniform{T}}
 end
 
+Base.eltype(::SMvUniform{n, T}) where {n, T} = T
+
 SMvUniform(ranges::Tuple{Real, Real}...) = let
     uniforms = map(ranges) do (l, u) 
         SUniform(l, u)
@@ -178,10 +187,10 @@ rand(rng::Random.AbstractRNG, d::SMvUniform) = let
     map(d -> rand(rng, d), d.uniforms)
 end
 
-logpdf(d::SMvUniform, xs) =
-    sum(logpdf(d, x) for (d, x) in zip(d.uniforms, xs))
+logpdf(d::SMvUniform, xs) = sum(map(logpdf, d.uniforms, xs))
 
-score(d::SMvUniform, xs) = 0.0
+eltype(Normal(Dual(1.0)))
+log_score(d::SMvUniform, xs) = zero(eltype(d))
 
 function Bijectors.bijector(d::SMvUniform)
     BijectorIterator(bijector.(d.uniforms))
@@ -222,11 +231,11 @@ logpdf(d::CircularNormal, x) = let
     dis = min(dis, 2π-dis)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
-score(d::CircularNormal, x) = let
+log_score(d::CircularNormal, x) = let
     (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
-    score(Normal(0.0, d.σ), dis)
+    log_score(Normal(0.0, d.σ), dis)
 end
 
 
@@ -242,11 +251,11 @@ abstract type DistrTransform <: StaticDistr end
 function forward_transform end
 function inverse_transform end
 
-rand(rng::AbstractRNG, d::DistrTransform) = 
-    forward_transform(d, rand(rng, d.core))
+rand(rng::AbstractRNG, d::DistrTransform) = forward_transform(d, rand(rng, d.core))
 
-logpdf(d::DistrTransform, x) = 
-    logpdf(d.core, inverse_transform(d, x))
+logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
+
+log_score(d::DistrTransform, x) = log_score(d.core, inverse_transform(d, x))
 
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.
