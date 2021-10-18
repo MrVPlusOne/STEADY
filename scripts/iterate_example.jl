@@ -62,6 +62,7 @@ function car_motion_model((; drag, mass);
     end
 end
 
+#TODO: refactor to use the new sketch API.
 car1d_sketch((; σ_pos, σ_pos′)) = DynamicsSketch(
     [Var(:pos′′, ℝ, PUnits.Acceleration)],
     (inputs, (; pos′′)) -> begin
@@ -108,9 +109,6 @@ obs_data = (; times, ex_data.observations, ex_data.controls)
 plot_states(ex_data.states, times, "truth") |> display
 ##-----------------------------------------------------------
 # particle filter inference
-columns(m::Matrix) = [m[:, i] for i in 1:size(m)[2]]
-rows(m::Matrix) = [m[i, :] for i in 1:size(m)[1]]
-
 function particle_trajectories(particles::Matrix{P}, ancestors::Matrix{Int}) where P
     N, T = size(particles)
     trajs = Array{P}(undef, size(particles))
@@ -178,7 +176,7 @@ end
 shape_env = ℝenv()
 comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
-components_transcendentals!(comp_env, can_grow=true)
+components_special_functions!(comp_env, can_grow=true)
 
 good_sketch = car1d_sketch(big_σ)
 
@@ -191,7 +189,6 @@ if !isfinite(prior_p)
     error("prior_p = $prior_p, some value may be out of its support.")
 end
 
-rand(params_dist)
 rand_inputs = [merge((pos = randn(), pos′ = randn(), f = 2randn()), rand(params_dist)) for _ in 1:200]
 pruner = IOPruner(; inputs=rand_inputs, comp_env)
 # pruner = RebootPruner(;comp_env.rules)
@@ -259,6 +256,7 @@ iter_result = let senum = synthesis_enumeration(
 end
 plot(iter_result.logp_history, xlabel="iterations", title="log p(observations)", 
     legend=false) |> display
+
 let 
     (; logp_history, improve_pred_hisotry) = iter_result
     improve_actual = logp_history[2:end] .- logp_history[1:end-1]

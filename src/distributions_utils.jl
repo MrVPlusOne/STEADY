@@ -71,7 +71,7 @@ true
 ```
 """
 struct DistrIterator{Iter}
-    distributions::Iter
+    core::Iter
 
     DistrIterator(distributions::Iter) where Iter = begin 
         if Iter <: AbstractVector
@@ -90,29 +90,29 @@ struct DistrIterator{Iter}
 end
 
 rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
-    map(d -> rand(rng, d), diter.distributions)
+    map(d -> rand(rng, d), diter.core)
 
 logpdf(diter::DistrIterator, xs) = let
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
-        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
-            distributions: $(diter.distributions)\nvalues:$xs"
+        @assert keys(diter.core) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.core)\nvalues:$xs"
     end
-    sum(map(logpdf, diter.distributions, xs))::Real
+    sum(map(logpdf, diter.core, xs))::Real
 end
 
 log_score(diter::DistrIterator, xs) = let
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
-        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
-            distributions: $(diter.distributions)\nvalues:$xs"
+        @assert keys(diter.core) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.core)\nvalues:$xs"
     end
-    sum(map(log_score, diter.distributions, xs))::Real
+    sum(map(log_score, diter.core, xs))::Real
 end
 
 Base.show(io::IO, di::DistrIterator) = 
-    if di.distributions isa AbstractVector
-        print(io, "DistrIterator([$(join(di.distributions, ","))])")
+    if di.core isa AbstractVector
+        print(io, "DistrIterator([$(join(di.core, ","))])")
     else
-        print(io, "DistrIterator($(di.distributions))")
+        print(io, "DistrIterator($(di.core))")
     end
 
 Base.show(io::IO, ::Type{<:DistrIterator}) = print(io, "DistrIterator{...}")
@@ -132,7 +132,7 @@ end
 (bit::BijectorIterator)(x) = zipmap(bit.bijectors, x)
 
 function Bijectors.bijector(di::DistrIterator)
-    BijectorIterator(map(bijector, di.distributions))
+    BijectorIterator(map(bijector, di.core))
 end
 
 function Bijectors.inv(bit::BijectorIterator)
@@ -299,7 +299,7 @@ inverse_transform(d::ShiftDistr, x) = x - d.shift
 
 Base.:+(d::GDistr, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
 Base.:+(x::Union{Real, AbstractVector}, d::GDistr) = ShiftDistr(x, d) 
-
+Base.:+(d::MultivariateDistribution, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
 
 
 # copied from https://github.com/oxinabox/ProjectManagement.jl/blob/da3de128ebc031b695bcb1795b53bcfeba617d87/src/timing_distributions.jl
@@ -314,6 +314,11 @@ struct PertBeta{T<:Real} <: ContinuousUnivariateDistribution
     a::T # min
     b::T # mode
     c::T # max
+    PertBeta(a, b, c) = begin
+        @assert a <= b <= c
+        (a1, b1, c1) = promote(a, b, c)
+        new{typeof(a1)}(a1,b1,c1)
+    end
 end
 
 function beta_dist(dd::PertBeta)

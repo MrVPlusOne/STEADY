@@ -55,7 +55,7 @@ function example_pruning_check()
     var_dists = Dict([scalars; vectors])
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env)
-    components_transcendentals!(comp_env)
+    components_special_functions!(comp_env)
     components_vec2!(comp_env)
 
     max_size = 5

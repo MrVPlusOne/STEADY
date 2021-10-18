@@ -14,6 +14,9 @@ specific_elems(xs::AbstractArray{T}) where T =
 
 count_len(iters) = count(_ -> true, iters)
 
+get_columns(m::Matrix) = (m[:, i] for i in 1:size(m)[2])
+get_rows(m::Matrix) = (m[i, :] for i in 1:size(m)[1])
+
 """
 ## Example
 ```jldoctest

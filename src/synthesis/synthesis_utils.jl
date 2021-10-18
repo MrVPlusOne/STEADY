@@ -87,7 +87,7 @@ function _compute_bounds(prior_dist)
             push!(lower, l)
             push!(upper, u)
         elseif d isa DistrIterator
-            foreach(rec, d.distributions)
+            foreach(rec, d.core)
         elseif d isa SMvUniform
             foreach(rec, d.uniforms)
         else

@@ -12,16 +12,12 @@ Pos = Var(:pos, ℝ2, PUnits.Length)
 Orientation = Var(:θ, ℝ, PUnits.Angle)
 Vel = Var(:v, ℝ2, PUnits.Speed)
 
-U_speed = Var(:v̂, ℝ, PUnits.Speed)
-U_turn = Var(:ϕ̂, ℝ, PUnits.Angle)
+U_Speed = Var(:v̂, ℝ, PUnits.Speed)
+U_Turn = Var(:ϕ̂, ℝ, PUnits.Angle)
 
-ParamVars = (
-    k1 = Var(:k1, ℝ, PUnits.unitless),
-    k2 = Var(:k2, ℝ, PUnits.unitless),
-    l = Var(:l, ℝ, PUnits.Length),
-    τ1 = Var(:τ1, ℝ, PUnits.Time),
-    τ2 = Var(:τ2, ℝ, PUnits.Time),
-)
+Loc_V = Var(:loc_v, ℝ, PUnits.Speed)
+Loc_Vx = Var(:loc_vx, ℝ, PUnits.Speed)
+Loc_Vy = Var(:loc_vy, ℝ, PUnits.Speed)
 
 variable_data() = VariableData(;
     states = OrderedDict{Var, GDistr}(
@@ -29,14 +25,7 @@ variable_data() = VariableData(;
         Orientation => SNormal(0.0, 0.01),
         Vel => SMvNormal(@SVector[0., 0.], @SVector[0.5, 0.01]),
     ),
-    params = OrderedDict(
-        ParamVars.k1 => Exponential(1.0),
-        ParamVars.k2 => Exponential(1.0),
-        ParamVars.l => PertBeta(0.2, 0.8, 0.5),
-        ParamVars.τ1 => Exponential(1.0),
-        ParamVars.τ2 => Exponential(1.0),
-    ),
-    action_vars = [U_speed, U_turn],
+    action_vars = [U_Speed, U_Turn],
 )
 
 """
@@ -67,6 +56,7 @@ function manual_control()
         (t=2.0, v̂=2.0, ϕ̂=10°),
         (t=6.0, v̂=2.2, ϕ̂=-15°),
         (t=12.0, v̂=1.0, ϕ̂=-5°),
+        (t=15.0, v̂=1.5, ϕ̂=0.0),
     ]
     v̂_f = LinearInterpolation(times, v̂_seq)
     ϕ̂_f = LinearInterpolation(times, ϕ̂_seq)
@@ -75,38 +65,171 @@ function manual_control()
     end
 end
 
-function car2d_motion_model(velocity_f, (; σ_pos, σ_θ, σ_v))
-    (state, ctrl, Δt) -> begin
-        (; pos, θ, v) = state
-        (; v̂, ϕ̂) = ctrl
-        v_car = rotate2d(-θ, v)
-        (d_vx, d_vy, d_θ) = values(velocity_f((; v_car, θ, v̂, ϕ̂))) .* Δt
-
-        v_car_dist = SMvNormal(@SVector[v_car[1] + d_vx, 0.0], σ_v * Δt)
-
-        σ_pos_scaled = (abs.(v_car) .+ 0.1) .* (σ_pos * Δt)
-
-        DistrIterator((
-            pos = (pos + v * Δt) + rotate2d(θ, SMvNormal(@SVector[0.,0.], σ_pos_scaled)),
-            θ = Normal(θ + d_θ, σ_θ * Δt),
-            v = rotate2d(θ, v_car_dist),
-        ))
+"""
+Infer angular motion, assuming no sliding.
+"""
+angle_only_model((; σ_pos, σ_v)) = (
+    sketch = let
+        param_vars = (
+            l1 = Var(:l1, ℝ, PUnits.Length),
+            τ1 = Var(:τ1, ℝ, PUnits.Time),
+            σ_θ = Var(:σ_θ, ℝ, PUnits.unitless),
+        )
+    
+        params = OrderedDict{Var, GDistr}(
+            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
+            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
+            param_vars.σ_θ => PertBeta(0.01, 5°, 60°),
+        )
+    
+        state_to_inputs(state, ctrl) = begin
+            (; pos, θ, v) = state
+            (; v̂, ϕ̂) = ctrl
+            loc_v = v
+            (; loc_vx=loc_v[1], θ, v̂, ϕ̂)
+        end
+    
+        outputs_to_state_dist((; der_θ), others, Δt) = begin
+            (; pos, θ, v, σ_θ, τ1, v̂) = others
+            loc_vx = v[1]
+            
+            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
+            dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)
+            der_vx = (v̂ - loc_vx) / τ1
+            dv_dist = SMvNormal(@SVector[der_vx * Δt, 0.], σ_v * Δt)
+            DistrIterator((
+                pos = pos + rotate2d(θ, dpos_dist),
+                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
+                v = v + dv_dist,
+            ))
+        end
+    
+        DynamicsSketch(;
+            inputs = [Loc_Vx, Orientation, U_Speed, U_Turn],
+            outputs = [
+                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
+            params = params,
+            state_to_inputs,
+            outputs_to_state_dist,
+        )
+    end,
+    sketch_core = input -> let
+        (; loc_vx, θ, v̂, ϕ̂, τ1, l1) = input
+        der_θ = tan(ϕ̂) * loc_vx / l1
+        (; der_θ)
     end
-end
+)
 
-function car_velocity_f((; τ_v, l, fraction_vy, inertia_vy))
-    state -> begin
-        (; v_car, θ, v̂, ϕ̂) = state
-        der_vx = (v̂ - v_car[1]) / τ_v
-        der_θ = tan(ϕ̂) * v_car[1] / l
-        # der_vy = -inertia_vy * der_θ * v_car[1] - sign(v_car[2]) * fraction_vy 
-        # generalize this
-        der_vy = 0.0
-        (der_vx, der_vy, der_θ)
+"""
+No sliding.
+"""
+simple_model((; σ_pos, σ_θ, σ_v)) = (
+    sketch = let
+        param_vars = (
+            l1 = Var(:l1, ℝ, PUnits.Length),
+            τ1 = Var(:τ1, ℝ, PUnits.Time),
+        )
+    
+        params = OrderedDict{Var, GDistr}(
+            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
+            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
+        )
+    
+        state_to_inputs(state, ctrl) = begin
+            (; pos, θ, v) = state
+            (; v̂, ϕ̂) = ctrl
+            loc_v = v
+            (; loc_vx=loc_v[1], θ, v̂, ϕ̂)
+        end
+    
+        outputs_to_state_dist((; der_vx, der_θ), others, Δt) = begin
+            (; pos, θ, v) = others
+            
+            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
+            dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)
+            dv_dist = SMvNormal(@SVector[der_vx * Δt, 0.], σ_v * Δt)
+            DistrIterator((
+                pos = pos + rotate2d(θ, dpos_dist),
+                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
+                v = v + dv_dist,
+            ))
+        end
+    
+        DynamicsSketch(;
+            inputs = [Loc_Vx, Orientation, U_Speed, U_Turn],
+            outputs = [
+                Var(:der_vx, ℝ, PUnits.Acceleration), 
+                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
+            params = params,
+            state_to_inputs,
+            outputs_to_state_dist,
+        )
+    end,
+    sketch_core = input -> let
+        (; loc_vx, θ, v̂, ϕ̂, τ1, l1) = input
+        der_vx = (v̂ - loc_vx) / τ1
+        der_θ = tan(ϕ̂) * loc_vx / l1
+        (; der_vx, der_θ)
     end
-end
+)
 
-function plot_states!(states, name; marker_len=0.25, marker_thining=10, linecolor=1)
+sliding_model((; σ_pos, σ_θ, σ_v)) = (
+    sketch = let
+        param_vars = (
+            l1 = Var(:l1, ℝ, PUnits.Length),
+            τ1 = Var(:τ1, ℝ, PUnits.Time),
+            v1 = Var(:v1, ℝ, PUnits.Speed),
+            a1 = Var(:a1, ℝ, PUnits.Acceleration),
+        )
+    
+        params = OrderedDict{Var, GDistr}(
+            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
+            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
+            param_vars.v1 => Exponential(1.0),
+            param_vars.a1 => Exponential(1.0),
+        )
+    
+        state_to_inputs(state, ctrl) = begin
+            (; pos, θ, v) = state
+            (; v̂, ϕ̂) = ctrl
+            loc_v = rotate2d(-θ, v)
+            (; loc_vx=loc_v[1], loc_vy=loc_v[2], θ, v̂, ϕ̂)
+        end
+    
+        outputs_to_state_dist((; der_vx, der_vy, der_θ), others, Δt) = begin
+            (; pos, θ, v) = others
+            
+            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
+            dpos_dist = SMvNormal(@SVector[0.,0.], σ_pos_scaled)
+            dv_dist = SMvNormal(@SVector[der_vx * Δt, der_vy * Δt], σ_v * Δt)
+            DistrIterator((
+                pos = (pos + v * Δt) + rotate2d(θ, dpos_dist),
+                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
+                v = v + rotate2d(π/2, v * der_θ) + rotate2d(θ, dv_dist),
+            ))
+        end
+    
+        DynamicsSketch(;
+            inputs = [Loc_Vx, Loc_Vy, Orientation, U_Speed, U_Turn],
+            outputs = [
+                Var(:der_vx, ℝ, PUnits.Acceleration), 
+                Var(:der_vy, ℝ, PUnits.Acceleration), 
+                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
+            params = params,
+            state_to_inputs,
+            outputs_to_state_dist,
+        )
+    end,
+    sketch_core = input -> let
+        (; loc_vx, loc_vy, θ, v̂, ϕ̂, τ1, l1, v1, a1) = input
+        der_vx = (v̂ - loc_vx) / τ1
+        der_θ = tan(ϕ̂) * loc_vx / l1
+        der_vy = -a1 * tanh(loc_vy / v1)
+        (; der_vx, der_vy, der_θ)
+    end
+)
+
+function plot_states!(states, name; marker_len=0.45, marker_thining=10, linecolor=1)
     arrow_style = arrow(:closed, 0.001, 1.0)
     let
         @unzip xs, ys = map(x -> x.pos, states)

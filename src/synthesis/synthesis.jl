@@ -3,75 +3,100 @@ using Distributed
 
 const TimeSeries{T} = Vector{T}
 
-export DynamicsSketch
+export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
 """
-A sketch for second-order system dynamics.
+A sketch for some missing dynamics. 
+
+With the missing dynamics provided (by e.g., a synthesizer), this skech can then be 
+compiled into a parameterized dynamics of the form
+`params -> (state, control, Δt) -> distribution_of_state`.
 """
-struct DynamicsSketch{F}
-    holes::Vector{Var}
-    "combine_holes(inputs::NamedTuple, hole_values::NamedTuple) -> state_distribution"
-    combine_holes::F
+@kwdef(
+struct DynamicsSketch{F, G}
+    inputs::Vector{Var}
+    outputs::Vector{Var}
+    params::OrderedDict{Var, GDistr}
+    "state_to_inputs(state::NamedTuple, control::NamedTuple) -> inputs"
+    state_to_inputs::F
+    "outputs_to_state_dist(outputs, (; state..., control..., inputs...), Δt) -> distribution_of_state"
+    outputs_to_state_dist::G
+end)
+
+params_distribution(sketch::DynamicsSketch) = begin
+    DistrIterator((;(v.name => dist for (v, dist) in sketch.params)...))
 end
 
+const dist_for_shape = Dict(
+    ℝ => SNormal(0.0, 1.0),
+    ℝ2 => SMvNormal([0.0, 0.0], 1.0),
+)
 
-export compile_sketch
-"Combine sketch hole expressions into an executable Julia function."
-compile_sketch(
-    comps::Tuple{Vararg{TAST}}, 
-    hn::Val{hole_names},
-    on::Val{output_names},
-    (;shape_env, comp_env, combine, check_gradient),
-) where {hole_names, output_names} = begin
-    funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient), comps)
-    julia = Expr(:tuple, (x -> x.julia).(funcs))
-    ast = (; (=>).(hole_names, comps)...)
-    compile_sketch(funcs, julia, ast, hn, on, combine)
+inputs_distribution(sketch::DynamicsSketch) = begin
+    DistrIterator((;(v.name => dist_for_shape[v.type.shape] for v in sketch.inputs)...))
 end
 
-compile_sketch(
-    funcs::Tuple{Vararg{Function}}, julia, ast, 
-    ::Val{hole_names}, ::Val{output_names}, combine,
-) where {hole_names, output_names} = begin
-    f = input -> let
-        hole_values = NamedTuple{hole_names}(map(f -> f(input), funcs))
-        combine(input::NamedTuple, hole_values)
+function check_params_logp(x0, x0_dist, params, params_dist)
+    x0_logp = logpdf(x0_dist, x0)
+    isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.")
+    params_logp = logpdf(params_dist, params)
+    isfinite(params_logp) || error("params_logp = $params_logp, some value may be out of its support.")
+    @info "params logp test passed."
+end
+
+function compile_motion_model(
+    comps::NamedTuple,
+    (; shape_env, comp_env, sketch),
+)
+    funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient=false), comps)
+    sketch_core = x -> map(f->f(x), funcs)
+    to_p_motion_model(sketch_core, sketch)
+end
+
+function to_p_motion_model(sketch_core::Function, (; state_to_inputs, outputs_to_state_dist))
+    (params::NamedTuple) -> (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
+        local inputs = state_to_inputs(x, u)
+        local prog_inputs = merge(inputs, params)
+        local outputs = sketch_core(prog_inputs)
+        local others = merge(x, u, params, prog_inputs)
+        outputs_to_state_dist(outputs, others, Δt)::GDistr
     end
-    CompiledFunc(f, ast, julia, any_return_type)
+end
+
+"""
+Sample random inputs for the missing dynamics. This can be useful for [`IOPruner`](@ref).
+"""
+function sample_rand_inputs(sketch::DynamicsSketch, n::Integer)
+    dist = DistrIterator(merge(
+        inputs_distribution(sketch).core,
+        params_distribution(sketch).core,
+    ));
+    [rand(dist) for _ in 1:n]
 end
 
 export VariableData
 """
-The robot dynamics are assumed to be of the form 
-`f(state, action, params) -> state_derivatives`.
-
 ## Fields
 - `states`: maps each state variable (e.g. `position`) to the distribution of its initial 
 value.
-- `dynamics_params`: maps each dynamics parameters to its prior distribution.
 - `action_vars`: a vector holding the action variables.
 """
 struct VariableData{system_order}
     states::OrderedDict{Var, <:GDistr}  
-    dynamics_params::OrderedDict{Var, <:GDistr}
     action_vars::Vector{Var}
-    param_vars::Vector{Var}
     state_vars::Vector{Var}
 end
 
 function VariableData(;
     states::OrderedDict{Var, <:GDistr},
-    params::OrderedDict{Var, <:GDistr},
     action_vars::Vector{Var},
 )
-    param_vars::Vector{Var} = keys(params) |> collect
     state_vars::Vector{Var} = keys(states) |> collect
-    VariableData{1}(states, params, action_vars, param_vars, state_vars)
+    VariableData{1}(states, action_vars, state_vars)
 end
 
 function VariableData(
     ::Val{order};
     states::OrderedDict{Var, <:NTuple{order, GDistr}},
-    params::OrderedDict{Var, <:GDistr},
     action_vars::Vector{Var},
     t_unit::PUnit=PUnits.Time,
 ) where order
@@ -84,22 +109,8 @@ function VariableData(
     end
     VariableData{order}(; 
         states = OrderedDict(new_states),
-        params,
         action_vars,
     )
-end
-
-to_distribution(vdata::VariableData) = let
-    (; state_vars) = vdata
-    all_dists = (
-        x₀ = (;(s.name => vdata.states[s] for s in state_vars)...),
-        params = (;(v.name => dist for (v, dist) in vdata.dynamics_params)...),
-    )
-    DistrIterator(map(DistrIterator, all_dists))
-end
-
-params_distribution(vdata::VariableData) = begin
-    DistrIterator((;(v.name => dist for (v, dist) in vdata.dynamics_params)...))
 end
 
 init_state_distribution(vdata::VariableData) = begin
@@ -135,9 +146,10 @@ struct SynthesisEnumerationResult{Combine}
 end)
 
 Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
-    (; comp_env, enum_result, sketch) = r
-    (; state_vars, action_vars, param_vars) = r.vdata
-    holes = sketch.holes
+    (; comp_env, enum_result, vdata, sketch) = r
+    (; state_vars, action_vars) = vdata
+    param_vars = sketch.params |> keys |> collect
+    hole_inputs, holes = sketch.inputs, sketch.outputs
 
     n_interest = prod(count_len(enum_result[v.type]) for v in holes)
     search_details = join((count_len(enum_result[v.type]) for v in holes), " * ")
@@ -147,6 +159,7 @@ Base.show(io::IO, mime::MIME"text/plain", r::SynthesisEnumerationResult) = begin
     println(io, "search_space: $(pretty_number(n_interest)) = $search_details")
     println(io, "n_components: ", length(comp_env.signatures))
     println(io, "holes: $holes")
+    println(io, "hole_inputs: $hole_inputs")
     println(io, "states: $state_vars")
     println(io, "actions: $action_vars")
     println(io, "params: $param_vars")
@@ -170,13 +183,13 @@ function synthesis_enumeration(
     shape_env::ShapeEnv, comp_env::ComponentEnv, max_size; 
     pruner=NoPruner(), type_pruning=true,
 )
-    (; state_vars, action_vars, param_vars) = vdata
-    dyn_vars = [state_vars; action_vars; param_vars]
+    param_vars = sketch.params |> keys |> collect
+    dyn_vars = [sketch.inputs; param_vars]
     if type_pruning
         types_needed, _ = enumerate_types(
             comp_env, 
             Set(v.type for v in dyn_vars), 
-            Set(v.type for v in sketch.holes), 
+            Set(v.type for v in sketch.outputs), 
             max_size,
         )
     else 
