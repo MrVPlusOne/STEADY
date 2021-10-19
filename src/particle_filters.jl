@@ -30,14 +30,26 @@ function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), contro
         controls=specific_elems(controls))
 end
 
-function states_likelihood((; x0_dist, motion_model), (;times, controls), states)
-    p = logpdf(x0_dist, states[1])
+# function states_likelihood((; x0_dist, motion_model), (;times, controls), states)
+#     p = logpdf(x0_dist, states[1])
+#     for i in 1:length(states)-1
+#         Δt = times[i+1]-times[i]
+#         state_distr = motion_model(states[i], controls[i], Δt)
+#         p += logpdf(state_distr, states[i+1])
+#     end
+#     p    
+# end
+
+function states_log_score(
+    (; x0_dist, motion_model), (;times, controls), states, ::Type{T}
+)::T where T
+    p::T = log_score(x0_dist, states[1], T)
     for i in 1:length(states)-1
         Δt = times[i+1]-times[i]
         state_distr = motion_model(states[i], controls[i], Δt)
-        p += logpdf(state_distr, states[i+1])
+        p += log_score(state_distr, states[i+1], T)
     end
-    p    
+    p
 end
 
 function data_likelihood((; obs_model), (; observations), states)

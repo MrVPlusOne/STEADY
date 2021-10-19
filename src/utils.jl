@@ -270,21 +270,21 @@ end
 
 ##-----------------------------------------------------------
 # convenient combinators
-Base.map(f) = xs -> map(f, xs)
-Base.filter(f) = xs -> filter(f, xs)
-max_by(f) = xs -> begin
+Base.map(f::Function) = xs -> map(f, xs)
+Base.filter(f::Function) = xs -> filter(f, xs)
+max_by(f::Function) = xs -> begin
     ys = map(f, xs)
     _, i = findmax(ys)
     xs[i]
 end
 
-sort_by(f) = xs -> sort(xs, by=f)
+sort_by(f::Function) = xs -> sort(xs, by=f)
 
 """
     map_optional(f, x) = x === nothing ? nothing : f(x)
 """
-map_optional(f, ::Nothing) = nothing
-map_optional(f, x) = f(x)
+map_optional(f::Function, ::Nothing) = nothing
+map_optional(f::Function, x) = f(x)
 ##-----------------------------------------------------------
 using Distributed
 using ProgressMeter: Progress, next!

@@ -9,11 +9,11 @@ StatsPlots.default(dpi=600, legend=:outerbottom)
 Random.seed!(123)
 times = collect(0.0:0.1:10.0)
 # true_params = (; l1 = 0.5, τ1 = 0.8, v1=0.1, a1=1.0)
-true_params = (; l1 = 0.5, τ1 = 0.8, σ_θ=0.04)
-true_σ = (; σ_pos=@SVector[0.05, 0.05], σ_v=@SVector[0.2, 0.1])
+true_params = (; l1 = 0.5, τ1 = 0.8, σ_θ=0.04, σ_v=0.2)
+true_σ = (; σ_pos=@SVector[0.04, 0.04])
 tiny_σ = (; σ_pos=@SVector[0.01, 0.01], σ_v=@SVector[0.01, 0.01])
 
-car_model = Car2D.angle_only_model(true_σ)
+car_model = Car2D.simple_model(true_σ)
 (; sketch, sketch_core) = car_model
 true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 
@@ -35,6 +35,7 @@ let traj_p = plot()
     plot(traj_p, legend=:outerbottom, aspect_ratio=1.0)
 end |> display
 ##-----------------------------------------------------------
+# sample posterior using the correct dynamics
 ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=10_000, n_trajs=100)
 let plt = plot()
     Car2D.plot_particles!(ffbs_result.particles, "FFBS", ex_data.states)
@@ -42,6 +43,7 @@ let plt = plot()
     scatter!(xs, ys, label="Landmarks")
     display("image/png", plt)
 end
+@show ffbs_result.log_obs
 ##-----------------------------------------------------------
 # simple fitting test
 params_dist = params_distribution(sketch)
@@ -62,10 +64,11 @@ components_scalar_arithmatic!(comp_env, can_grow=true)
 components_special_functions!(comp_env, can_grow=true)
 
 pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
-senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, 3; pruner)
+senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, 5; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
+    println("---- Pruned programs ----")
     show(DataFrame(rows), truncate=100)
     println()
 end
@@ -75,27 +78,31 @@ display(senum)
 optim_options = Optim.Options(
     f_abstol=1e-4,
     iterations=100,
+    time_limit=10.0,
 )
-fit_settings = DynamicsFittingSettings(; optim_options, evals_per_program=2, n_threads=10)
+fit_settings = DynamicsFittingSettings(; 
+    optim_options, evals_per_program=2, n_threads=10)
 
 iter_result = let 
     comps_guess = let v̂ = Car2D.U_Speed, θ = Car2D.Orientation, τ1 = Var(:τ1, ℝ, PUnits.Time)
         f_zero = get_component(comp_env, :zero)
-        (der_θ = f_zero(θ)/τ1, )
+        (der_vx=f_zero(v̂)/τ1, der_θ = f_zero(θ)/τ1,)
     end
     params_guess = nothing # (mass=3.0, drag=0.8,)
 
     @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess;
         obs_model=true_system.obs_model,
         program_logp=prog_size_prior(0.2), fit_settings,
-        max_iters=5,
+        max_iters=101,
         iteration_callback = (iter, particles) -> let
             if mod1(iter, 5) == 1
-                p = plot()
-                Car2D.plot_particles!(particles, "iteration $iter", ex_data.states)
+                p = plot(title="iteration $iter")
+                Car2D.plot_particles!(particles, "posterior", ex_data.states)
                 display("image/png", p)
             end
         end
     )
 end
+display(iter_result)
+plot(iter_result, start_idx=5)
 ##-----------------------------------------------------------

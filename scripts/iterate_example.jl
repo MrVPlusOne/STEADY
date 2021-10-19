@@ -268,7 +268,7 @@ let
 end
 let rows=[], step=length(iter_result.dyn_history)÷10
     for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
-        (i % 50 == 1) && push!(rows, (; i, comps, params))
+        (i % step == 1) && push!(rows, (; i, comps, params))
     end
     show(DataFrame(rows), truncate=100)
 end

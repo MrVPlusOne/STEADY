@@ -97,6 +97,7 @@ angle_only_model((; σ_pos, σ_v)) = (
             dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)
             der_vx = (v̂ - loc_vx) / τ1
             dv_dist = SMvNormal(@SVector[der_vx * Δt, 0.], σ_v * Δt)
+            @assert σ_θ * Δt >= zero(σ_θ) "σ_θ = $σ_θ"
             DistrIterator((
                 pos = pos + rotate2d(θ, dpos_dist),
                 θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
@@ -123,16 +124,20 @@ angle_only_model((; σ_pos, σ_v)) = (
 """
 No sliding.
 """
-simple_model((; σ_pos, σ_θ, σ_v)) = (
+simple_model((; σ_pos)) = (
     sketch = let
         param_vars = (
             l1 = Var(:l1, ℝ, PUnits.Length),
             τ1 = Var(:τ1, ℝ, PUnits.Time),
+            σ_θ = Var(:σ_θ, ℝ, PUnits.unitless),
+            σ_v = Var(:σ_v, ℝ, PUnits.Speed)
         )
     
         params = OrderedDict{Var, GDistr}(
             param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
             param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
+            param_vars.σ_θ => PertBeta(0.01, 5°, 60°),
+            param_vars.σ_v => PertBeta(0.01, 0.4, 1.0)
         )
     
         state_to_inputs(state, ctrl) = begin
@@ -143,7 +148,7 @@ simple_model((; σ_pos, σ_θ, σ_v)) = (
         end
     
         outputs_to_state_dist((; der_vx, der_θ), others, Δt) = begin
-            (; pos, θ, v) = others
+            (; pos, θ, v, σ_v, σ_θ) = others
             
             σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
             dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)

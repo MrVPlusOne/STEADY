@@ -22,9 +22,11 @@ used in place of `logpdf` to reduce the computational cost.
 """
 function log_score end
 
-log_score(d::Distribution, x) = logpdf(d, x)
+function log_score(d::Distribution, x, ::Type{T})::T where T 
+    logpdf(d, x)
+end
 
-log_score(d::Normal, x) = let
+function log_score(d::Normal, x, ::Type{T})::T where T 
     (; μ, σ) = d
     -abs2((x - μ) / σ)/2 - log(σ)
 end
@@ -100,12 +102,19 @@ logpdf(diter::DistrIterator, xs) = let
     sum(map(logpdf, diter.core, xs))::Real
 end
 
-log_score(diter::DistrIterator, xs) = let
+function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
         @assert keys(diter.core) == keys(xs) "keys do not match:\n\
             distributions: $(diter.core)\nvalues:$xs"
     end
-    sum(map(log_score, diter.core, xs))::Real
+    # s::T = 0
+    # foreach(diter.core, xs) do d, x
+    #     s += log_score(d, x, T)::T
+    # end
+    # s
+    map(diter.core, xs) do d, x
+        log_score(d, x, T)::T
+    end |> sum
 end
 
 Base.show(io::IO, di::DistrIterator) = 
@@ -190,7 +199,9 @@ end
 logpdf(d::SMvUniform, xs) = sum(map(logpdf, d.uniforms, xs))
 
 eltype(Normal(Dual(1.0)))
-log_score(d::SMvUniform, xs) = zero(eltype(d))
+function log_score(d::SMvUniform, xs, ::Type{T})::T where T
+    zero(eltype(d))
+end
 
 function Bijectors.bijector(d::SMvUniform)
     BijectorIterator(bijector.(d.uniforms))
@@ -231,11 +242,11 @@ logpdf(d::CircularNormal, x) = let
     dis = min(dis, 2π-dis)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
-log_score(d::CircularNormal, x) = let
+function log_score(d::CircularNormal, x, ::Type{T})::T where T
     (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
-    log_score(Normal(0.0, d.σ), dis)
+    log_score(Normal(0.0, d.σ), dis, T)
 end
 
 
@@ -255,7 +266,8 @@ rand(rng::AbstractRNG, d::DistrTransform) = forward_transform(d, rand(rng, d.cor
 
 logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
 
-log_score(d::DistrTransform, x) = log_score(d.core, inverse_transform(d, x))
+log_score(d::DistrTransform, x, ::Type{T}) where T = 
+    log_score(d.core, inverse_transform(d, x), T)
 
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.

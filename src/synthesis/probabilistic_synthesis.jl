@@ -1,4 +1,5 @@
 using ProgressLogging: @progress
+import Plots
 
 @kwdef(
 struct DynamicsFittingSettings
@@ -12,6 +13,39 @@ end)
 compute_avg_score(scores, avg_window, iter) = let
     start = max(iter - avg_window, 1)
     mean(scores[start:iter])
+end
+
+struct IterativeSynthesisResult
+    dyn_est::NamedTuple
+    dyn_history::Vector{<:NamedTuple}
+    logp_history::Vector{Float64}
+    improve_pred_hisotry::Vector{Float64}
+end
+
+function Base.show(io::IO, iter_result::IterativeSynthesisResult; max_rows::Int=10)
+    let rows=[], step=length(iter_result.dyn_history)÷max_rows
+        for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
+            (i % step == 1) && push!(rows, (; i, comps, params))
+        end
+        println(io, "=====IterativeSynthesisResult=====")
+        show(io, DataFrame(rows), truncate=100)
+    end
+end
+
+function Plots.plot(iter_result::IterativeSynthesisResult; start_idx=1)
+    (; logp_history, improve_pred_hisotry) = iter_result
+    xs = start_idx:length(logp_history)
+    p1 = plot(
+        xs, logp_history[xs], xlabel="iterations", 
+        title="log p(observations)", legend=false)
+    p2 = let 
+        improve_actual = logp_history[2:end] .- logp_history[1:end-1]
+        data = hcat(improve_actual, improve_pred_hisotry) |> specific_elems
+        plot(data, xlabel="iterations", title="iteration improvement",
+            label=["est. actual" "predicted"], ylims=[-0.5, 0.5])
+        hline!([0.0], label="y=0", line=:dash)
+    end
+    plot(p1, p2, layout=(2,1), size=(600,800))
 end
 
 """
@@ -69,8 +103,8 @@ function fit_dynamics_iterative(
 
         score_old = let
             system = (; motion_model=p_motion_model(params), x0_dist)
-            state_scores = states_likelihood.(
-                Ref(system), Ref(obs_data), get_rows(particles))
+            state_scores = states_log_score.(
+                Ref(system), Ref(obs_data), get_rows(particles), Float64)
             local weights = log_weights === nothing ? 
                 1 / length(state_scores) : softmax(log_weights)
             sum(state_scores .* weights) + log_prior
@@ -103,7 +137,7 @@ function fit_dynamics_iterative(
         @info "Iteration $iter finished." log_p improve_pred
     end
 
-    (; dyn_est, dyn_history, logp_history, improve_pred_hisotry)
+    IterativeSynthesisResult(dyn_est, dyn_history, logp_history, improve_pred_hisotry)
 end
 
 abstract type DynamicsFittingMode end
@@ -154,9 +188,6 @@ function fit_dynamics(
 )
     (; vdata, sketch, shape_env, comp_env, enum_result) = senum
 
-    hole_names = tuple((v.name for v in sketch.outputs)...)
-    all_comps = Iterators.product((enum_result[v.type] for v in sketch.outputs)...) |>
-        map(comps -> NamedTuple{hole_names}(comps)) |> collect
     all_comps = _candidate_comps(senum, sketch, mode)
     params_dist = params_distribution(sketch    )
     x0_dist = init_state_distribution(vdata)
@@ -215,17 +246,24 @@ function evaluate_dynamics(ctx, comps)
     end
 end
 
-function evaluate_dynamics_once(ctx, comps, p_motion_model, params_guess)
+function evaluate_dynamics_once(ctx, comps, p_motion_model::Function, params_guess)
+    @nospecialize p_motion_model
     (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
     (; use_bijectors, optim_options) = ctx
+    
+    function failed(info::String)
+        (status= :errored, program=comps, error=ErrorException(info))
+    end
+
     try
         local (; value, time) = @ltimed fit_dynamics_params(
             p_motion_model, particles, log_weights, 
             x0_dist, params_dist, obs_data, params_guess; 
             use_bijectors, optim_options)
-        if isnan(value.f_final)
-            return (status= :errored, program=comps, error=ErrorException("logp = NaN."))
-        end
+
+        !isnan(value.f_final) || return failed("logp = NaN.")
+        all(isfinite, value.params) || return failed("bad params = $(value.params).")
+
         stats = merge(value.stats, (time=time,))
         score = program_logp(comps) + value.f_final
         result=(; score, comps, p_motion_model, value.params, value.f_init, value.f_final, stats)
@@ -234,7 +272,7 @@ function evaluate_dynamics_once(ctx, comps, p_motion_model, params_guess)
         if err isa Union{OverflowError, DomainError, BadLossError}
             return (status= :errored, program=comps, error=err)
         else
-            @error "Unexpected error encountered during dynamics evaluation" comps f_holes
+            @error "Unexpected error encountered during dynamics evaluation" comps params_guess
             rethrow()
         end
     end
@@ -253,6 +291,7 @@ function fit_dynamics_params(
     optim_options::Optim.Options,
     use_bijectors=true,
 )
+    @nospecialize p_motion_model
     @assert isfinite(logpdf(params_dist, params_guess))
 
     trajectories = get_rows(particles) |> collect
@@ -275,15 +314,24 @@ function fit_dynamics_params(
         values
     end
 
+    @assert traj_weights isa Float64 "The current loss implementation assumes this"
     # Maximize the EM objective
-    function loss(vec)
+    function loss(vec::Vector{T})::T where T
         local params = vec_to_params(vec)
-        local prior = logpdf(params_dist, params)
+        all(map(isfinite, params)) || return Inf
+        local prior = log_score(params_dist, params, T)
         local sys_new = (; motion_model = p_motion_model(params), x0_dist)
-        local state_scores′ = states_likelihood.(
-            Ref(sys_new), Ref(obs_data), trajectories)
+        local likelihood = state_liklihood(sys_new, T)
+        
+        -(likelihood + prior)
+    end
 
-        -(sum(state_scores′ .* traj_weights) + prior)
+    function state_liklihood(system, ::Type{T})::T where T
+        local r::T = 0.0
+        for tr in trajectories
+            r += states_log_score(system, obs_data, tr, T)
+        end
+        r * traj_weights
     end
 
     pvec_guess = structure_to_vec(p_bj(params_guess))
