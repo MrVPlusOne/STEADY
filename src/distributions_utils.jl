@@ -102,19 +102,46 @@ logpdf(diter::DistrIterator, xs) = let
     sum(map(logpdf, diter.core, xs))::Real
 end
 
+@generated function sum2_static(
+    f, xs, ys, len::Val{N}
+) where {T, N}
+    if N == 0
+        :(0.0)
+    else
+        exs = map(i -> :(f(xs[$i], ys[$i])), 1:N)
+        Expr(:call, :+, exs...)
+    end
+end
+
+@generated function log_score_static(
+    distributions, values, type::Type{T}, len::Val{N}
+) where {T, N}
+    if N == 0 
+        :(zero($T))
+    else
+        exs = map(1:N) do i 
+            :(log_score(distributions[$i], values[$i], $T)::$T)
+        end
+        Expr(:call, :+, exs...)
+    end
+end
+
 function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
         @assert keys(diter.core) == keys(xs) "keys do not match:\n\
             distributions: $(diter.core)\nvalues:$xs"
     end
-    # s::T = 0
-    # foreach(diter.core, xs) do d, x
-    #     s += log_score(d, x, T)::T
-    # end
-    # s
-    map(diter.core, xs) do d, x
-        log_score(d, x, T)::T
-    end |> sum
+    @assert length(diter.core) == length(xs)
+
+    if xs isa Union{Tuple, NamedTuple, StaticArray}
+        log_score_static(diter.core, xs, T, Val{length(xs)}())
+    else
+        s::T = 0
+        for (d, x) in zip(diter.core, xs)
+            s += log_score(d, x, T)::T
+        end
+        s
+    end
 end
 
 Base.show(io::IO, di::DistrIterator) = 
@@ -200,7 +227,7 @@ logpdf(d::SMvUniform, xs) = sum(map(logpdf, d.uniforms, xs))
 
 eltype(Normal(Dual(1.0)))
 function log_score(d::SMvUniform, xs, ::Type{T})::T where T
-    zero(eltype(d))
+    zero(T)
 end
 
 function Bijectors.bijector(d::SMvUniform)
@@ -267,7 +294,7 @@ rand(rng::AbstractRNG, d::DistrTransform) = forward_transform(d, rand(rng, d.cor
 logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
 
 log_score(d::DistrTransform, x, ::Type{T}) where T = 
-    log_score(d.core, inverse_transform(d, x), T)
+    log_score(d.core, inverse_transform(d, x), T)::T
 
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.

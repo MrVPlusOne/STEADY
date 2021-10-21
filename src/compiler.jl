@@ -20,6 +20,15 @@ This is equivalent to `f(x)::T` but can be more efficient when f is a
 call_T(f::F, x, ::Type{T}) where {F, T} = f(x)::T
 call_T(cf::CompiledFunc, x, ::Type{T}) where T = call_T(cf.f, x, T)
 
+"""
+Hide the type of the wrapped function. Useful for avoiding expensive compilation 
+caused by run-time generated functions.
+"""
+struct WrappedFunc <: Function
+    core::Function
+end
+
+(cf::WrappedFunc)(args) = cf.core(args)
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf

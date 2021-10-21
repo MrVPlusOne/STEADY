@@ -58,13 +58,13 @@ Synthesize the dynamics using an Expectation Maximization-style loop.
 """
 function fit_dynamics_iterative(
     senum::SynthesisEnumerationResult,
-    obs_data::NamedTuple{(:times, :observations, :controls)},
+    obs_data::NamedTuple{(:times, :obs_frames, :observations, :controls)},
     comps_guess::NamedTuple, 
     params_guess::Union{NamedTuple, Nothing};
     obs_model::Function,
     program_logp::Function,
     particle_smoother::Function = (system, obs_data) -> 
-        ffbs_smoother(system, obs_data; n_particles=10_000, n_trajs=64),
+        filter_smoother(system, obs_data; n_particles=500_000, n_trajs=64),
     iteration_callback = (iter, particles) -> nothing,
     fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     max_iters::Int=100,
@@ -94,7 +94,7 @@ function fit_dynamics_iterative(
 
     @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         (; p_motion_model, params, comps) = dyn_est
-        (; particles, log_weights, log_obs) = sample_data(dyn_est)
+        (; trajectories, log_obs) = sample_data(dyn_est)
         log_prior = program_logp(comps) + logpdf(params_dist, params)
         log_p::Float64 = log_prior + log_obs
 
@@ -104,13 +104,11 @@ function fit_dynamics_iterative(
         score_old = let
             system = (; motion_model=p_motion_model(params), x0_dist)
             state_scores = states_log_score.(
-                Ref(system), Ref(obs_data), get_rows(particles), Float64)
-            local weights = log_weights === nothing ? 
-                1 / length(state_scores) : softmax(log_weights)
-            sum(state_scores .* weights) + log_prior
+                Ref(system), Ref(obs_data), get_rows(trajectories), Float64)
+            mean(state_scores) + log_prior
         end
 
-        iteration_callback(iter, particles)
+        iteration_callback(iter, trajectories)
 
         if iter == max_iters+1
             break
@@ -120,7 +118,7 @@ function fit_dynamics_iterative(
         comp_to_update = keys(comps)[update_id]
         @info "Iteration $iter started." comp_to_update
         fit_r = fit_dynamics(
-            mode, senum, particles, log_weights, obs_data, params_map;
+            mode, senum, trajectories, obs_data, params_map;
             program_logp, fit_settings, 
         )
         display(fit_r)
@@ -179,7 +177,7 @@ end
 function fit_dynamics(
     mode::DynamicsFittingMode,
     senum::SynthesisEnumerationResult,
-    particles::Matrix, log_weights::Optional{Vector},
+    particles::Matrix,
     (; times, observations, controls), 
     params_map::Dict; 
     program_logp::Function,
@@ -197,7 +195,7 @@ function fit_dynamics(
     compile_ctx = (; shape_env, comp_env, sketch)
 
     ctx = (; compile_ctx, 
-        particles, log_weights, x0_dist, params_dist, program_logp, optim_options, 
+        particles, x0_dist, params_dist, program_logp, optim_options, 
         obs_data=(; times, controls, observations), 
         params_map, use_bijectors, evals_per_program)
 
@@ -248,7 +246,7 @@ end
 
 function evaluate_dynamics_once(ctx, comps, p_motion_model::Function, params_guess)
     @nospecialize p_motion_model
-    (; particles, log_weights, x0_dist, params_dist, program_logp, obs_data) = ctx
+    (; particles, x0_dist, params_dist, program_logp, obs_data) = ctx
     (; use_bijectors, optim_options) = ctx
     
     function failed(info::String)
@@ -257,7 +255,7 @@ function evaluate_dynamics_once(ctx, comps, p_motion_model::Function, params_gue
 
     try
         local (; value, time) = @ltimed fit_dynamics_params(
-            p_motion_model, particles, log_weights, 
+            p_motion_model, particles, 
             x0_dist, params_dist, obs_data, params_guess; 
             use_bijectors, optim_options)
 
@@ -283,20 +281,17 @@ end
 - `p_motion_model(params::NamedTuple)(x::NamedTuple, u::NamedTuple, Δt::Real) -> distribution_of_x`
 """
 function fit_dynamics_params(
-    p_motion_model::Function,
-    particles::Matrix, log_weights::Optional{Vector},
+    p_motion_model::WrappedFunc,
+    trajectories::Matrix,
     x0_dist, params_dist,
     obs_data, 
     params_guess::NamedTuple; 
     optim_options::Optim.Options,
     use_bijectors=true,
 )
-    @nospecialize p_motion_model
+    # @nospecialize p_motion_model
     @assert isfinite(logpdf(params_dist, params_guess))
 
-    trajectories = get_rows(particles) |> collect
-    traj_weights = log_weights === nothing ? 1 / length(trajectories) : softmax(log_weights)
-    
     if use_bijectors
         p_bj = bijector(params_dist)
         p_inv = inv(p_bj)
@@ -314,7 +309,6 @@ function fit_dynamics_params(
         values
     end
 
-    @assert traj_weights isa Float64 "The current loss implementation assumes this"
     # Maximize the EM objective
     function loss(vec::Vector{T})::T where T
         local params = vec_to_params(vec)
@@ -326,12 +320,13 @@ function fit_dynamics_params(
         -(likelihood + prior)
     end
 
+    traj_list = get_rows(trajectories)
     function state_liklihood(system, ::Type{T})::T where T
         local r::T = 0.0
-        for tr in trajectories
+        for tr in traj_list
             r += states_log_score(system, obs_data, tr, T)
         end
-        r * traj_weights
+        r /= length(traj_list)
     end
 
     pvec_guess = structure_to_vec(p_bj(params_guess))

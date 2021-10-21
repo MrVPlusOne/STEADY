@@ -49,7 +49,7 @@ function compile_motion_model(
 )
     funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient=false), comps)
     sketch_core = x -> map(f->f(x), funcs)
-    to_p_motion_model(sketch_core, sketch)
+    WrappedFunc(to_p_motion_model(sketch_core, sketch))
 end
 
 function to_p_motion_model(sketch_core::Function, (; state_to_inputs, outputs_to_state_dist))

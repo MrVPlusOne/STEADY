@@ -37,14 +37,14 @@ function sensor_dist(landmarks, noise_scale)
         # v_forward = rotate2d(-θ, v)[1]
         v_forward = v[1]
         DistrIterator((
-            speed = Normal(v_forward, (0.1 + 0.1norm_R2(v)) * noise_scale),
+            speed = Normal(v_forward, (0.2 + 0.1norm_R2(v)) * noise_scale),
             landmarks = DistrIterator(map(landmarks) do l
                 rel = l - pos
                 dis = norm_R2(rel)
                 angle = atan(rel[2], rel[1]) - θ
-                DistrIterator((
-                    range = Normal(dis, noise_scale * 0.25), 
-                    bearing = CircularNormal(angle, noise_scale * 10°)))
+                DistrIterator((;
+                    # range = Normal(dis, noise_scale * 1.0), 
+                    bearing = CircularNormal(angle, noise_scale * 5°)))
             end),
         ))
     end
@@ -235,15 +235,17 @@ sliding_model((; σ_pos, σ_θ, σ_v)) = (
     end
 )
 
-function plot_states!(states, name; marker_len=0.45, marker_thining=10, linecolor=1)
+function plot_states!(
+    states, name; landmarks, obs_frames,
+    marker_len=0.1, linecolor=1
+)
     arrow_style = arrow(:closed, 0.001, 1.0)
     let
         @unzip xs, ys = map(x -> x.pos, states)
-        plot!(xs, ys, arrow=arrow_style, 
-            label="Position ($name)", aspect_ratio=1.0; linecolor)
+        plot!(xs, ys, label="Position ($name)", aspect_ratio=1.0; linecolor)
     end
     let
-        markers = states[1:marker_thining:end]
+        markers = states[obs_frames]
         @unzip xs, ys = map(x -> x.pos, markers)
         dirs = map(markers) do x
             rotate2d(x.θ, @SVector[marker_len, 0.])
@@ -252,16 +254,16 @@ function plot_states!(states, name; marker_len=0.45, marker_thining=10, linecolo
         quiver!(xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, 
             label="Orientation ($name)"; linecolor)
     end
+    let
+        @unzip xs, ys = landmarks
+        scatter!(xs, ys, label="Landmarks")
+    end
 end
 
-plot_trajectories!(trajectories::Matrix, name, true_states=nothing) = begin
+plot_trajectories!(trajectories::Matrix) = begin
     @unzip xs, ys = map(x -> x.pos, trajectories) 
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
-    plt = plot!(xs', ys', label=false, linecolor=2, linealpha=0.2)
-    map_optional(true_states) do states
-        plot_states!(states, "truth", linecolor=1)
-    end
-    plt
+    plot!(xs', ys', label=false, linecolor=2, linealpha=0.2)
 end
 
 

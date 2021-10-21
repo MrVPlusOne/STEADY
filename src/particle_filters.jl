@@ -30,16 +30,6 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
         controls=specific_elems(controls))
 end
 
-# function states_likelihood((; x0_dist, motion_model), (;times, controls), states)
-#     p = logpdf(x0_dist, states[1])
-#     for i in 1:length(states)-1
-#         Δt = times[i+1]-times[i]
-#         state_distr = motion_model(states[i], controls[i], Δt)
-#         p += logpdf(state_distr, states[i+1])
-#     end
-#     p    
-# end
-
 function states_log_score(
     (; x0_dist, motion_model), (;times, controls), states, ::Type{T}
 )::T where T
@@ -53,7 +43,10 @@ function states_log_score(
 end
 
 function data_likelihood((; obs_model), (; observations), states)
-    sum(logpdf(obs_model(states[i]), observations[i]) for i in 1:length(states))
+    observations::Dict{Int, <:Any}
+    foldl(observations; init=0.0) do s, (t, obs)
+        s + logpdf(obs_model(states[t], obs))
+    end
 end
 
 struct MarkovSystem{X, X0_Dist, Motion, ObsM}
@@ -109,9 +102,10 @@ end
 Run particle filters forward in time
 """
 function forward_filter(
-    system::MarkovSystem{X}, (; times, controls, observations), n_particles; 
+    system::MarkovSystem{X}, (; times, obs_frames, controls, observations), n_particles; 
     resample_threshold::Float64 = 0.5, score_f=logpdf,   
 ) where X
+    @assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
     (; x0_dist, motion_model, obs_model) = system
     
@@ -145,8 +139,10 @@ function forward_filter(
             end
         end
 
-        Threads.@threads for i in 1:N
-            current_lw[i] += score_f(obs_model(particles[i, t]), observations[t])
+        if t in obs_frames
+            Threads.@threads for i in 1:N
+                current_lw[i] += score_f(obs_model(particles[i, t]), observations[t])
+            end
         end
 
         log_z_t = logsumexp(current_lw)
@@ -166,12 +162,12 @@ end
 """
 Sample smooting trajecotries by tracking the ancestors of a particle filter.
 """
-function filter_smoother(system, data; 
+function filter_smoother(system, obs_data; 
     n_particles, n_trajs,
     resample_threshold=0.5, score_f=logpdf,
 )
     (; particles, log_weights, ancestors, log_obs) = forward_filter(
-        system, data, n_particles; resample_threshold, score_f)
+        system, obs_data, n_particles; resample_threshold, score_f)
     traj_ids = systematic_resample(softmax(log_weights[:, end]), n_trajs)
     trajectories = particle_trajectories(particles, ancestors, traj_ids)
     (; trajectories, log_obs)
@@ -200,12 +196,14 @@ end
 Particle smoother based on the Forward filtering-backward sampling algorithm.
 """
 function ffbs_smoother(
-    system::MarkovSystem{X}, (; times, controls, observations); 
+    system::MarkovSystem{X}, obs_data; 
     n_particles, n_trajs,
     resample_threshold::Float64 = 0.5,
     score_f=logpdf,
     progress_offset=0,
 ) where X
+    (; times, obs_frames, controls, observations) = obs_data
+
     function forward_logp(x_t, x_t′, t)
         local Δt = times[t+1]-times[t]
         local d = system.motion_model(x_t, controls[t], Δt)
@@ -213,7 +211,7 @@ function ffbs_smoother(
     end
 
     (; particles, log_weights, log_obs) = forward_filter(
-        system, (; times, controls, observations), n_particles; resample_threshold, score_f)
+        system, obs_data, n_particles; resample_threshold, score_f)
     log_obs::Float64
     trajectories = backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
     (; trajectories, log_obs)
@@ -225,7 +223,7 @@ Performs the backward recursion of the Forward filtering-backward sampling algor
 to sample from the smoothing distribution.
 
 ## Arguments
-- `forward_logp(x_t, x_t′, t)` should return the log likelihood of the transition dynamics.
+- `forward_logp(x_t, x_t′, t)` should return the log probability of the transition dynamics.
 """
 function backward_sample(
     forward_logp::Function,
