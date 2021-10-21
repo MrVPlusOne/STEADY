@@ -1,11 +1,11 @@
 using StatsFuns: softmax!, logsumexp, softmax
 using StatsBase: countmap
 
-export simulate_trajectory, states_likelihood, data_likelihood
+export simulate_trajectory, states_log_score, data_likelihood
 
-function simulate_trajectory(times, (; x0_dist, motion_model, obs_model), controller)
+function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
     T = length(times)
-    state = rand(x0_dist)
+    state = x0
 
     states = []
     observations = []
@@ -75,16 +75,18 @@ end
 
 effective_particles(weights::AbstractVector) = 1/sum(abs2, weights)
 
-function resample!(indices, weights, bins_buffer)
+function systematic_resample!(indices, weights, bins_buffer)
     N = length(weights)
+    M = length(indices)
+    @assert length(bins_buffer) == N
     bins_buffer[1] = weights[1]
     for i = 2:N
         bins_buffer[i] = bins_buffer[i-1] + weights[i]
     end
-    r = rand()*bins_buffer[end]/N
-    s = r:(1/N):(bins_buffer[N]+r) # Added r in the end to ensure correct length (r < 1/N)
+    r = rand()*bins_buffer[end]/M
+    s = r:(1/M):(bins_buffer[end]+r) # Added r in the end to ensure correct length (r < 1/N)
     bo = 1
-    for i = 1:N
+    for i = 1:M
         @inbounds for b = bo:N
             if s[i] < bins_buffer[b]
                 indices[i] = b
@@ -95,6 +97,12 @@ function resample!(indices, weights, bins_buffer)
     end
     Random.shuffle!(indices)
     return indices
+end
+
+function systematic_resample(weights::AbstractArray{N}, n_samples::Integer) where N
+    indices = collect(1:n_samples)
+    bins_buffer = fill(zero(N), length(weights))
+    systematic_resample!(indices, weights, bins_buffer)
 end
 
 """
@@ -120,21 +128,26 @@ function forward_filter(
     log_obs::Float64 = 0.0  # estimation of the log observation likelihood
     bins_buffer = zeros(Float64, N) # used for systematic resampling
 
+    progress = Progress(T-1, desc="forward_filter", output=stdout)
     for t in 1:T
         if t > 1 
             # optionally resample
             if effective_particles(current_w) < N * resample_threshold
                 indices = @views(ancestors[:, t-1])
-                resample!(indices, current_w, bins_buffer)
+                systematic_resample!(indices, current_w, bins_buffer)
                 current_lw .= -log(N)
                 particles[:, t-1] = particles[indices, t-1]
             end
             Δt = times[t] - times[t-1]
             u = controls[t-1]
-            particles[:, t] .= rand.(motion_model.(@views(particles[:, t-1]), Ref(u), Δt))
+            Threads.@threads for i in 1:N
+                particles[i, t] = rand(motion_model(particles[i, t-1], u, Δt))
+            end
         end
 
-        current_lw .+= score_f.(obs_model.(@views(particles[:, t])), Ref(observations[t]))
+        Threads.@threads for i in 1:N
+            current_lw[i] += score_f(obs_model(particles[i, t]), observations[t])
+        end
 
         log_z_t = logsumexp(current_lw)
         current_lw .-= log_z_t
@@ -142,6 +155,7 @@ function forward_filter(
         log_weights[:, t] = current_lw
         weights[:, t] = current_w
         log_obs += log_z_t
+        next!(progress)
     end
 
     log_obs::Float64
@@ -152,16 +166,34 @@ end
 """
 Sample smooting trajecotries by tracking the ancestors of a particle filter.
 """
-function filter_smoother(system, data, n_particles; 
-    resample_threshold=1.0, thining=10, score_f=logpdf,
+function filter_smoother(system, data; 
+    n_particles, n_trajs,
+    resample_threshold=0.5, score_f=logpdf,
 )
     (; particles, log_weights, ancestors, log_obs) = forward_filter(
         system, data, n_particles; resample_threshold, score_f)
-    trajs = particle_trajectories(particles, ancestors)
-    trajectories = trajs[1:thining:end,:]
-    log_weights = log_weights[1:thining:end, end]
-    log_weights .-= logsumexp(log_weights)
-    (; trajectories, log_weights, log_obs)
+    traj_ids = systematic_resample(softmax(log_weights[:, end]), n_trajs)
+    trajectories = particle_trajectories(particles, ancestors, traj_ids)
+    (; trajectories, log_obs)
+end
+
+"""
+From the give particle `indices` at the last time step, going backward to trace
+out the ancestral lineages. 
+"""
+function particle_trajectories(
+    particles::Matrix{P}, ancestors::Matrix{Int}, indices::Vector{Int},
+)::Matrix{P} where P
+    N, T = size(particles)
+    indices = copy(indices)
+    M = length(indices)
+    trajs = Matrix{P}(undef, M, T)
+    trajs[:, T] = particles[indices, T]
+    for t in T-1:-1:1
+        indices .= ancestors[indices, t+1]
+        trajs[:, t] = particles[indices, t]
+    end
+    trajs
 end
 
 """
@@ -183,8 +215,8 @@ function ffbs_smoother(
     (; particles, log_weights, log_obs) = forward_filter(
         system, (; times, controls, observations), n_particles; resample_threshold, score_f)
     log_obs::Float64
-    sampled = backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
-    merge(sampled, (; log_obs))
+    trajectories = backward_sample(forward_logp, particles, log_weights, n_trajs; progress_offset)
+    (; trajectories, log_obs)
 end
 
 
@@ -204,10 +236,10 @@ function backward_sample(
 ) where P
     M = n_trajs
     N, T = size(filter_particles)
-    particles = Matrix{P}(undef, M, T)
+    trajectories = Matrix{P}(undef, M, T)
     weights = [softmax(filter_log_weights[:, T]) for _ in 1:M]
 
-    particles[:, T] .= (
+    trajectories[:, T] .= (
         let j = rand(Categorical(weights[j]))
             filter_particles[j, T]
         end for j in 1:M)
@@ -216,14 +248,14 @@ function backward_sample(
     for t in T-1:-1:1
         Threads.@threads for j in 1:M
             weights[j] .= @views(filter_log_weights[:, t]) .+
-                forward_logp.(@views(filter_particles[:, t]), Ref(particles[j, t+1]), t)
+                forward_logp.(@views(filter_particles[:, t]), Ref(trajectories[j, t+1]), t)
             softmax!(weights[j])
             j′ = rand(Categorical(weights[j]))
-            particles[j, t] = filter_particles[j′, t]
+            trajectories[j, t] = filter_particles[j′, t]
         end
         next!(progress)
     end
-    (; particles, log_weights=nothing)
+    trajectories
 end
 
 function log_softmax(x::AbstractArray{<:Real})

@@ -21,8 +21,8 @@ Loc_Vy = Var(:loc_vy, ℝ, PUnits.Speed)
 
 variable_data() = VariableData(;
     states = OrderedDict{Var, GDistr}(
-        Pos => SMvNormal(@SVector[0., 0.], 0.01),
-        Orientation => SNormal(0.0, 0.01),
+        Pos => SMvNormal(@SVector[0., 0.], 5.),
+        Orientation => SUniform(-π, π),
         Vel => SMvNormal(@SVector[0., 0.], @SVector[0.5, 0.01]),
     ),
     action_vars = [U_Speed, U_Turn],
@@ -34,7 +34,8 @@ Return the ranges and bearings to the landmarks, as well as the speed reading.
 function sensor_dist(landmarks, noise_scale) 
     state -> begin 
         (; pos, θ, v) = state
-        v_forward = rotate2d(-θ, v)[1]
+        # v_forward = rotate2d(-θ, v)[1]
+        v_forward = v[1]
         DistrIterator((
             speed = Normal(v_forward, (0.1 + 0.1norm_R2(v)) * noise_scale),
             landmarks = DistrIterator(map(landmarks) do l
@@ -253,8 +254,8 @@ function plot_states!(states, name; marker_len=0.45, marker_thining=10, linecolo
     end
 end
 
-plot_particles!(particles::Matrix, name, true_states=nothing) = begin
-    @unzip xs, ys = map(x -> x.pos, particles) 
+plot_trajectories!(trajectories::Matrix, name, true_states=nothing) = begin
+    @unzip xs, ys = map(x -> x.pos, trajectories) 
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
     plt = plot!(xs', ys', label=false, linecolor=2, linealpha=0.2)
     map_optional(true_states) do states

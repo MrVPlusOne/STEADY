@@ -109,19 +109,6 @@ obs_data = (; times, ex_data.observations, ex_data.controls)
 plot_states(ex_data.states, times, "truth") |> display
 ##-----------------------------------------------------------
 # particle filter inference
-function particle_trajectories(particles::Matrix{P}, ancestors::Matrix{Int}) where P
-    N, T = size(particles)
-    trajs = Array{P}(undef, size(particles))
-    trajs[:, T] = particles[:, T]
-    indices = collect(1:N)
-    for t in T-1:-1:1
-        indices .= ancestors[indices, t+1]
-        trajs[:, t] = particles[indices, t]
-    end
-    trajs
-end
-
-
 function check_log_scores(ls, name)
     ess = effective_particles(softmax(ls))
     histogram(ls, ylabel="log scores", title=name) |> display
