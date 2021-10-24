@@ -5,6 +5,7 @@ export Optional, map_optional
 
 using MacroTools: @capture
 using ForwardDiff: Dual
+# import ReverseDiff
 import LineSearches
 
 const Optional{X} = Union{X, Nothing}
@@ -14,8 +15,8 @@ specific_elems(xs::AbstractArray{T}) where T =
 
 count_len(iters) = count(_ -> true, iters)
 
-get_columns(m::Matrix) = (m[:, i] for i in 1:size(m)[2])
-get_rows(m::Matrix) = (m[i, :] for i in 1:size(m)[1])
+get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
+get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
 """
 ## Example
@@ -166,8 +167,10 @@ macro ltimed(ex)
     end
 end
 
+"""
+Drop the gradient type tag to reduce JIT compilation time and avoid tag checking.
+"""
 function optimize_no_tag(loss, x₀, optim_options)
-    # drop tag to reduce JIT compilation time and avoid tag checking
     cfg = ForwardDiff.GradientConfig(nothing, x₀) 
     function fg!(F, G, x)
         (G === nothing) && return loss(x)
@@ -181,6 +184,27 @@ function optimize_no_tag(loss, x₀, optim_options)
     algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
     Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
 end
+
+# """
+# Use reverse mode autodiff to optimize the loss.
+# """
+# function optimize_reverse_diff(loss, x₀, optim_options)
+#     # drop tag to reduce JIT compilation time and avoid tag checking
+#     cfg = ReverseDiff.GradientConfig(x₀) 
+#     f_tape = ReverseDiff.GradientTape(loss, x₀, cfg)
+#     compiled_tape = ReverseDiff.compile(f_tape)
+#     function fg!(F, G, x)
+#         (G === nothing) && return loss(x)
+
+#         gr = ReverseDiff.DiffResult(first(x), (G,))
+#         ReverseDiff.gradient!(gr, compiled_tape, x)
+#         if F !== nothing
+#             return gr.value
+#         end
+#     end
+#     algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
+#     Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
+# end
 
 function optimize_bounded(loss, x₀, (lower, upper), optim_options)
     # drop tag to reduce JIT compilation time and avoid tag checking

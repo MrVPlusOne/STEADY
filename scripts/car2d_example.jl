@@ -21,7 +21,7 @@ true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 vdata = Car2D.variable_data()
 x0_dist = init_state_distribution(vdata)
 
-landmarks = @SVector[@SVector[1.0, 2.5], #=@SVector[6.0, 1.5],=# @SVector[4.0, -2.0]]
+landmarks = @SVector[@SVector[1.0, 2.5], #=@SVector[6.0, 1.5], @SVector[4.0, -2.0]=#]
 noise_scale = 1.0
 true_system = MarkovSystem(x0_dist, true_motion_model, 
     Car2D.sensor_dist(landmarks, noise_scale))
@@ -36,11 +36,16 @@ end |> display
 log_score_float = (d,x) -> log_score(d, x, Float64)
 ##-----------------------------------------------------------
 # sample posterior using the correct dynamics
-# ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=10_000, n_trajs=100)
+# ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=50_000, n_trajs=100)
 ffbs_result = @time filter_smoother(true_system, obs_data, n_particles=500_000, n_trajs=100)
+map_result = @time map_trajectory(
+    true_system, obs_data, ffbs_result.trajectories[2, :]; 
+    optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
+)
 let plt = plot()
-    Car2D.plot_trajectories!(ffbs_result.trajectories)
-    Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_frames)
+    Car2D.plot_trajectories!(ffbs_result.trajectories, linealpha=0.2)
+    Car2D.plot_states!(ex_data.states, "truth"; landmarks=[], obs_frames)
+    Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, linecolor=3)
     display("image/png", plt)
 end
 ##-----------------------------------------------------------
@@ -82,6 +87,26 @@ optim_options = Optim.Options(
 fit_settings = DynamicsFittingSettings(; 
     optim_options, evals_per_program=2, n_threads=10)
 
+function iter_callback((; iter, trajectories, dyn_est))
+    if iter <= 10 || mod1(iter, 5) == 1
+        @info "Computing trajectory MAP estimation..."
+        local motion_model = dyn_est.p_motion_model(dyn_est.params)
+        local system_est = MarkovSystem(x0_dist, motion_model, true_system.obs_model)
+        local best_traj = collect(get_rows(trajectories)) |> 
+            max_by(traj -> total_log_score(system_est, obs_data, traj, Float64))
+        local map_result = @time map_trajectory(
+            system_est, obs_data, best_traj; 
+            optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
+        )
+
+        p = plot(title="iteration $iter")
+        Car2D.plot_trajectories!(trajectories)
+        Car2D.plot_states!(ex_data.states, "truth"; landmarks=[], obs_frames)
+        Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, linecolor=3)
+        display("image/png", p)
+    end
+end    
+
 iter_result = let 
     comps_guess = let v̂ = Car2D.U_Speed, θ = Car2D.Orientation, τ1 = Var(:τ1, ℝ, PUnits.Time)
         f_zero = get_component(comp_env, :zero)
@@ -93,14 +118,7 @@ iter_result = let
         obs_model=true_system.obs_model,
         program_logp=prog_size_prior(0.2), fit_settings,
         max_iters=101,
-        iteration_callback = (iter, particles) -> let
-            if iter <= 10 || mod1(iter, 5) == 1
-                p = plot(title="iteration $iter")
-                Car2D.plot_trajectories!(particles)
-                Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_frames)
-                display("image/png", p)
-            end
-        end
+        iteration_callback = iter_callback,
     )
 end
 display(iter_result)

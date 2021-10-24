@@ -1,7 +1,7 @@
 using StatsFuns: softmax!, logsumexp, softmax
 using StatsBase: countmap
 
-export simulate_trajectory, states_log_score, data_likelihood
+export simulate_trajectory, states_log_score, data_log_score
 
 function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
     T = length(times)
@@ -42,11 +42,20 @@ function states_log_score(
     p
 end
 
-function data_likelihood((; obs_model), (; observations), states)
-    observations::Dict{Int, <:Any}
-    foldl(observations; init=0.0) do s, (t, obs)
-        s + logpdf(obs_model(states[t], obs))
+function data_log_score(
+    (; obs_model), (; times, obs_frames, observations), states, ::Type{T}
+)::T where T
+    p::T = 0.0
+    for t in obs_frames
+        t::Integer
+        p += log_score(obs_model(states[t]), observations[t], T)
     end
+    p
+end
+
+function total_log_score(system, obs_data, states, ::Type{T}) where T
+    states_log_score(system, obs_data, states, T) + 
+        data_log_score(system, obs_data, states, T)
 end
 
 struct MarkovSystem{X, X0_Dist, Motion, ObsM}
@@ -261,4 +270,31 @@ function log_softmax(x::AbstractArray{<:Real})
     x = x .- u
     dnum = logsumexp(x)
     x .- dnum
+end
+
+export map_trajectory
+function map_trajectory(
+    system::MarkovSystem{X},
+    obs_data,
+    traj_guess::Vector{X};
+    optim_options::Optim.Options=Optim.Options(f_abstol=1e-4),
+) where X
+    (; times, obs_frames, controls, observations) = obs_data
+    
+    function loss(vec::AbstractVector{T})::T where T
+        local traj = structure_from_vec(traj_guess, vec)
+        local total_score = states_log_score(system, obs_data, traj, T) + 
+            data_log_score(system, obs_data, traj, T)
+        -total_score
+    end
+
+    traj_guess_vec = structure_to_vec(traj_guess)
+    f_init = -loss(traj_guess_vec)
+    sol = optimize_no_tag(loss, traj_guess_vec, optim_options)
+
+    traj_final_vec = Optim.minimizer(sol)
+    f_final = -loss(traj_final_vec)
+    traj_final = structure_from_vec(traj_guess, traj_final_vec)
+    stats = (converged=Optim.converged(sol), iterations=Optim.iterations(sol))
+    (; states=traj_final, f_init, f_final, stats)
 end

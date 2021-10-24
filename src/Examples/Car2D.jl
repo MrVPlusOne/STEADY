@@ -254,16 +254,16 @@ function plot_states!(
         quiver!(xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, 
             label="Orientation ($name)"; linecolor)
     end
-    let
+    isempty(landmarks) || let
         @unzip xs, ys = landmarks
         scatter!(xs, ys, label="Landmarks")
     end
 end
 
-plot_trajectories!(trajectories::Matrix) = begin
+plot_trajectories!(trajectories::Matrix; linealpha=0.2) = begin
     @unzip xs, ys = map(x -> x.pos, trajectories) 
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
-    plot!(xs', ys', label=false, linecolor=2, linealpha=0.2)
+    plot!(xs', ys'; label=false, linecolor=2, linealpha)
 end
 
 

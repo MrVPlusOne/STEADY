@@ -9,7 +9,7 @@ function Distributions.logpdf(dist::NamedTuple{ks}, v::NamedTuple{ks})::Real whe
     sum(logpdf.(values(dist), values(v)))
 end
 
-function structure_to_vec(v::Union{Tuple, NamedTuple})
+function structure_to_vec(v::Union{AbstractVector, Tuple, NamedTuple})
     T = promote_numbers_type(v)
     vec = Vector{T}(undef, n_numbers(v))
     structure_to_vec!(vec, v)
@@ -42,7 +42,7 @@ function structure_from_vec(template::NamedTuple{S}, vec)::NamedTuple{S} where S
     NamedTuple{keys(template)}(structure_from_vec(values(template), vec))
 end
 
-function structure_from_vec(template::Tuple, vec)::Tuple
+function structure_from_vec(template, vec)
     i::Ref{Int} = Ref(0)
 
     map(template) do x

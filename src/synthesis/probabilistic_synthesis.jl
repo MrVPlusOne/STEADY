@@ -22,10 +22,12 @@ struct IterativeSynthesisResult
     improve_pred_hisotry::Vector{Float64}
 end
 
-function Base.show(io::IO, iter_result::IterativeSynthesisResult; max_rows::Int=10)
-    let rows=[], step=length(iter_result.dyn_history)÷max_rows
+function Base.show(io::IO, iter_result::IterativeSynthesisResult; 
+    first_rows::Int=5, max_rows::Int=15,
+)
+    let rows=[], step=(length(iter_result.dyn_history)-first_rows)÷max_rows
         for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
-            (i % step == 1) && push!(rows, (; i, comps, params))
+            (i <= first_rows || i % step == 0) && push!(rows, (; i, comps, params))
         end
         println(io, "=====IterativeSynthesisResult=====")
         show(io, DataFrame(rows), truncate=100)
@@ -64,8 +66,8 @@ function fit_dynamics_iterative(
     obs_model::Function,
     program_logp::Function,
     particle_smoother::Function = (system, obs_data) -> 
-        filter_smoother(system, obs_data; n_particles=500_000, n_trajs=64),
-    iteration_callback = (iter, particles) -> nothing,
+        filter_smoother(system, obs_data; n_particles=1_000_000, n_trajs=64),
+    iteration_callback = (data::NamedTuple{(:iter, :trajectories, :dyn_est)}) -> nothing,
     fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     max_iters::Int=100,
 )
@@ -108,7 +110,7 @@ function fit_dynamics_iterative(
             mean(state_scores) + log_prior
         end
 
-        iteration_callback(iter, trajectories)
+        iteration_callback((;iter, trajectories, dyn_est))
 
         if iter == max_iters+1
             break
@@ -289,7 +291,6 @@ function fit_dynamics_params(
     optim_options::Optim.Options,
     use_bijectors=true,
 )
-    # @nospecialize p_motion_model
     @assert isfinite(logpdf(params_dist, params_guess))
 
     if use_bijectors

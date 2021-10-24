@@ -96,18 +96,18 @@ function compile(
     end
 
     body_ex = compile_body(prog)::Expr
-    prev_result = lock(compile_cache_lock) do
-        get(compile_cache, body_ex, nothing)
-    end
+    prev_result = @lock compile_cache_lock get(compile_cache, body_ex, nothing)
+    
     (prev_result !== nothing) && return prev_result
     f_ex = :(args -> $body_ex)
     cf = CompiledFunc(
         @RuntimeGeneratedFunction(f_ex), 
         prog, body_ex, 
         TAST_return_type(Val(prog.type.shape.name)))
-    lock(compile_cache_lock) do
+    @lock compile_cache_lock begin
         compile_cache[body_ex] = cf
     end
+    cf
 end
 
 """
