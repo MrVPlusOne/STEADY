@@ -110,7 +110,7 @@ function fit_dynamics_iterative(
             mean(state_scores) + log_prior
         end
 
-        iteration_callback((;iter, trajectories, dyn_est))
+        Threads.@spawn iteration_callback((;iter, trajectories, dyn_est))
 
         if iter == max_iters+1
             break
@@ -310,6 +310,15 @@ function fit_dynamics_params(
         values
     end
 
+    traj_list = get_rows(trajectories)
+    function state_liklihood(system, ::Type{T})::T where T
+        local r::T = 0.0
+        for tr in traj_list
+            r += states_log_score(system, obs_data, tr, T)
+        end
+        r /= length(traj_list)
+    end
+
     # Maximize the EM objective
     function loss(vec::Vector{T})::T where T
         local params = vec_to_params(vec)
@@ -319,15 +328,6 @@ function fit_dynamics_params(
         local likelihood = state_liklihood(sys_new, T)
         
         -(likelihood + prior)
-    end
-
-    traj_list = get_rows(trajectories)
-    function state_liklihood(system, ::Type{T})::T where T
-        local r::T = 0.0
-        for tr in traj_list
-            r += states_log_score(system, obs_data, tr, T)
-        end
-        r /= length(traj_list)
     end
 
     pvec_guess = structure_to_vec(p_bj(params_guess))

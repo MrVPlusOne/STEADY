@@ -344,8 +344,11 @@ function parallel_map(f, xs, ctx;
             eval_results = map(eval_task, xs)
         else
             pool = ThreadPools.QueuePool(2, n_threads)
-            eval_results = ThreadPools.tmap(eval_task, pool, xs)
-            close(pool)
+            try
+                eval_results = ThreadPools.tmap(eval_task, pool, xs)
+            finally
+                close(pool)
+            end
         end
     end
     eval_results

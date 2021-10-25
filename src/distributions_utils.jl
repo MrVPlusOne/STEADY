@@ -26,6 +26,10 @@ function log_score(d::Distribution, x, ::Type{T})::T where T
     logpdf(d, x)
 end
 
+function log_score(d, x, tv::Val{T}) where T
+    log_score(d, x, T)
+end
+
 function log_score(d::Normal, x, ::Type{T})::T where T 
     (; μ, σ) = d
     -abs2((x - μ) / σ)/2 - log(σ)
@@ -113,17 +117,24 @@ end
     end
 end
 
-@generated function log_score_static(
-    distributions, values, type::Type{T}, len::Val{N}
+# @generated function log_score_static(
+#     distributions, values, type::Type{T}, len::Val{N}
+# ) where {T, N}
+#     if N == 0 
+#         :(zero($T))
+#     else
+#         exs = map(1:N) do i 
+#             :(log_score(distributions[$i], values[$i], $T)::$T)
+#         end
+#         Expr(:call, :+, exs...)
+#     end
+# end
+
+function log_score_static(
+     distributions, values, type::Val{T}, len::Val{N},
 ) where {T, N}
-    if N == 0 
-        :(zero($T))
-    else
-        exs = map(1:N) do i 
-            :(log_score(distributions[$i], values[$i], $T)::$T)
-        end
-        Expr(:call, :+, exs...)
-    end
+    # sum(map((d, v) -> log_score(d, v, type) , distributions, values))
+    sum(map(logpdf, distributions, values))
 end
 
 function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
@@ -134,7 +145,7 @@ function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
     @assert length(diter.core) == length(xs)
 
     if xs isa Union{Tuple, NamedTuple, StaticArray}
-        log_score_static(diter.core, xs, T, Val{length(xs)}())
+        log_score_static(diter.core, xs, Val{T}(), Val{length(xs)}())
     else
         s::T = 0
         for (d, x) in zip(diter.core, xs)
