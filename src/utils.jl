@@ -1,16 +1,22 @@
 export specific_elems, count_len, @unzip, @unzip_named
 export max_by, sort_by
 export rotate2d, rotation2D, °
+export Optional, map_optional
 
 using MacroTools: @capture
-using Cthulhu
 using ForwardDiff: Dual
+# import ReverseDiff
 import LineSearches
 
-specific_elems(xs::AbstractVector{T}) where T = 
+const Optional{X} = Union{X, Nothing}
+
+specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
 
 count_len(iters) = count(_ -> true, iters)
+
+get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
+get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
 """
 ## Example
@@ -86,7 +92,7 @@ end
      sin(θ)  cos(θ)]
 )
 
-rotate2d(θ, v) = rotation2D(θ) * v
+rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
 
 const ° = π / 180
 
@@ -96,13 +102,19 @@ to_measurement(values) = begin
     μ ± σ
 end
 
-max_by(f) = xs -> begin
-    ys = map(f, xs)
-    _, i = findmax(ys)
-    xs[i]
+"""
+```jldoctest
+julia> to_measurement([(a=1,b=2),(a=3,b=6)])
+(a = 2.0 ± 1.4, b = 4.0 ± 2.8)
+```
+"""
+to_measurement(values::AbstractVector{<:NamedTuple}) = begin
+    vec_values = map(structure_to_vec, values)
+    template = values[1]
+    μ = mean(vec_values)
+    σ = std(vec_values)
+    structure_from_vec(template, μ .± σ)
 end
-
-sort_by(f) = xs -> sort(xs, by=f)
 
 pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
 pretty_number(v::Measurement) = string(v)
@@ -124,7 +136,8 @@ Apply a tuple of functions to a NamedTuple of corresponding arguments. The resul
 NamedTuple.
 """
 @inline function zipmap(fs, xs::X)::X where {X<:NamedTuple}
-    @assert length(fs) == length(xs) "Need the same number of functions and values"
+    @assert length(fs) == length(xs) "Need the same number of functions and values.\
+        \nfs = $fs\nxs = $xs."
     t = ntuple(i -> fs[i](xs[i]), length(xs))
     NamedTuple{keys(xs)}(t)
 end
@@ -154,8 +167,10 @@ macro ltimed(ex)
     end
 end
 
+"""
+Drop the gradient type tag to reduce JIT compilation time and avoid tag checking.
+"""
 function optimize_no_tag(loss, x₀, optim_options)
-    # drop tag to reduce JIT compilation time and avoid tag checking
     cfg = ForwardDiff.GradientConfig(nothing, x₀) 
     function fg!(F, G, x)
         (G === nothing) && return loss(x)
@@ -169,6 +184,27 @@ function optimize_no_tag(loss, x₀, optim_options)
     algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
     Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
 end
+
+# """
+# Use reverse mode autodiff to optimize the loss.
+# """
+# function optimize_reverse_diff(loss, x₀, optim_options)
+#     # drop tag to reduce JIT compilation time and avoid tag checking
+#     cfg = ReverseDiff.GradientConfig(x₀) 
+#     f_tape = ReverseDiff.GradientTape(loss, x₀, cfg)
+#     compiled_tape = ReverseDiff.compile(f_tape)
+#     function fg!(F, G, x)
+#         (G === nothing) && return loss(x)
+
+#         gr = ReverseDiff.DiffResult(first(x), (G,))
+#         ReverseDiff.gradient!(gr, compiled_tape, x)
+#         if F !== nothing
+#             return gr.value
+#         end
+#     end
+#     algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
+#     Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
+# end
 
 function optimize_bounded(loss, x₀, (lower, upper), optim_options)
     # drop tag to reduce JIT compilation time and avoid tag checking
@@ -191,6 +227,7 @@ end
 # end
 
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
+to_svec(vec::NTuple{n, X}) where {n, X} = SVector{n, X}(vec)
 
 """
 Like `get!`, but can be used to directly access nested dictionaries.
@@ -253,4 +290,66 @@ A helper macro to find functions by name.
 """
 @generated function find_func(T, args...)
     return Expr(:splatnew, :T, :args)
+end
+
+##-----------------------------------------------------------
+# convenient combinators
+Base.map(f::Function) = xs -> map(f, xs)
+Base.filter(f::Function) = xs -> filter(f, xs)
+max_by(f::Function) = xs -> begin
+    ys = map(f, xs)
+    _, i = findmax(ys)
+    xs[i]
+end
+
+sort_by(f::Function) = xs -> sort(xs, by=f)
+
+"""
+    map_optional(f, x) = x === nothing ? nothing : f(x)
+"""
+map_optional(f::Function, ::Nothing) = nothing
+map_optional(f::Function, x) = f(x)
+##-----------------------------------------------------------
+using Distributed
+using ProgressMeter: Progress, next!
+
+const _distributed_work_ctx = Ref{Any}(nothing)
+
+"""
+# Arguments
+- `f(ctx, x)`: the context-dependent task to be performed.
+"""
+function parallel_map(f, xs, ctx;
+    progress::Progress,
+    n_threads::Integer=Threads.nthreads(), 
+    use_distributed::Bool=false,
+)
+    if use_distributed
+        length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
+        @everywhere SEDL._distributed_work_ctx[] = $ctx
+        f_task = x -> let ctx = _eval_ctx_prob[]
+            f(ctx, x)
+        end
+        try
+            eval_results = progress_pmap(f_task, xs; progress)
+        finally
+            @everywhere SEDL._distributed_work_ctx[] = nothing
+        end
+    else
+        eval_task(e) = let r = f(ctx, e)
+            next!(progress)
+            r
+        end
+        if n_threads <= 1
+            eval_results = map(eval_task, xs)
+        else
+            pool = ThreadPools.QueuePool(2, n_threads)
+            try
+                eval_results = ThreadPools.tmap(eval_task, pool, xs)
+            finally
+                close(pool)
+            end
+        end
+    end
+    eval_results
 end

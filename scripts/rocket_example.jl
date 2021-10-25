@@ -36,7 +36,7 @@ comp_env = ComponentEnv()
 can_grow = true
 components_void!(comp_env)
 components_scalar_arithmatic!(comp_env; can_grow)
-components_transcendentals!(comp_env; can_grow)
+components_special_functions!(comp_env; can_grow)
 components_vec2!(comp_env; can_grow)
 
 vdata = Rocket2D.variable_data(n_landmarks, x₀)

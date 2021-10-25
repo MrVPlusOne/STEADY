@@ -8,7 +8,7 @@ shape_env = ℝenv()
 env = ComponentEnv()
 components_scalar_arithmatic!(env)
 components_vec2!(env)
-components_transcendentals!(env)
+components_special_functions!(env)
 
 l = Var(:l, ℝ, PUnits.Length)
 x = Var(:x, ℝ2, PUnits.Length)

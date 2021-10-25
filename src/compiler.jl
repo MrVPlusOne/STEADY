@@ -1,7 +1,13 @@
-struct CompiledFunc{AST} <: Function
+struct CompiledFunc{return_type, F, AST} <: Function
     ast::AST
     julia::Expr
-    f::Function
+    f::F
+    """
+    `compute_ret_type(args)->return_type` computes the expected return type of `impl` when
+    called on the argumetns.
+    """
+    CompiledFunc(impl::Function, ast, julia, compute_ret_type::Function) = 
+        new{compute_ret_type, typeof(impl), typeof(ast)}(ast, julia, impl)
 end
 
 (cf::CompiledFunc)(args::NamedTuple) = cf.f(args)
@@ -14,6 +20,15 @@ This is equivalent to `f(x)::T` but can be more efficient when f is a
 call_T(f::F, x, ::Type{T}) where {F, T} = f(x)::T
 call_T(cf::CompiledFunc, x, ::Type{T}) where T = call_T(cf.f, x, T)
 
+"""
+Hide the type of the wrapped function. Useful for avoiding expensive compilation 
+caused by run-time generated functions.
+"""
+struct WrappedFunc <: Function
+    core::Function
+end
+
+(cf::WrappedFunc)(args) = cf.core(args)
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
@@ -81,16 +96,44 @@ function compile(
     end
 
     body_ex = compile_body(prog)::Expr
-    prev_result = lock(compile_cache_lock) do
-        get(compile_cache, body_ex, nothing)
-    end
+    prev_result = @lock compile_cache_lock get(compile_cache, body_ex, nothing)
+    
     (prev_result !== nothing) && return prev_result
     f_ex = :(args -> $body_ex)
-    cf = CompiledFunc(prog, body_ex, @RuntimeGeneratedFunction(f_ex))
-    lock(compile_cache_lock) do
+    cf = CompiledFunc(
+        @RuntimeGeneratedFunction(f_ex), 
+        prog, body_ex, 
+        TAST_return_type(Val(prog.type.shape.name)))
+    @lock compile_cache_lock begin
         compile_cache[body_ex] = cf
     end
+    cf
 end
+
+"""
+Compute the return type using the expected `PShape`.
+"""
+function TAST_return_type(vs::Val{p_shape}) where p_shape
+    @assert p_shape isa Symbol
+    (args::NamedTuple) -> begin
+        num_type = promote_numbers_type(args)
+        @assert isconcretetype(num_type) "could not infer a concrete number type for \
+            the arguments $args"
+        _return_type(vs, num_type)
+    end
+end
+
+_return_type(::Val{:Void}, ::Type{T}) where T = Tuple{}
+_return_type(::Val{:ℝ}, ::Type{T}) where T = T
+_return_type(::Val{:Void}, ::Type{T}) where T = SVector{2, T}
+
+"""
+Do not specify the return type and only rely on the compiler to infer.
+"""
+function any_return_type(args)
+    Any
+end
+
 
 """
 Compiles a `TAST` expression into the corresponding julia function that can be 

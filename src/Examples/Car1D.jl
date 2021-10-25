@@ -10,31 +10,22 @@ Pos = Var(:pos, ℝ, PUnits.Length)
 Power = Var(:f, ℝ, PUnits.Force)
 Drag = Var(:drag, ℝ, PUnits.Force / PUnits.Speed)
 Mass = Var(:mass, ℝ, PUnits.Mass)
-Wall = Var(:wall, ℝ, PUnits.Length)
 
 state_vars() = [Pos]
 action_vars() = [Power]
 param_vars() = [Drag, Mass]
 
 variable_data() = VariableData(
+    Val(2),
     states = OrderedDict(
         Pos => (SNormal(0.0, 0.01), SNormal(0.0, 1.0)),
     ),
-    dynamics_params = OrderedDict(
+    dynamics = OrderedDict(
         Mass => SUniform(0.5, 5.0),
         Drag => SUniform(0.0, 1.0),
     ),
-    others = OrderedDict(
-        Wall.name => SNormal(25.0, 25.0),
-    ),
+    action_vars = [Power],
 )
-
-function data_logp((; x₀, x₀′, params, others), vdata::VariableData)
-    map(pairs(x₀)) do (k, v)
-        vdata.states
-    end
-
-end
 
 acceleration_f((; f, drag, mass, pos′)) = begin
     (pos′′ = (f - drag * pos′) / mass,)
@@ -104,4 +95,4 @@ function plot_data((; others, states, observations, actions, times), name::Strin
     plot(p_state, p_action, p_obs, layout=(3,1), size=(600,600))
 end
 
-end
+end # end module

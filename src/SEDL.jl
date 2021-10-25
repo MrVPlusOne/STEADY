@@ -36,19 +36,23 @@ Metatheory.@metatheory_init()
 
 include("utils.jl")
 include("distributions_utils.jl")
+include("particle_filters.jl")
 include("control_utils.jl")
 include("DSL.jl")
 include("components.jl")
 include("enumeration/enumeration.jl")
 include("compiler.jl")
-include("synthesis.jl")
+include("synthesis/synthesis.jl")
 include("Examples/Examples.jl")
 include("tests.jl")
 
 if false
-    include("../scripts/car1d_example.jl")
-    include("../scripts/rocket_example.jl")
+    include("../scripts/car2d_example.jl")
+    include("../scripts/iterate_example.jl")
     include("../scripts/test_synthesis.jl")
+    include("../scripts/rocket_example.jl")
+
+    include("../scripts/archived/car1d_example.jl")
 end
 
 end # end module

@@ -29,15 +29,19 @@ end
 
 """
 A environment that stores the set of component functions available for synthesis.
+Use `add_component!` and `push!` to add new `ComponentFunc` into teh environment.
+
+Note that components added earlier are preferred during the synthesis.
 """
 struct ComponentEnv
+    names::Vector{Symbol}
     "Julia functions that implement the corresponding components."
     impl_dict::Dict{Symbol, Function}
     signatures::Dict{Symbol, FuncSignature}
     rules::Vector{AbstractRule}
 end
 
-ComponentEnv() = ComponentEnv(Dict(), Dict(), [])
+ComponentEnv() = ComponentEnv([], Dict(), Dict(), [])
 Base.show(io::IO, env::ComponentEnv) = begin
     print(io, "ComponentEnv(components=$(keys(env.impl_dict)))")
 end
@@ -45,11 +49,11 @@ end
 Base.show(io::IO ,::MIME"text/plain", env::ComponentEnv) = begin
     n = length(env.impl_dict)
     println(io, "ComponentEnv with $n components:")
-    for (name, sig) in env.signatures
+    for name in env.names
+        sig = env.signatures[name]
         println(io, "  $name: $sig")
     end
 end
-
 
 Base.insert!(d::Dict, k, v) = d[k] = v
 
@@ -60,12 +64,25 @@ struct ComponentFunc
     unit_sig::Function
 end
 
+(cf::ComponentFunc)(args::TAST...) = begin
+    r_shape = cf.shape_sig[2]
+    r_unit = cf.unit_sig(map(x -> x.type.unit, args)...)
+    Call(cf.name, args, PType(r_shape, r_unit))
+end
+
+get_component(env::ComponentEnv, name::Symbol) = begin
+    sig = env.signatures[name]
+    shape_sig = sig.arg_shapes => sig.result_shape
+    ComponentFunc(name, env.impl_dict[name], shape_sig, sig.result_unit)
+end
+
 function add_component!(
     env::ComponentEnv, 
     comp::ComponentFunc
 )::ComponentEnv
     (; name, impl, shape_sig, unit_sig) = comp
     @assert !(name in keys(env.impl_dict)) "Component '$name' already present in the environment."
+    push!(env.names, name)
     insert!(env.impl_dict, name, impl)
     insert!(env.signatures, name, FuncSignature(shape_sig, unit_sig))
     env
@@ -100,8 +117,9 @@ function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
         ComponentFunc(:(-), (-), [ℝ, ℝ] => ℝ, signature_all_same),
         ComponentFunc(:(*), (*), [ℝ, ℝ] => ℝ, (*)),
         ComponentFunc(:(/), (/), [ℝ, ℝ] => ℝ, (/)),
-        ComponentFunc(:(neg), (-), [ℝ] => ℝ, identity),
-        ComponentFunc(:(reciprocal), x -> 1 / x, [ℝ] => ℝ, u -> unitless / u),
+        ComponentFunc(:zero, zero, [ℝ] => ℝ, identity),
+        ComponentFunc(:neg, (-), [ℝ] => ℝ, identity),
+        ComponentFunc(:reciprocal, x -> 1 / x, [ℝ] => ℝ, u -> unitless / u),
         ComponentFunc(:abs, abs, [ℝ] => ℝ, identity),
         ComponentFunc(:square, square, [ℝ] => ℝ, u -> u^2),
         ComponentFunc(:sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2)),
@@ -163,11 +181,17 @@ function scalar_arithmatic_rules!(rules; can_grow)
     rules
 end
 
-function components_transcendentals!(env::ComponentEnv; can_grow=true)
+function components_special_functions!(env::ComponentEnv; can_grow=true)
     add_unitless_comp!(env, :sin, sin)
     add_unitless_comp!(env, :cos, cos)
-    add_unitless_comp!(env, :exp, exp)
+    add_unitless_comp!(env, :tan, tan)
+    # add_unitless_comp!(env, :exp, exp)
+    # add_unitless_comp!(env, :log, log)
     add_unitless_comp!(env, :tanh, tanh)
+
+    push!(env, 
+        ComponentFunc(:friction, friction, [ℝ, ℝ] => ℝ, signature_all_same)
+    )
 
     non_grow = @theory begin
         sin(neg(x)) == neg(sin(x))
@@ -181,6 +205,18 @@ function components_transcendentals!(env::ComponentEnv; can_grow=true)
     append!(env.rules, non_grow)
     can_grow && append!(env.rules, grow)
     env
+end
+
+"""
+Almost flat when `abs(x) < f` but grows linearly otherwise.
+"""
+friction(x, f; α=1e-4) = begin
+    f = abs(f)
+    if abs(x) < f
+        α*x
+    else
+        x - f * sign(x) * (1-α)
+    end
 end
 
 function components_vec2!(env::ComponentEnv; can_grow=true)

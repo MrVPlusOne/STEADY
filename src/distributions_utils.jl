@@ -1,5 +1,6 @@
 export GDistr, DistrIterator
-export SMvNormal, SMvUniform, SUniform, SNormal
+export SMvNormal, SMvUniform, SUniform, SNormal, CircularNormal
+export PertBeta, DistrTransform
 export score
 
 import Distributions: rand, logpdf, extrema
@@ -15,15 +16,21 @@ Base.show(io::IO, ::Type{<:Uniform}) = print(io, "Uniform{...}")
 
 
 """
-    score(distribution, value) -> log_p_score
+    log_score(distribution, value) -> log_p_score
 Returns a score equals to `logpdf` plus a constant. During optimization, this can be 
 used in place of `logpdf` to reduce the computational cost.
 """
-function score end
+function log_score end
 
-score(d::Distribution, x) = logpdf(d, x)
+function log_score(d::Distribution, x, ::Type{T})::T where T 
+    logpdf(d, x)
+end
 
-score(d::Normal, x) = let
+function log_score(d, x, tv::Val{T}) where T
+    log_score(d, x, T)
+end
+
+function log_score(d::Normal, x, ::Type{T})::T where T 
     (; μ, σ) = d
     -abs2((x - μ) / σ)/2 - log(σ)
 end
@@ -70,41 +77,89 @@ true
 ```
 """
 struct DistrIterator{Iter}
-    distributions::Iter
+    core::Iter
 
-    DistrIterator(distributions::Iter) where Iter = begin
-        foreach(distributions) do d
-            d isa GDistr || throw(
-                ArgumentError("Expect value of type `$GDistr`, but got: $d"))
+    DistrIterator(distributions::Iter) where Iter = begin 
+        if Iter <: AbstractVector
+            eltype(distributions) <: GDistr || throw(ArgumentError(
+                "Expect value of type `$GDistr`, but got eltype: $(eltype(distributions))"
+            ))
+        else
+            all(map(d -> d isa GDistr, distributions)) ||
+                foreach(distributions) do d
+                    d isa GDistr || throw(
+                        ArgumentError("Expect value of type `$GDistr`, but got: $d"))
+                end
         end
         new{Iter}(distributions)
     end
 end
 
 rand(rng::Random.AbstractRNG, diter::DistrIterator) = 
-    map(d -> rand(rng, d), diter.distributions)
+    map(d -> rand(rng, d), diter.core)
 
 logpdf(diter::DistrIterator, xs) = let
     if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
-        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
-            distributions: $(diter.distributions)\nvalues:$xs"
+        @assert keys(diter.core) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.core)\nvalues:$xs"
     end
-    sum(logpdf(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+    sum(map(logpdf, diter.core, xs))::Real
 end
 
-score(diter::DistrIterator, xs) = let
-    if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
-        @assert keys(diter.distributions) == keys(xs) "keys do not match:\n\
-            distributions: $(diter.distributions)\nvalues:$xs"
+@generated function sum2_static(
+    f, xs, ys, len::Val{N}
+) where {T, N}
+    if N == 0
+        :(0.0)
+    else
+        exs = map(i -> :(f(xs[$i], ys[$i])), 1:N)
+        Expr(:call, :+, exs...)
     end
-    sum(score(d, x)::Real for (d, x) in zip(diter.distributions, xs))::Real
+end
+
+# @generated function log_score_static(
+#     distributions, values, type::Type{T}, len::Val{N}
+# ) where {T, N}
+#     if N == 0 
+#         :(zero($T))
+#     else
+#         exs = map(1:N) do i 
+#             :(log_score(distributions[$i], values[$i], $T)::$T)
+#         end
+#         Expr(:call, :+, exs...)
+#     end
+# end
+
+function log_score_static(
+     distributions, values, type::Val{T}, len::Val{N},
+) where {T, N}
+    # sum(map((d, v) -> log_score(d, v, type) , distributions, values))
+    sum(map(logpdf, distributions, values))
+end
+
+function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
+    if diter isa DistrIterator{<:NamedTuple} && xs isa NamedTuple
+        @assert keys(diter.core) == keys(xs) "keys do not match:\n\
+            distributions: $(diter.core)\nvalues:$xs"
+    end
+    @assert length(diter.core) == length(xs)
+
+    if xs isa Union{Tuple, NamedTuple, StaticArray}
+        log_score_static(diter.core, xs, Val{T}(), Val{length(xs)}())
+    else
+        s::T = 0
+        for (d, x) in zip(diter.core, xs)
+            s += log_score(d, x, T)::T
+        end
+        s
+    end
 end
 
 Base.show(io::IO, di::DistrIterator) = 
-    if di.distributions isa AbstractVector
-        print(io, "DistrIterator([$(join(di.distributions, ","))])")
+    if di.core isa AbstractVector
+        print(io, "DistrIterator([$(join(di.core, ","))])")
     else
-        print(io, "DistrIterator($(di.distributions))")
+        print(io, "DistrIterator($(di.core))")
     end
 
 Base.show(io::IO, ::Type{<:DistrIterator}) = print(io, "DistrIterator{...}")
@@ -124,7 +179,7 @@ end
 (bit::BijectorIterator)(x) = zipmap(bit.bijectors, x)
 
 function Bijectors.bijector(di::DistrIterator)
-    BijectorIterator(map(bijector, di.distributions))
+    BijectorIterator(map(bijector, di.core))
 end
 
 function Bijectors.inv(bit::BijectorIterator)
@@ -166,6 +221,8 @@ struct SMvUniform{n, T} <: StaticDistr
     uniforms::StaticVector{n, Uniform{T}}
 end
 
+Base.eltype(::SMvUniform{n, T}) where {n, T} = T
+
 SMvUniform(ranges::Tuple{Real, Real}...) = let
     uniforms = map(ranges) do (l, u) 
         SUniform(l, u)
@@ -177,10 +234,12 @@ rand(rng::Random.AbstractRNG, d::SMvUniform) = let
     map(d -> rand(rng, d), d.uniforms)
 end
 
-logpdf(d::SMvUniform, xs) =
-    sum(logpdf(d, x) for (d, x) in zip(d.uniforms, xs))
+logpdf(d::SMvUniform, xs) = sum(map(logpdf, d.uniforms, xs))
 
-score(d::SMvUniform, xs) = 0.0
+eltype(Normal(Dual(1.0)))
+function log_score(d::SMvUniform, xs, ::Type{T})::T where T
+    zero(T)
+end
 
 function Bijectors.bijector(d::SMvUniform)
     BijectorIterator(bijector.(d.uniforms))
@@ -221,12 +280,77 @@ logpdf(d::CircularNormal, x) = let
     dis = min(dis, 2π-dis)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
-score(d::CircularNormal, x) = let
+function log_score(d::CircularNormal, x, ::Type{T})::T where T
     (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
-    score(Normal(0.0, d.σ), dis)
+    log_score(Normal(0.0, d.σ), dis, T)
 end
+
+
+"""
+Perform a bijective transformation to a distribution to obtain a new one.
+Should implement the following
+- `forward_transform(::DistrMap, x) -> y`: performs the forward transformation to a sample.
+- `inverse_transform(::DistrMap, y) -> x`: performs the inverse transformation to a sample.
+- `DistrMap.core::GDistr`: get the underlying distribution being transformed.
+"""
+abstract type DistrTransform <: StaticDistr end
+
+function forward_transform end
+function inverse_transform end
+
+rand(rng::AbstractRNG, d::DistrTransform) = forward_transform(d, rand(rng, d.core))
+
+logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
+
+log_score(d::DistrTransform, x, ::Type{T}) where T = 
+    log_score(d.core, inverse_transform(d, x), T)::T
+
+"""
+Rotate a 2D-distribution counter-clockwise by `θ`.
+"""
+struct Rotate2dDistr{N<:Real, D<:GDistr} <: DistrTransform
+    θ::N
+    core::D
+end
+
+Rotate2dDistr(θ, d::Rotate2dDistr) = Rotate2dDistr(θ+d.θ, d.core)
+
+Base.show(io::IO, ::Type{<:Rotate2dDistr}) = print(io, "Rotate2dDistr{...}")
+Base.show(io::IO, d::Rotate2dDistr) = 
+    print(io, "rotate2d($(d.θ), $(d.core))")
+
+forward_transform(d::Rotate2dDistr, x) = rotate2d(d.θ, x)
+inverse_transform(d::Rotate2dDistr, x) = rotate2d(-d.θ, x)
+
+"""
+Rotate a 2D-distribution counter-clockwise by `θ`.
+"""
+rotate2d(θ, d::GDistr) = Rotate2dDistr(θ, d)
+
+
+"""
+Shift the mean of a distribution by `x`.
+"""
+struct ShiftDistr{N, D<:GDistr} <: DistrTransform
+    shift::N
+    core::D
+end
+
+ShiftDistr(shift, core::ShiftDistr) = ShiftDistr(shift + core.shift, core.core) 
+
+Base.show(io::IO, ::Type{<:ShiftDistr}) = print(io, "ShiftDistr{...}")
+Base.show(io::IO, d::ShiftDistr) = 
+    print(io, "ShiftDistr($(d.shift), $(d.core))")
+
+forward_transform(d::ShiftDistr, x) = x + d.shift
+inverse_transform(d::ShiftDistr, x) = x - d.shift
+
+Base.:+(d::GDistr, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
+Base.:+(x::Union{Real, AbstractVector}, d::GDistr) = ShiftDistr(x, d) 
+Base.:+(d::MultivariateDistribution, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
+
 
 # copied from https://github.com/oxinabox/ProjectManagement.jl/blob/da3de128ebc031b695bcb1795b53bcfeba617d87/src/timing_distributions.jl
 """
@@ -240,6 +364,11 @@ struct PertBeta{T<:Real} <: ContinuousUnivariateDistribution
     a::T # min
     b::T # mode
     c::T # max
+    PertBeta(a, b, c) = begin
+        @assert a <= b <= c
+        (a1, b1, c1) = promote(a, b, c)
+        new{typeof(a1)}(a1,b1,c1)
+    end
 end
 
 function beta_dist(dd::PertBeta)
