@@ -2,7 +2,8 @@ module Car2D
 
 using Distributions
 using ..SEDL
-using ..SEDL: ℝ, ℝ2, °, norm_R2, TimeSeries, SNormal, SMvNormal, SUniform, GDistr
+using ..SEDL: ℝ, ℝ2, °, norm_R2, sigmoid, get_rows
+using ..SEDL: TimeSeries, SNormal, SMvNormal, SUniform, GDistr
 using StatsPlots
 using DataFrames
 using StaticArrays
@@ -31,7 +32,9 @@ variable_data() = VariableData(;
 """
 Return the ranges and bearings to the landmarks, as well as the speed reading.
 """
-function sensor_dist(landmarks, noise_scale) 
+function sensor_dist(landmarks; noise_scale=1.0) 
+    sensor_range=7.0
+    sigmoid_width=1.0
     state -> begin 
         (; pos, θ, v) = state
         # v_forward = rotate2d(-θ, v)[1]
@@ -42,9 +45,11 @@ function sensor_dist(landmarks, noise_scale)
                 rel = l - pos
                 dis = norm_R2(rel)
                 angle = atan(rel[2], rel[1]) - θ
-                DistrIterator((;
+                core = DistrIterator((;
                     # range = Normal(dis, noise_scale * 1.0), 
                     bearing = CircularNormal(angle, noise_scale * 5°)))
+                p_detect = sigmoid(4(sensor_range - dis) / sigmoid_width)
+                OptionalDistr(p_detect, core)
             end),
         ))
     end
@@ -236,13 +241,15 @@ sliding_model((; σ_pos, σ_θ, σ_v)) = (
 )
 
 function plot_states!(
-    states, name; landmarks, obs_frames,
-    marker_len=0.1, linecolor=1
+    states, name; landmarks, obs_data,
+    marker_len=0.1, state_color=1, landmark_color=2, state_alpha=1.0,
 )
+    (; obs_frames, observations) = obs_data
     arrow_style = arrow(:closed, 0.001, 1.0)
     let
         @unzip xs, ys = map(x -> x.pos, states)
-        plot!(xs, ys, label="Position ($name)", aspect_ratio=1.0; linecolor)
+        plot!(xs, ys, label="Position ($name)", aspect_ratio=1.0; 
+            linecolor=state_color, linealpha=state_alpha)
     end
     let
         markers = states[obs_frames]
@@ -252,18 +259,35 @@ function plot_states!(
         end
         @unzip us, vs = dirs
         quiver!(xs, ys, quiver=(us, vs), arrow=arrow_style, arrowsize=0.01, 
-            label="Orientation ($name)"; linecolor)
+            label="Orientation ($name)"; linecolor=state_color, linealpha=state_alpha)
     end
     isempty(landmarks) || let
+        sensor_xs, sensor_ys = Float64[], Float64[]
+        for t in obs_frames
+            for (l, l_obs) in zip(landmarks, observations[t].landmarks)
+                (l_obs === missing) && continue
+                push!(sensor_xs, states[t].pos[1], l[1], NaN)
+                push!(sensor_ys, states[t].pos[2], l[2], NaN)
+            end
+        end
+        plot!(sensor_xs, sensor_ys, label="Sensor",
+            linecolor=landmark_color, linealpha=0.5, linestyle=:dot)
         @unzip xs, ys = landmarks
-        scatter!(xs, ys, label="Landmarks")
+        scatter!(xs, ys, label="Landmarks", color=landmark_color)
     end
 end
 
-plot_trajectories!(trajectories::Matrix; linealpha=0.2) = begin
-    @unzip xs, ys = map(x -> x.pos, trajectories) 
+plot_trajectories!(trajectories::Matrix; linealpha=0.2, linecolor=4) = begin
+    xs, ys = Float64[], Float64[]
+    for tr in get_rows((x -> x.pos).(trajectories))
+        @unzip tr_xs, tr_ys = tr
+        append!(xs, tr_xs)
+        append!(ys, tr_ys)
+        push!(xs, NaN)
+        push!(ys, NaN)
+    end
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
-    plot!(xs', ys'; label=false, linecolor=2, linealpha)
+    plot!(xs, ys; label="Posterior", linecolor, linealpha)
 end
 
 

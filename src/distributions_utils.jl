@@ -1,6 +1,6 @@
 export GDistr, DistrIterator
 export SMvNormal, SMvUniform, SUniform, SNormal, CircularNormal
-export PertBeta, DistrTransform
+export PertBeta, DistrTransform, OptionalDistr
 export score
 
 import Distributions: rand, logpdf, extrema
@@ -187,15 +187,15 @@ function Bijectors.inv(bit::BijectorIterator)
 end
 
 """
-Distributions that returns static vectors.
+Parent type for the extended distributions.
 """
-abstract type StaticDistr end
+abstract type ExtDistr end
 
 """
 Generalized distributions that support sampling (and evaluating the probability of) 
 structured data. 
 """
-const GDistr = Union{Distribution, StaticDistr, DistrIterator}
+const GDistr = Union{Distribution, ExtDistr, DistrIterator}
 
 SMvNormal(μ::AbstractVector, σ::Real) = let 
     n = length(μ)
@@ -217,7 +217,7 @@ SNormal(μ, σ) = let
 end
 const SUniform = Uniform
 
-struct SMvUniform{n, T} <: StaticDistr
+struct SMvUniform{n, T} <: ExtDistr
     uniforms::StaticVector{n, Uniform{T}}
 end
 
@@ -287,6 +287,57 @@ function log_score(d::CircularNormal, x, ::Type{T})::T where T
     log_score(Normal(0.0, d.σ), dis, T)
 end
 
+"""
+An distribution wrapper that optionally samples the wrapped distribution. It 
+first samples from a Bernoulli with parameter `p`, and depending on the outcome,
+either samples from `core` or samples `missing`.
+
+## Examples
+```
+julia> od = OptionalDistr(0.5, Normal())
+       [rand(od) for _ in 1:10]
+10-element Vector{Union{Missing, Float64}}:
+-0.6809494860705712
+    missing
+-0.4665500454017262
+0.541651591598847
+    missing
+    missing
+-0.2091150884206728
+-1.7821543135478637
+-0.2681990522044774
+    missing
+```
+"""
+struct OptionalDistr{R<:Real, Core<:GDistr} <: ExtDistr
+    p::R
+    core::Core
+end
+
+function rand(rng::AbstractRNG, d::OptionalDistr)
+    b = rand(rng, Bernoulli(d.p))::Bool
+    if b
+        rand(rng, d.core)
+    else
+        missing
+    end
+end
+
+function logpdf(d::OptionalDistr, x)
+    if x === missing
+        log(1-d.p)
+    else
+        log(d.p) + logpdf(d.core, x)
+    end
+end
+
+function log_score(d::OptionalDistr, x)
+    if x === missing
+        log(1-d.p)
+    else
+        log(d.p) + log_score(d.core, x)
+    end
+end
 
 """
 Perform a bijective transformation to a distribution to obtain a new one.
@@ -295,7 +346,7 @@ Should implement the following
 - `inverse_transform(::DistrMap, y) -> x`: performs the inverse transformation to a sample.
 - `DistrMap.core::GDistr`: get the underlying distribution being transformed.
 """
-abstract type DistrTransform <: StaticDistr end
+abstract type DistrTransform <: ExtDistr end
 
 function forward_transform end
 function inverse_transform end

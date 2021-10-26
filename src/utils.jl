@@ -353,3 +353,5 @@ function parallel_map(f, xs, ctx;
     end
     eval_results
 end
+
+sigmoid(x::Real) = one(x) / (one(x) + exp(-x))

@@ -7,7 +7,7 @@ StatsPlots.default(dpi=600, legend=:outerbottom)
 ##-----------------------------------------------------------
 # generate data
 Random.seed!(123)
-times = collect(0.0:0.1:10)
+times = collect(0.0:0.1:12)
 obs_frames = 1:5:length(times)
 # true_params = (; l1 = 0.5, τ1 = 0.8, v1=0.1, a1=1.0)
 true_params = (; l1 = 0.5, τ1 = 0.8, σ_θ=0.1, σ_v=0.2)
@@ -21,17 +21,17 @@ true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 vdata = Car2D.variable_data()
 x0_dist = init_state_distribution(vdata)
 
-landmarks = @SVector[@SVector[1.0, 2.5], #=@SVector[6.0, 1.5], @SVector[4.0, -2.0]=#]
+landmarks = @SVector[@SVector[-1.0, 2.5], @SVector[6.0, -4.0], #=@SVector[4.0, -2.0]=#]
 noise_scale = 1.0
 true_system = MarkovSystem(x0_dist, true_motion_model, 
-    Car2D.sensor_dist(landmarks, noise_scale))
+    Car2D.sensor_dist(landmarks; noise_scale))
 
 x0 = (pos=@SVector[0.5, 0.5], θ=-5°, v=@SVector[0.25, 0.0])
 ex_data = simulate_trajectory(times, x0, true_system, Car2D.manual_control())
 obs_data = (; times, obs_frames, ex_data.observations, ex_data.controls)
 @df ex_data.controls plot(times, [:v̂, :ϕ̂], label=["v̂" "ϕ̂"])
 let traj_p = plot(legend=:outerbottom, aspect_ratio=1.0)
-    Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_frames)
+    Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data)
 end |> display
 log_score_float = (d,x) -> log_score(d, x, Float64)
 ##-----------------------------------------------------------
@@ -43,9 +43,11 @@ map_result = @time map_trajectory(
     optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
 )
 let plt = plot()
-    Car2D.plot_trajectories!(ffbs_result.trajectories, linealpha=0.2)
-    Car2D.plot_states!(ex_data.states, "truth"; landmarks=[], obs_frames)
-    Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, linecolor=3)
+    Car2D.plot_trajectories!(ffbs_result.trajectories, linealpha=0.2, linecolor=2)
+    Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
+        state_color=1, landmark_color=3)
+    Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
+        state_color=:red, state_alpha=0.6)
     display("image/png", plt)
 end
 ##-----------------------------------------------------------
@@ -100,9 +102,11 @@ function iter_callback((; iter, trajectories, dyn_est))
         )
 
         p = plot(title="iteration $iter")
-        Car2D.plot_trajectories!(trajectories)
-        Car2D.plot_states!(ex_data.states, "truth"; landmarks=[], obs_frames)
-        Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, linecolor=3)
+        Car2D.plot_trajectories!(trajectories, linealpha=0.15, linecolor=2)
+        Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_frames, 
+            state_color=1, landmark_color=3)
+        Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, 
+            state_color=:red, state_alpha=0.6)
         display("image/png", p)
     end
 end    
@@ -124,3 +128,5 @@ end
 display(iter_result)
 plot(iter_result, start_idx=5)
 ##-----------------------------------------------------------
+Threads.@spawn begin @time sleep(2.0); println("Task 1") end
+Threads.@spawn begin @time sleep(2.0); println("Task 2") end

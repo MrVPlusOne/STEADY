@@ -130,7 +130,6 @@ function fit_dynamics_iterative(
         
         dyn_est = (; sol.p_motion_model, sol.params, sol.comps)
         update_id = mod1(update_id + 1, length(comps))
-        previous_result = fit_r
 
         improve_pred = sol.score - score_old
         push!(improve_pred_hisotry, improve_pred)
