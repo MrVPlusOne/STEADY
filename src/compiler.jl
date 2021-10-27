@@ -1,34 +1,19 @@
-struct CompiledFunc{return_type, F, AST} <: Function
-    ast::AST
-    julia::Expr
+"""
+    return_type(num_type::Type) -> Type
+"""
+struct CompiledFunc{return_type, F} <: Function
     f::F
-    """
-    `compute_ret_type(args)->return_type` computes the expected return type of `impl` when
-    called on the argumetns.
-    """
-    CompiledFunc(impl::Function, ast, julia, compute_ret_type::Function) = 
-        new{compute_ret_type, typeof(impl), typeof(ast)}(ast, julia, impl)
+    ast::TAST
+    julia::Expr
 end
 
-(cf::CompiledFunc)(args::NamedTuple) = cf.f(args)
-
-"""
-Call function `f` on the input `x` and expect the result to be of type `T`.
-This is equivalent to `f(x)::T` but can be more efficient when f is a 
-[`CompiledFunc`](@ref).
-"""
-call_T(f::F, x, ::Type{T}) where {F, T} = f(x)::T
-call_T(cf::CompiledFunc, x, ::Type{T}) where T = call_T(cf.f, x, T)
-
-"""
-Hide the type of the wrapped function. Useful for avoiding expensive compilation 
-caused by run-time generated functions.
-"""
-struct WrappedFunc <: Function
-    core::Function
+(cf::CompiledFunc{return_type})(args::NamedTuple) where return_type = begin
+    num_type = promote_numbers_type(args)
+    @assert isconcretetype(num_type) "could not infer a concrete number type for \
+            the arguments $args"
+    R = return_type(num_type)
+    convert(R, cf.f(args))::R
 end
-
-(cf::WrappedFunc)(args...) = cf.core(args...)
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
@@ -50,7 +35,7 @@ end
 Used to cache the compilation result to speed up synthesis and avoid memory leak 
 when synthesis is run multiple times.
 """
-const compile_cache = Dict{Expr, CompiledFunc}()
+const compile_cache = Dict{Expr, RuntimeGeneratedFunction}()
 const compile_cache_lock = ReentrantLock()
 
 macro with_type(e, ty)
@@ -66,74 +51,80 @@ end
 Compiles a `TAST` expression into the corresponding julia function that can be 
 efficiently executed.
 
+When `hide_type=true`, the returned `CompiledFunc` will use a generic `Function` instead 
+of a more precised function type in its type signature. This can lead to slightly worse 
+performance but can typically greatly improve Julia's compilation time (by avoiding 
+excessive specialization).
+
 Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile(
-    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv; check_gradient=false
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv; hide_type=false
 )::CompiledFunc
     function compile_body(v::Var)
         e = Expr(:(.), :args, QuoteNode(v.name))
-        rtype = shape_env[v.type]
+        rtype = shape_env.type_annots[v.type.shape]
         :($e::$rtype)
     end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
         local args = compile_body.(call.args)
-        local rtype = shape_env[call.type]
+        local rtype = shape_env.type_annots[call.type.shape]
         local e = Expr(:call, f, args...)
-        if check_gradient
-            quote
-                v = e::$rtype
-                is_bad_dual(v) && let 
-                    args = $(Expr(:call, :tuple, args...))
-                    error("Bad dual detected. \nf=$f\nargs=$args")
-                end
-                v
-            end
-        else 
-            :($e::$rtype)
-        end
+        :($e::$rtype)
     end
 
     body_ex = compile_body(prog)::Expr
-    prev_result = @lock compile_cache_lock get(compile_cache, body_ex, nothing)
-    
-    (prev_result !== nothing) && return prev_result
     f_ex = :(args -> $body_ex)
-    cf = CompiledFunc(
-        @RuntimeGeneratedFunction(f_ex), 
-        prog, body_ex, 
-        TAST_return_type(Val(prog.type.shape.name)))
-    @lock compile_cache_lock begin
-        compile_cache[body_ex] = cf
+    rgf = @lock compile_cache_lock get(compile_cache, f_ex, nothing)
+
+    if rgf === nothing
+        rgf = @RuntimeGeneratedFunction(f_ex)
+        @lock compile_cache_lock begin
+            compile_cache[f_ex] = rgf
+        end
     end
-    cf
+    
+    rtype = shape_env.return_type[prog.type.shape]
+    ftype = hide_type ? Function : typeof(rgf)
+    CompiledFunc{rtype, ftype}(
+        rgf, prog, body_ex,
+    )
 end
 
 """
-Compute the return type using the expected `PShape`.
+Hide the type of the wrapped function. Useful for avoiding expensive compilation 
+caused by run-time generated functions.
 """
-function TAST_return_type(vs::Val{p_shape}) where p_shape
-    @assert p_shape isa Symbol
-    (args::NamedTuple) -> begin
-        num_type = promote_numbers_type(args)
-        @assert isconcretetype(num_type) "could not infer a concrete number type for \
+struct WrappedFunc <: Function
+    core::Function
+end
+
+(cf::WrappedFunc)(args...) = cf.core(args...)
+
+"""
+```jldoctest
+julia> TypedFunc{return_type_R2}(sum)((a=@SVector[1.0,2.0], b=@SVector[3,4]))
+2-element StaticArrays.SVector{2, Float64} with indices SOneTo(2):
+ 4.0
+ 6.0
+ ```
+"""
+struct TypedFunc{return_type} <: Function
+    core::Function
+end
+
+(cf::TypedFunc{return_type})(args::NamedTuple) where return_type = begin
+    num_type = promote_numbers_type(args)
+    @assert isconcretetype(num_type) "could not infer a concrete number type for \
             the arguments $args"
-        _return_type(vs, num_type)
-    end
+    R = return_type(num_type)
+    convert(R, cf.core(args))::R
 end
 
-_return_type(::Val{:Void}, ::Type{T}) where T = Tuple{}
-_return_type(::Val{:ℝ}, ::Type{T}) where T = T
-_return_type(::Val{:Void}, ::Type{T}) where T = SVector{2, T}
-
-"""
-Do not specify the return type and only rely on the compiler to infer.
-"""
-function any_return_type(args)
-    Any
-end
-
+return_type_R2(num) = SVector{2, num}
+return_type_R(num) = num
+return_type_void(num) = Tuple{}
 
 """
 Compiles a `TAST` expression into the corresponding julia function that can be 

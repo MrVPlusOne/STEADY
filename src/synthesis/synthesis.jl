@@ -47,10 +47,9 @@ function compile_motion_model(
     comps::NamedTuple,
     (; shape_env, comp_env, sketch, hide_type);
 )
-    funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient=false), comps)
+    funcs = map(comp -> compile(comp, shape_env, comp_env; hide_type), comps)
     sketch_core = _build_sketch_core(funcs)
-    # TODO: add more type info to the wrapped func?
-    hide_type && (sketch_core = WrappedFunc(sketch_core))
+    # hide_type && (sketch_core = WrappedFunc(sketch_core))
     WrappedFunc(to_p_motion_model(sketch_core, sketch))
 end
 

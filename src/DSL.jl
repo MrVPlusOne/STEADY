@@ -187,11 +187,9 @@ end
 
 export ShapeEnv
 struct ShapeEnv
-    impl_dict::Dict{PShape, Type}
+    type_annots::Dict{PShape, Type}
+    return_type::Dict{PShape, Function}
 end
-
-Base.getindex(env::ShapeEnv, s::PShape) = env.impl_dict[s]
-Base.getindex(env::ShapeEnv, s::PType) = env[s.shape]
 
 export ℝ, ℝ2, ℝenv, derivative
 ## === Commonly used type definitions ===
@@ -199,12 +197,19 @@ const Void = PShape(:Void)
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
 
-ℝenv(num_type::Type=Real) = begin 
-    ShapeEnv(Dict(
-        Void => Tuple{},
-        ℝ => num_type,
-        ℝ2 => isconcretetype(num_type) ? SVector{2, num_type} : (SVector{2, <: num_type}),
-    ))
+ℝenv() = begin 
+    ShapeEnv(
+        Dict(
+            Void => Tuple{},
+            ℝ => Real,
+            ℝ2 => SVector{2, <:Real},
+        ),
+        Dict(
+            Void => return_type_void,
+            ℝ => return_type_R,
+            ℝ2 => return_type_R2,
+        )
+    )
 end
 
 
