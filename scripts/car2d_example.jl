@@ -21,7 +21,7 @@ true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 vdata = Car2D.variable_data()
 x0_dist = init_state_distribution(vdata)
 
-landmarks = @SVector[@SVector[-1.0, 2.5], @SVector[6.0, -4.0], #=@SVector[4.0, -2.0]=#]
+landmarks = @SVector[@SVector[-1.0, 2.5], @SVector[6.0, -4.0], @SVector[-0.6, -1.0]]
 noise_scale = 1.0
 true_system = MarkovSystem(x0_dist, true_motion_model, 
     Car2D.sensor_dist(landmarks; noise_scale))
@@ -38,16 +38,16 @@ log_score_float = (d,x) -> log_score(d, x, Float64)
 # sample posterior using the correct dynamics
 # ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=50_000, n_trajs=100)
 ffbs_result = @time filter_smoother(true_system, obs_data, n_particles=500_000, n_trajs=100)
-map_result = @time map_trajectory(
-    true_system, obs_data, ffbs_result.trajectories[2, :]; 
-    optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
-)
+# map_result = @time map_trajectory(
+#     true_system, obs_data, ffbs_result.trajectories[2, :]; 
+#     optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
+# )
 let plt = plot()
     Car2D.plot_trajectories!(ffbs_result.trajectories, linealpha=0.2, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
-    Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
-        state_color=:red, state_alpha=0.6)
+    # Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
+    #     state_color=:red, state_alpha=0.6)
     display("image/png", plt)
 end
 ##-----------------------------------------------------------
@@ -70,7 +70,7 @@ components_scalar_arithmatic!(comp_env, can_grow=true)
 components_special_functions!(comp_env, can_grow=true)
 
 pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
-senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, 5; pruner)
+senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, 6; pruner)
 let rows = map(senum.enum_result.pruned) do r
         (; r.pruned, r.reason)
     end
@@ -90,26 +90,29 @@ fit_settings = DynamicsFittingSettings(;
     optim_options, evals_per_program=2, n_threads=10)
 
 function iter_callback((; iter, trajectories, dyn_est))
+    show_MAP = false
     if iter <= 10 || mod1(iter, 5) == 1
-        @info "Computing trajectory MAP estimation..."
-        local motion_model = dyn_est.p_motion_model(dyn_est.params)
-        local system_est = MarkovSystem(x0_dist, motion_model, true_system.obs_model)
-        local best_traj = collect(get_rows(trajectories)) |> 
-            max_by(traj -> total_log_score(system_est, obs_data, traj, Float64))
-        local map_result = @time map_trajectory(
-            system_est, obs_data, best_traj; 
-            optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
-        )
+        if show_MAP
+            @info "Computing trajectory MAP estimation..."
+            local motion_model = dyn_est.p_motion_model(dyn_est.params)
+            local system_est = MarkovSystem(x0_dist, motion_model, true_system.obs_model)
+            local best_traj = collect(get_rows(trajectories)) |> 
+                max_by(traj -> total_log_score(system_est, obs_data, traj, Float64))
+            local map_result = @time map_trajectory(
+                system_est, obs_data, best_traj; 
+                optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
+            )
+        end
 
         p = plot(title="iteration $iter")
         Car2D.plot_trajectories!(trajectories, linealpha=0.15, linecolor=2)
-        Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_frames, 
+        Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
             state_color=1, landmark_color=3)
-        Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_frames, 
+        show_MAP && Car2D.plot_states!(map_result.states, "MAP states"; landmarks, obs_data, 
             state_color=:red, state_alpha=0.6)
         display("image/png", p)
     end
-end    
+end
 
 iter_result = let 
     comps_guess = let v̂ = Car2D.U_Speed, θ = Car2D.Orientation, τ1 = Var(:τ1, ℝ, PUnits.Time)
@@ -126,7 +129,5 @@ iter_result = let
     )
 end
 display(iter_result)
-plot(iter_result, start_idx=5)
+plot(iter_result, start_idx=10)
 ##-----------------------------------------------------------
-Threads.@spawn begin @time sleep(2.0); println("Task 1") end
-Threads.@spawn begin @time sleep(2.0); println("Task 2") end

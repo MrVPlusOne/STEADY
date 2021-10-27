@@ -142,8 +142,8 @@ simple_model((; σ_pos)) = (
         params = OrderedDict{Var, GDistr}(
             param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
             param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
-            param_vars.σ_θ => PertBeta(0.01, 5°, 60°),
-            param_vars.σ_v => PertBeta(0.01, 0.4, 1.0)
+            param_vars.σ_θ => Exponential(5°),
+            param_vars.σ_v => Exponential(0.2),
         )
     
         state_to_inputs(state, ctrl) = begin

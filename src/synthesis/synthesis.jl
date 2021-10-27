@@ -45,14 +45,22 @@ end
 
 function compile_motion_model(
     comps::NamedTuple,
-    (; shape_env, comp_env, sketch),
+    (; shape_env, comp_env, sketch, hide_type);
 )
     funcs = map(comp -> compile(comp, shape_env, comp_env; check_gradient=false), comps)
-    sketch_core = x -> map(f->f(x), funcs)
+    sketch_core = _build_sketch_core(funcs)
+    # TODO: add more type info to the wrapped func?
+    hide_type && (sketch_core = WrappedFunc(sketch_core))
     WrappedFunc(to_p_motion_model(sketch_core, sketch))
 end
 
-function to_p_motion_model(sketch_core::Function, (; state_to_inputs, outputs_to_state_dist))
+function _build_sketch_core(funcs)
+    x -> map(f->f(x), funcs)
+end
+
+function to_p_motion_model(
+    sketch_core::Function, (; state_to_inputs, outputs_to_state_dist),
+)
     (params::NamedTuple) -> (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
         local inputs = state_to_inputs(x, u)
         local prog_inputs = merge(inputs, params)

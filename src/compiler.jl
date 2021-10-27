@@ -28,7 +28,7 @@ struct WrappedFunc <: Function
     core::Function
 end
 
-(cf::WrappedFunc)(args) = cf.core(args)
+(cf::WrappedFunc)(args...) = cf.core(args...)
 
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
