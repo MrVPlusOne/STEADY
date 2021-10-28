@@ -26,6 +26,10 @@ noise_scale = 1.0
 true_system = MarkovSystem(x0_dist, true_motion_model, 
     Car2D.sensor_dist(landmarks; noise_scale))
 
+est_params = (; l1 = 0.75, τ1 = 0.5, σ_θ=0.4, σ_v=0.4)
+est_motion_model = to_p_motion_model(sketch_core, sketch)(est_params)
+est_system = MarkovSystem(x0_dist, est_motion_model, Car2D.sensor_dist(landmarks; noise_scale))
+
 x0 = (pos=@SVector[0.5, 0.5], θ=-5°, v=@SVector[0.25, 0.0])
 ex_data = simulate_trajectory(times, x0, true_system, Car2D.manual_control())
 obs_data = (; times, obs_frames, ex_data.observations, ex_data.controls)
@@ -37,17 +41,35 @@ log_score_float = (d,x) -> log_score(d, x, Float64)
 ##-----------------------------------------------------------
 # sample posterior using the correct dynamics
 # ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=50_000, n_trajs=100)
-ffbs_result = @time filter_smoother(true_system, obs_data, n_particles=500_000, n_trajs=100)
+ffbs_trajs = @time ThreadPools.bmap(1:9) do i 
+    r = filter_smoother(true_system, obs_data, 
+        n_particles=50_000, n_trajs=55, showprogress=i==1)
+    r.trajectories
+end |> ts -> reduce(vcat, ts)
 # map_result = @time map_trajectory(
 #     true_system, obs_data, ffbs_result.trajectories[2, :]; 
 #     optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
 # )
 let plt = plot()
-    Car2D.plot_trajectories!(ffbs_result.trajectories, linealpha=0.2, linecolor=2)
+    Car2D.plot_trajectories!(ffbs_trajs, linealpha=0.04, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
     # Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
     #     state_color=:red, state_alpha=0.6)
+    display("image/png", plt)
+end
+##-----------------------------------------------------------
+# test the PGAS sampler
+init_traj = ffbs_trajs[1, :]
+pgas_trajs = ThreadPools.bmap(1:9) do i
+    r = PGAS_smoother(est_system, obs_data, init_traj,
+        n_particles=500, n_trajs=55, n_thining=2, showprogress=i==1)
+    r.trajectories
+end |> ts -> reduce(vcat, ts)
+let plt = plot()
+    Car2D.plot_trajectories!(pgas_trajs, linealpha=0.04, linecolor=2)
+    Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
+        state_color=1, landmark_color=3)
     display("image/png", plt)
 end
 ##-----------------------------------------------------------
@@ -56,7 +78,7 @@ params_dist = params_distribution(sketch)
 check_params_logp(ex_data.states[1], x0_dist, true_params, params_dist)
 @time fit_dynamics_params(
     WrappedFunc(to_p_motion_model(sketch_core, sketch)),
-    ffbs_result.trajectories,
+    ffbs_trajs,
     x0_dist, params_dist,
     obs_data,
     rand(params_dist),
@@ -119,9 +141,8 @@ iter_result = let
         f_zero = get_component(comp_env, :zero)
         (der_vx=f_zero(v̂)/τ1, der_θ = f_zero(θ)/τ1,)
     end
-    params_guess = nothing # (mass=3.0, drag=0.8,)
 
-    @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess;
+    @time fit_dynamics_iterative(senum, obs_data, comps_guess, est_params;
         obs_model=true_system.obs_model,
         program_logp=prog_size_prior(0.2), fit_settings,
         max_iters=101,
