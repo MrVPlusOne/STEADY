@@ -18,7 +18,8 @@ car_model = Car2D.simple_model(true_σ)
 (; sketch, sketch_core) = car_model
 true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 
-vdata = Car2D.variable_data()
+x0 = (pos=@SVector[0.5, 0.5], θ=-5°, v=@SVector[0.25, 0.0])
+vdata = Car2D.variable_data(x0)
 x0_dist = init_state_distribution(vdata)
 
 landmarks = @SVector[@SVector[-1.0, 2.5], @SVector[6.0, -4.0], @SVector[-0.6, -1.0]]
@@ -30,7 +31,6 @@ est_params = (; l1 = 0.75, τ1 = 0.5, σ_θ=0.4, σ_v=0.4)
 est_motion_model = to_p_motion_model(sketch_core, sketch)(est_params)
 est_system = MarkovSystem(x0_dist, est_motion_model, Car2D.sensor_dist(landmarks; noise_scale))
 
-x0 = (pos=@SVector[0.5, 0.5], θ=-5°, v=@SVector[0.25, 0.0])
 ex_data = simulate_trajectory(times, x0, true_system, Car2D.manual_control())
 obs_data = (; times, obs_frames, ex_data.observations, ex_data.controls)
 @df ex_data.controls plot(times, [:v̂, :ϕ̂], label=["v̂" "ϕ̂"])
@@ -42,8 +42,8 @@ log_score_float = (d,x) -> log_score(d, x, Float64)
 # sample posterior using the correct dynamics
 # ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=50_000, n_trajs=100)
 ffbs_trajs = @time ThreadPools.bmap(1:9) do i 
-    r = filter_smoother(true_system, obs_data, 
-        n_particles=50_000, n_trajs=55, showprogress=i==1)
+    r = filter_smoother(est_system, obs_data, 
+        n_particles=5_000, n_trajs=55, showprogress=i==1)
     r.trajectories
 end |> ts -> reduce(vcat, ts)
 # map_result = @time map_trajectory(
@@ -51,7 +51,7 @@ end |> ts -> reduce(vcat, ts)
 #     optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
 # )
 let plt = plot()
-    Car2D.plot_trajectories!(ffbs_trajs, linealpha=0.04, linecolor=2)
+    Car2D.plot_trajectories!(ffbs_trajs, linealpha=0.06, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
     # Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
@@ -60,14 +60,14 @@ let plt = plot()
 end
 ##-----------------------------------------------------------
 # test the PGAS sampler
-init_traj = ffbs_trajs[1, :]
 pgas_trajs = ThreadPools.bmap(1:9) do i
-    r = PGAS_smoother(est_system, obs_data, init_traj,
-        n_particles=500, n_trajs=55, n_thining=2, showprogress=i==1)
+    init_traj = ffbs_trajs[i, :]
+    r = PGAS_smoother(true_system, obs_data, init_traj,
+        n_particles=50, n_trajs=50, n_thining=10, showprogress=i==1)
     r.trajectories
 end |> ts -> reduce(vcat, ts)
 let plt = plot()
-    Car2D.plot_trajectories!(pgas_trajs, linealpha=0.04, linecolor=2)
+    Car2D.plot_trajectories!(pgas_trajs, linealpha=0.06, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
     display("image/png", plt)

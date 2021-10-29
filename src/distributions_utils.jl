@@ -3,7 +3,7 @@ export SMvNormal, SMvUniform, SUniform, SNormal, CircularNormal
 export PertBeta, DistrTransform, OptionalDistr
 export score
 
-import Distributions: rand, logpdf, extrema
+import Distributions: rand, logpdf, extrema, mean
 import Bijectors: AbstractBijector, bijector
 import StatsFuns
 
@@ -105,6 +105,8 @@ logpdf(diter::DistrIterator, xs) = let
     end
     sum(map(logpdf, diter.core, xs))::Real
 end
+
+mean(diter::DistrIterator) = map(mean, diter.core)
 
 @generated function sum2_static(
     f, xs, ys, len::Val{N}
@@ -235,6 +237,9 @@ rand(rng::Random.AbstractRNG, d::SMvUniform) = let
 end
 
 logpdf(d::SMvUniform, xs) = sum(map(logpdf, d.uniforms, xs))
+
+mean(d::SMvUniform) = map(mean, d.uniforms)
+
 
 eltype(Normal(Dual(1.0)))
 function log_score(d::SMvUniform, xs, ::Type{T})::T where T
@@ -375,6 +380,8 @@ Base.show(io::IO, d::Rotate2dDistr) =
 forward_transform(d::Rotate2dDistr, x) = rotate2d(d.θ, x)
 inverse_transform(d::Rotate2dDistr, x) = rotate2d(-d.θ, x)
 
+mean(d::Rotate2dDistr) = rotate2d(d.θ, mean(d.core))
+
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.
 """
@@ -397,6 +404,8 @@ Base.show(io::IO, d::ShiftDistr) =
 
 forward_transform(d::ShiftDistr, x) = x + d.shift
 inverse_transform(d::ShiftDistr, x) = x - d.shift
+
+mean(d::ShiftDistr) = d.shift + mean(d.core)
 
 Base.:+(d::GDistr, x::Union{Real, AbstractVector}) = ShiftDistr(x, d) 
 Base.:+(x::Union{Real, AbstractVector}, d::GDistr) = ShiftDistr(x, d) 

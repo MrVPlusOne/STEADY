@@ -20,11 +20,11 @@ Loc_V = Var(:loc_v, ℝ, PUnits.Speed)
 Loc_Vx = Var(:loc_vx, ℝ, PUnits.Speed)
 Loc_Vy = Var(:loc_vy, ℝ, PUnits.Speed)
 
-variable_data() = VariableData(;
+variable_data(x0) = VariableData(;
     states = OrderedDict{Var, GDistr}(
-        Pos => SMvNormal(@SVector[0., 0.], 5.),
-        Orientation => SUniform(-π, π),
-        Vel => SMvNormal(@SVector[0., 0.], @SVector[0.5, 0.01]),
+        Pos => SMvNormal(x0.pos, 5.),
+        Orientation => CircularNormal(x0.θ, 15°),
+        Vel => SMvNormal(x0.v, @SVector[0.5, 0.01]),
     ),
     action_vars = [U_Speed, U_Turn],
 )

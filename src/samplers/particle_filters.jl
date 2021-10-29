@@ -35,7 +35,8 @@ Run particle filters forward in time
 """
 function forward_filter(
     system::MarkovSystem{X}, (; times, obs_frames, controls, observations), n_particles; 
-    resample_threshold::Float64 = 0.5, score_f=logpdf, showprogress=true,
+    resample_threshold::Float64 = 0.5, score_f=logpdf, 
+    use_auxiliary_proposal::Bool=true, showprogress=true,
 ) where X
     @assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
@@ -43,46 +44,63 @@ function forward_filter(
     
     particles = Matrix{X}(undef, N, T)
     ancestors = Matrix{Int}(undef, N, T)
-    log_weights = Matrix{Float64}(undef, N, T) # unnormalized log weights
-    weights = Matrix{Float64}(undef, N, T) # normalized probabilities
 
     particles[:, 1] .= (rand(x0_dist) for _ in 1:N)
     ancestors[:, :] .= 1:N
     
-    current_lw = fill(-log(N), N) # log weights at the current time step
-    current_w = exp.(current_lw)
+    log_weights = fill(-log(N), N) # log weights at the current time step
+    weights = exp.(log_weights)
     log_obs::Float64 = 0.0  # estimation of the log observation likelihood
     bins_buffer = zeros(Float64, N) # used for systematic resampling
+    if use_auxiliary_proposal
+        aux_weights = zeros(Float64, N)
+        aux_log_weights = zeros(Float64, N)
+        aux_indices = collect(1:N)
+    end
 
     progress = Progress(T-1, desc="forward_filter", output=stdout, enabled=showprogress)
     for t in 1:T
-        if t > 1 
-            # optionally resample
-            if effective_particles(current_w) < N * resample_threshold
-                indices = @views(ancestors[:, t-1])
-                systematic_resample!(indices, current_w, bins_buffer)
-                current_lw .= -log(N)
-                particles[:, t-1] = particles[indices, t-1]
-            end
-            Δt = times[t] - times[t-1]
-            u = controls[t-1]
-            for i in 1:N
-                particles[i, t] = rand(motion_model(particles[i, t-1], u, Δt))
-            end
-        end
-
         if t in obs_frames
             for i in 1:N
-                current_lw[i] += score_f(obs_model(particles[i, t]), observations[t])
+                log_weights[i] += score_f(obs_model(particles[i, t]), observations[t])
+            end
+            log_z_t = logsumexp(log_weights)
+            log_weights .-= log_z_t
+            weights .= exp.(log_weights)
+            log_obs += log_z_t
+
+            # optionally resample
+            if effective_particles(weights) < N * resample_threshold
+                indices = @views(ancestors[:, t])
+                systematic_resample!(indices, weights, bins_buffer)
+                log_weights .= -log(N)
+                particles[:, t] = particles[indices, t]
             end
         end
 
-        log_z_t = logsumexp(current_lw)
-        current_lw .-= log_z_t
-        current_w .= exp.(current_lw)
-        log_weights[:, t] = current_lw
-        weights[:, t] = current_w
-        log_obs += log_z_t
+        if t < T
+            Δt = times[t+1] - times[t]
+            u = controls[t]
+            if use_auxiliary_proposal && (t+1) in obs_frames
+                # use the mean of the dynamics to predict observation likelihood and 
+                # resample particles accordingly
+                @inbounds for i in 1:N
+                    μ = mean(motion_model(particles[i, t], u, Δt))
+                    aux_log_weights[i] = score_f(obs_model(μ), observations[t+1])
+                end
+                aux_log_weights .-= logsumexp(aux_log_weights)
+                aux_weights .= exp.(aux_log_weights)
+                aux_indices .= 1:N
+                systematic_resample!(aux_indices, aux_weights, bins_buffer)
+                ancestors[:, t] = ancestors[aux_indices, t]
+                particles[:, t] = particles[aux_indices, t]
+                log_weights -= aux_log_weights[aux_indices]
+            end
+
+            @inbounds for i in 1:N
+                particles[i, t+1] = rand(motion_model(particles[i, t], u, Δt))
+            end
+        end
         next!(progress)
     end
 
@@ -97,11 +115,13 @@ Sample smooting trajecotries by tracking the ancestors of a particle filter.
 function filter_smoother(system, obs_data; 
     n_particles, n_trajs,
     resample_threshold=0.5, score_f=logpdf,
+    use_auxiliary_proposal::Bool=false,
     showprogress=true,
 )
     (; particles, log_weights, ancestors, log_obs) = forward_filter(
-        system, obs_data, n_particles; resample_threshold, score_f, showprogress)
-    traj_ids = systematic_resample(softmax(log_weights[:, end]), n_trajs)
+        system, obs_data, n_particles; resample_threshold, score_f, 
+        use_auxiliary_proposal, showprogress)
+    traj_ids = systematic_resample(softmax(log_weights), n_trajs)
     trajectories = particle_trajectories(particles, ancestors, traj_ids)
     (; trajectories, log_obs)
 end

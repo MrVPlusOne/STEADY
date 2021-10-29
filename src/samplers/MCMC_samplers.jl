@@ -79,19 +79,19 @@ end
 
 function PGAS_smoother(
     system::MarkovSystem{X}, obs_data, init_traj; 
-    n_particles, n_trajs, n_thining, resample_threshold=0.6,
+    n_particles, n_trajs, n_thining, n_burn_in=n_trajs, resample_threshold=0.6,
     showprogress=true,
 ) where X
     kernel = PGAS_kernel(system, obs_data; n_particles, resample_threshold)
     trajectories = Matrix{X}(undef, n_trajs, length(obs_data.times))
     state = init_traj
-    progress = Progress(n_trajs, desc="PGAS_smoother", enabled=showprogress, output=stdout)
-    for i in 1:n_trajs
+    progress = Progress(n_burn_in+n_trajs, desc="PGAS_smoother", enabled=showprogress, output=stdout)
+    for i in 1:n_burn_in+n_trajs
         for _ in 1:n_thining
             state = kernel(state)
         end
-        trajectories[i, :] = state
         next!(progress)
+        i > n_burn_in && (trajectories[i-n_burn_in, :] = state)
     end
     (; trajectories, state, log_obs=0.0) # doesn't support log_obs estimation
 end
