@@ -83,7 +83,7 @@ function PGAS_smoother(
     showprogress=true,
 ) where X
     kernel = PGAS_kernel(system, obs_data; n_particles, resample_threshold)
-    trajectories = Matrix{X}(undef, n_trajs, length(obs_data.times))
+    trajectories = Vector{X}[]
     state = init_traj
     progress = Progress(n_burn_in+n_trajs, desc="PGAS_smoother", enabled=showprogress, output=stdout)
     for i in 1:n_burn_in+n_trajs
@@ -91,7 +91,7 @@ function PGAS_smoother(
             state = kernel(state)
         end
         next!(progress)
-        i > n_burn_in && (trajectories[i-n_burn_in, :] = state)
+        i > n_burn_in && (push!(trajectories, state))
     end
     (; trajectories, state, log_obs=0.0) # doesn't support log_obs estimation
 end

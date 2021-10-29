@@ -320,7 +320,7 @@ const _distributed_work_ctx = Ref{Any}(nothing)
 - `f(ctx, x)`: the context-dependent task to be performed.
 """
 function parallel_map(f, xs, ctx;
-    progress::Progress,
+    progress::Progress=Progress(1, enabled=false),
     n_threads::Integer=Threads.nthreads(), 
     use_distributed::Bool=false,
 )

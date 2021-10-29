@@ -71,6 +71,12 @@ function data_log_score(
     p
 end
 
+function data_logp(
+    (; obs_model), (; times, obs_frames, observations), states,
+)
+    sum(logpdf(obs_model(states[t]), observations[t]) for t in obs_frames)
+end
+
 function total_log_score(system, obs_data, states, ::Type{T}) where T
     states_log_score(system, obs_data, states, T) + 
         data_log_score(system, obs_data, states, T)

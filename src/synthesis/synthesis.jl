@@ -37,7 +37,8 @@ end
 
 function check_params_logp(x0, x0_dist, params, params_dist)
     x0_logp = logpdf(x0_dist, x0)
-    isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.")
+    isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.\n 
+        x0=$x0, x0_dist=$x0_dist")
     params_logp = logpdf(params_dist, params)
     isfinite(params_logp) || error("params_logp = $params_logp, some value may be out of its support.")
     @info "params logp test passed."
@@ -259,4 +260,5 @@ end
 
 include("synthesis_utils.jl")
 include("deterministic_synthesis.jl")
+include("posterior_sampling.jl")
 include("probabilistic_synthesis.jl")

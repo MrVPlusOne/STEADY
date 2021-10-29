@@ -277,10 +277,10 @@ function plot_states!(
     end
 end
 
-plot_trajectories!(trajectories::AbstractMatrix; linealpha=0.2, linecolor=4) = begin
+plot_trajectories!(trajectories::Vector{<:Vector}; linealpha=0.2, linecolor=4) = begin
     xs, ys = Float64[], Float64[]
-    for tr in get_rows((x -> x.pos).(trajectories))
-        @unzip tr_xs, tr_ys = tr
+    for tr in trajectories
+        @unzip tr_xs, tr_ys = map(x -> x.pos, tr)
         append!(xs, tr_xs)
         append!(ys, tr_ys)
         push!(xs, NaN)

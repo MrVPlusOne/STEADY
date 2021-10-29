@@ -36,14 +36,19 @@ Run particle filters forward in time
 function forward_filter(
     system::MarkovSystem{X}, (; times, obs_frames, controls, observations), n_particles; 
     resample_threshold::Float64 = 0.5, score_f=logpdf, 
-    use_auxiliary_proposal::Bool=true, showprogress=true,
+    use_auxiliary_proposal::Bool=false, showprogress=true,
+    cache::Dict=Dict(),
 ) where X
     @assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
     (; x0_dist, motion_model, obs_model) = system
     
-    particles = Matrix{X}(undef, N, T)
-    ancestors = Matrix{Int}(undef, N, T)
+    particles::Matrix{X} = get!(cache, :particles) do 
+        Matrix{X}(undef, N, T) 
+    end
+    ancestors::Matrix{Int} = get!(cache, :ancestors) do 
+        Matrix{Int}(undef, N, T) 
+    end
 
     particles[:, 1] .= (rand(x0_dist) for _ in 1:N)
     ancestors[:, :] .= 1:N
@@ -94,7 +99,7 @@ function forward_filter(
                 systematic_resample!(aux_indices, aux_weights, bins_buffer)
                 ancestors[:, t] = ancestors[aux_indices, t]
                 particles[:, t] = particles[aux_indices, t]
-                log_weights -= aux_log_weights[aux_indices]
+                log_weights .-= @views aux_log_weights[aux_indices]
             end
 
             @inbounds for i in 1:N
@@ -117,10 +122,11 @@ function filter_smoother(system, obs_data;
     resample_threshold=0.5, score_f=logpdf,
     use_auxiliary_proposal::Bool=false,
     showprogress=true,
+    cache::Dict=Dict(),
 )
     (; particles, log_weights, ancestors, log_obs) = forward_filter(
         system, obs_data, n_particles; resample_threshold, score_f, 
-        use_auxiliary_proposal, showprogress)
+        use_auxiliary_proposal, cache, showprogress)
     traj_ids = systematic_resample(softmax(log_weights), n_trajs)
     trajectories = particle_trajectories(particles, ancestors, traj_ids)
     (; trajectories, log_obs)
@@ -132,7 +138,7 @@ out the ancestral lineages.
 """
 function particle_trajectories(
     particles::Matrix{P}, ancestors::Matrix{Int}, indices::Vector{Int},
-)::Matrix{P} where P
+)::Vector{Vector{P}} where P
     N, T = size(particles)
     indices = copy(indices)
     M = length(indices)
@@ -142,7 +148,7 @@ function particle_trajectories(
         indices .= ancestors[indices, t+1]
         trajs[:, t] = particles[indices, t]
     end
-    trajs
+    get_rows(trajs) |> collect
 end
 
 """

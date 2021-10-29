@@ -1,6 +1,7 @@
 ##-----------------------------------------------------------
 using Distributions
 using StatsPlots
+using DrWatson
 import Random
 
 StatsPlots.default(dpi=600, legend=:outerbottom)
@@ -18,7 +19,7 @@ car_model = Car2D.simple_model(true_σ)
 (; sketch, sketch_core) = car_model
 true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
 
-x0 = (pos=@SVector[0.5, 0.5], θ=-5°, v=@SVector[0.25, 0.0])
+x0 = (pos=@SVector[0.5, 0.5], θ=5°, v=@SVector[0.25, 0.0])
 vdata = Car2D.variable_data(x0)
 x0_dist = init_state_distribution(vdata)
 
@@ -40,18 +41,28 @@ end |> display
 log_score_float = (d,x) -> log_score(d, x, Float64)
 ##-----------------------------------------------------------
 # sample posterior using the correct dynamics
-# ffbs_result = @time ffbs_smoother(true_system, obs_data, n_particles=50_000, n_trajs=100)
-ffbs_trajs = @time ThreadPools.bmap(1:9) do i 
-    r = filter_smoother(est_system, obs_data, 
-        n_particles=5_000, n_trajs=55, showprogress=i==1)
-    r.trajectories
-end |> ts -> reduce(vcat, ts)
+particle_sampler = ParticleFilterSampler(
+    n_particles=50_000,
+    n_trajs=15,
+    n_runs=6,
+    n_threads=6,
+)
+@time ffbs_result = sample_posterior(particle_sampler, true_system, obs_data)
+ffbs_trajs = ffbs_result.trajectories
+@show to_measurement(ffbs_result.log_obs)
 # map_result = @time map_trajectory(
 #     true_system, obs_data, ffbs_result.trajectories[2, :]; 
 #     optim_options=Optim.Options(f_abstol=1e-4, iterations=1000),    
 # )
+function harmonic_estimator(trajectories)
+    lp = map(trajectories) do tr
+        -data_logp(true_system, obs_data, tr)
+    end |> logsumexp
+    -log(length(trajectories))-lp
+end
+harmonic_estimator(ffbs_trajs)
 let plt = plot()
-    Car2D.plot_trajectories!(ffbs_trajs, linealpha=0.06, linecolor=2)
+    Car2D.plot_trajectories!(ffbs_trajs, linealpha=0.2, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
     # Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
@@ -61,13 +72,17 @@ end
 ##-----------------------------------------------------------
 # test the PGAS sampler
 pgas_trajs = ThreadPools.bmap(1:9) do i
-    init_traj = ffbs_trajs[i, :]
+    init_traj = ffbs_trajs[i]
     r = PGAS_smoother(true_system, obs_data, init_traj,
-        n_particles=50, n_trajs=50, n_thining=10, showprogress=i==1)
+        n_particles=50, n_trajs=20, n_thining=20, showprogress=i==1)
     r.trajectories
 end |> ts -> reduce(vcat, ts)
+harmonic_estimator(pgas_trajs)
+pgas_datap = map(pgas_trajs) do tr
+    data_log_score(true_system, obs_data, tr, Float64)
+end |> to_measurement
 let plt = plot()
-    Car2D.plot_trajectories!(pgas_trajs, linealpha=0.06, linecolor=2)
+    Car2D.plot_trajectories!(pgas_trajs, linealpha=0.1, linecolor=2)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data, 
         state_color=1, landmark_color=3)
     display("image/png", plt)
@@ -113,7 +128,7 @@ fit_settings = DynamicsFittingSettings(;
 
 function iter_callback((; iter, trajectories, dyn_est))
     show_MAP = false
-    if iter <= 10 || mod1(iter, 5) == 1
+    if iter <= 10 || mod1(iter, 10) == 1
         if show_MAP
             @info "Computing trajectory MAP estimation..."
             local motion_model = dyn_est.p_motion_model(dyn_est.params)
@@ -144,11 +159,14 @@ iter_result = let
 
     @time fit_dynamics_iterative(senum, obs_data, comps_guess, est_params;
         obs_model=true_system.obs_model,
+        sampler=particle_sampler,
         program_logp=prog_size_prior(0.2), fit_settings,
-        max_iters=101,
+        max_iters=501,
         iteration_callback = iter_callback,
     )
 end
+
 display(iter_result)
-plot(iter_result, start_idx=10)
+plot_params(iter_result) |> display
+plot(iter_result, start_idx=10) |> display
 ##-----------------------------------------------------------
