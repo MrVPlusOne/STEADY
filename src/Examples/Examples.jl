@@ -1,6 +1,4 @@
-include("Car1D.jl")
-include("Car2D.jl")
-include("Rocket2D.jl")
+abstract type Scenario end
 
 export generate_data
 function generate_data(
@@ -45,3 +43,9 @@ function generate_data(
     SEDL.simulate(x₀, x′₀, f_x′′, params, should_stop, next_time_action!, record_state!)
     (;params, others, states, observations, actions, times)
 end
+
+include("scenario_utils.jl")
+include("Car1D.jl")
+include("Car2D.jl")
+include("Hovercraft2D.jl")
+include("Rocket2D.jl")

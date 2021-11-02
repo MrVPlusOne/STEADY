@@ -38,7 +38,6 @@ obs_data = (; times, obs_frames, ex_data.observations, ex_data.controls)
 let traj_p = plot(legend=:outerbottom, aspect_ratio=1.0)
     Car2D.plot_states!(ex_data.states, "truth"; landmarks, obs_data)
 end |> display
-log_score_float = (d,x) -> log_score(d, x, Float64)
 ##-----------------------------------------------------------
 # sample posterior using the correct dynamics
 particle_sampler = ParticleFilterSampler(

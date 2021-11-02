@@ -74,8 +74,7 @@ function plot_params(iter_result::IterativeSynthesisResult)
         plot(1:length(dh), ys, title=param_names[i], label="value")
         vline!(change_points, label="structure change", linestyle=:dash)
     end
-    W, H = 2, ceil(Int, N / 2)
-    plot(plts..., layout=(W, H), size=(400W, 300H), left_margin=1cm)
+    plot(plts..., layout=(N, 1), size=(400, 300N), left_margin=1cm)
 end
 
 """
@@ -101,6 +100,10 @@ function fit_dynamics_iterative(
 )
     (; vdata, sketch) = senum
     @assert keys(comps_guess) == tuple((v.name for v in sketch.outputs)...)
+    for (i, v) in enumerate(sketch.outputs)
+        @assert(v.type == comps_guess[i].type,
+            "comps_guess[$i] = $(comps_guess[i]) has the wrong type: $(comps_guess[i].type).")
+    end
 
     x0_dist = init_state_distribution(vdata)
     params_dist = params_distribution(sketch)
@@ -259,7 +262,7 @@ function fit_dynamics(
     params_dist = params_distribution(sketch)
     x0_dist = init_state_distribution(vdata)
 
-    (; evals_per_program, use_bijectors, n_threads, use_distributed) = fit_settings
+    (; evals_per_program, use_bijectors, n_threads, use_distributed, optim_options) = fit_settings
     
     compile_ctx = (; shape_env, comp_env, sketch, hide_type=!specialize_motion_model)
 
@@ -357,7 +360,8 @@ function fit_dynamics_params(
     optim_options::Optim.Options,
     use_bijectors=true,
 )
-    @assert isfinite(logpdf(params_dist, params_guess))
+    @assert(isfinite(logpdf(params_dist, params_guess)), 
+        "params_dist=$params_dist\nparams_guess=$params_guess")
 
     if use_bijectors
         p_bj = bijector(params_dist)

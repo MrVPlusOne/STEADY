@@ -26,6 +26,10 @@ function log_score(d::Distribution, x, ::Type{T})::T where T
     logpdf(d, x)
 end
 
+function log_score(d::Dirac, x, ::Type{T})::T where T
+    zero(T)
+end
+
 function log_score(d, x, tv::Val{T}) where T
     log_score(d, x, T)
 end
@@ -135,8 +139,8 @@ end
 function log_score_static(
      distributions, values, type::Val{T}, len::Val{N},
 ) where {T, N}
-    # sum(map((d, v) -> log_score(d, v, type) , distributions, values))
-    sum(map(logpdf, distributions, values))
+    sum(map((d, v) -> log_score(d, v, type) , distributions, values))
+    # sum(map((d, v) -> logpdf(d, v)::Real, distributions, values))
 end
 
 function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
@@ -271,6 +275,7 @@ Like a normal distribution, but always warp values to [0, 2π).
 struct CircularNormal{T1, T2} <: ContinuousUnivariateDistribution
     μ::T1
     σ::T2
+    CircularNormal(μ::T1, σ::T2) where {T1, T2} = new{T1, T2}(warp_angle(μ), σ)
 end
 Base.show(io::IO, ::Type{<:CircularNormal}) = print(io, "CircularNormal{...}")
 Base.show(io::IO, d::CircularNormal) = 
@@ -317,6 +322,11 @@ julia> od = OptionalDistr(0.5, Normal())
 struct OptionalDistr{R<:Real, Core<:GDistr} <: ExtDistr
     p::R
     core::Core
+    OptionalDistr(p::R, core::Core) where {R, Core} = begin
+        0 <= p <= 1 || throw(ArgumentError(
+            "The data probability p = $p. It should be between 0 and 1."))
+        new{R, Core}(p, core)
+    end
 end
 
 function rand(rng::AbstractRNG, d::OptionalDistr)

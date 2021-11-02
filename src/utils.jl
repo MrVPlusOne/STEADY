@@ -9,6 +9,7 @@ using ForwardDiff: Dual
 import LineSearches
 
 const Optional{X} = Union{X, Nothing}
+const AbsVec = AbstractVector
 
 specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
@@ -151,6 +152,9 @@ subtuple(xs::NamedTuple, keys::Tuple) = begin
     NamedTuple{keys}(map(k -> getfield(xs, k), keys))
 end
 
+"""
+Warp the given angle into the range [0, 2π].
+"""
 warp_angle(angle::Real) = let
     x = angle % 2π
     x < 0 ? x + 2π : x
@@ -290,6 +294,18 @@ A helper macro to find functions by name.
 """
 @generated function find_func(T, args...)
     return Expr(:splatnew, :T, :args)
+end
+
+"""
+Numerical integration based on the leap-frog step.
+`a_f(x, x′) -> a` is the acceleration function.
+"""
+function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
+    v_half = @. v + (Δt/2) * a 
+    x1 = @.(x + Δt * v_half)::X
+    a1 = a_f(x1, @.(v_half + (Δt/2) * a))::X
+    v1 = @.(v + (Δt/2) * (a + a1))::X
+    (x1, v1, a1)
 end
 
 ##-----------------------------------------------------------

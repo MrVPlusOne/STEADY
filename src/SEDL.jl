@@ -47,6 +47,7 @@ include("Examples/Examples.jl")
 include("tests.jl")
 
 if false
+    include("../scripts/hovercraft_example.jl")
     include("../scripts/car2d_example.jl")
     include("../scripts/iterate_example.jl")
     include("../scripts/test_synthesis.jl")

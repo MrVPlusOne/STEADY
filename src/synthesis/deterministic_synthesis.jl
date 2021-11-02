@@ -275,11 +275,3 @@ function simulate(
         record_state!(to_named(x, x′))
     end
 end
-
-function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
-    v_half = @. v + (Δt/2) * a 
-    x1 = @.(x + Δt * v_half)::X
-    a1 = a_f(x1, @.(v_half + (Δt/2) * a))::X
-    v1 = @.(v + (Δt/2) * (a + a1))::X
-    (x1, v1, a1)
-end

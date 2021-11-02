@@ -105,6 +105,7 @@ module PUnits
 
     const Angle = unitless
     const AngularSpeed = Angle / Time
+    const AngularAcceleration = AngularSpeed / Time
 end
 
 export PType
@@ -117,6 +118,8 @@ struct PType
     unit::PUnit
 end
 )
+
+(s::PShape)(unit::PUnit) = PType(s, unit)
 
 Base.show(io::IO, v::PType) = begin
     (; shape, unit) = v
@@ -231,7 +234,7 @@ end
 
 Base.:*(e1::TAST, e2::TAST) = begin
     @assert e1.type.shape == e2.type.shape
-    Call(:*, (e1, e2), e1.type.unit * e2.type.unit)
+    Call(:*, (e1, e2), PType(e1.type.shape, e1.type.unit * e2.type.unit))
 end
 
 Base.:/(e1::TAST, e2::TAST) = begin
