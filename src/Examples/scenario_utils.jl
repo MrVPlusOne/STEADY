@@ -1,16 +1,19 @@
 using Interpolations: LinearInterpolation
+using DrWatson
+import REPL
+using REPL.TerminalMenus
 
 function landmark_readings(
     (; pos, θ), landmarks; sensor_range, σ_range, σ_bearing,
-    range_falloff=1.0, bearing_only=true,
-)
+    range_falloff=1.0, bearing_only::Val{bo}=Val(true),
+) where {bo}
     DistrIterator(map(landmarks) do l
         l::AbstractVector
         rel = l - pos
         dis = norm_R2(rel)
         angle = atan(rel[2], rel[1]) - θ
         bearing = CircularNormal(angle, σ_bearing)
-        core = if bearing_only
+        core = if bo
             (; bearing)
         else
             range = Normal(dis, σ_range)
@@ -43,7 +46,7 @@ function plot_2d_scenario!(
     marker_len=0.1, state_color=1, landmark_color=2, state_alpha=1.0,
 )
     (; obs_frames, observations) = obs_data
-    arrow_style = arrow(:closed, 0.001, 1.0)
+    arrow_style = arrow(:open, :head, 0.001, 1.0)
     let
         @unzip xs, ys = map(x -> x.pos, states)
         plot!(xs, ys, label="Position ($name)", aspect_ratio=1.0; 
@@ -90,9 +93,22 @@ function plot_2d_trajectories!(
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha)
 end
 
+struct ScenarioSetup{
+    A<:AbsVec{Float64}, B<:AbsVec{Int}, 
+    X<:NamedTuple, Ctrl<:Function,
+}
+    times::A
+    obs_frames::B
+    x0::X
+    controller::Ctrl
+end
+
 function run_scenario(
-    scenario::Scenario, true_params::NamedTuple, x0::NamedTuple, controller::Function; 
-    times, obs_frames, comp_env::ComponentEnv, comps_guess, params_guess,
+    scenario::Scenario, true_params::NamedTuple, 
+    setups::Vector{<:ScenarioSetup};
+    save_dir,
+    comp_env::ComponentEnv, comps_guess, params_guess,
+    n_fit_trajs=15,
     max_ast_size=6,
     optim_options = Optim.Options(
         f_abstol=1e-4,
@@ -101,57 +117,82 @@ function run_scenario(
     ),
     max_iters=501,
 )
-    vdata = variable_data(scenario, x0)
-    x0_dist = init_state_distribution(vdata)
+    if isdir(save_dir) 
+        @warn("The save_dir '$save_dir' already exists.")
+        # menu = RadioMenu(["yes", "no"], pagesize=3)
+        # choice = request("Empty the save_dir and proceed?", menu)
+        choice = "yes" # TODO: make this work for the REPL
+        if choice == "yes"
+            rm(save_dir, recursive=true)
+        else
+            error("Aborted.")
+        end
+    end
+    mkdir(save_dir)
+
+    truth_path = mkdir(joinpath(save_dir, "ground_truth"))
+
+    vdata = variable_data(scenario)
     sketch = dynamics_sketch(scenario)
     sketch_core = dynamics_core(scenario)
     true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
     obs_dist = observation_dist(scenario)
+    params_dist = params_distribution(sketch)
 
-    true_system = MarkovSystem(x0_dist, true_motion_model, obs_dist)
+    @info("Generating simulation data...")
+    @unzip true_systems, ex_data_list, obs_data_list, traj_plts = map(enumerate(setups)) do (i, setup)
+        (; times, obs_frames, x0, controller) = setup
+        x0_dist = initial_state_dist(scenario, x0)
+        true_system = MarkovSystem(x0_dist, true_motion_model, obs_dist)
+        ex_data = simulate_trajectory(times, x0, true_system, controller)
+        obs_data = 
+            (; times, obs_frames, ex_data.observations, ex_data.controls, x0_dist)
+        traj_p = let 
+            plot(legend=:outerbottom, aspect_ratio=1.0, title="Run $i")
+            plot_scenario!(scenario, ex_data.states, obs_data, "truth";
+                state_color=1, landmark_color=3)
+        end
+        fig_path=joinpath(truth_path, "run_$i.svg")
+        savefig(traj_p, fig_path)
+        display(traj_p)
+        (true_system, ex_data, obs_data, traj_p)
+    end
 
     @info("Enumerating programs...")
     pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
     shape_env = ℝenv()
     senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
     display(senum)
-
-    @info("Generating simulation data...")
-    ex_data = simulate_trajectory(times, x0, true_system, controller)
-    obs_data = (; times, obs_frames, ex_data.observations, ex_data.controls)
-
-    let traj_p = plot(legend=:outerbottom, aspect_ratio=1.0)
-        plot_scenario!(scenario, ex_data.states, obs_data, "truth"; 
-            state_color=1, landmark_color=3)
-    end |> display
-
+    
     @info("Sampling posterior using the correct dynamics...")
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
-        n_trajs=12,
-        n_runs=6,
-        n_threads=6,
+        n_trajs=100,
     )
-    @time ffbs_result = sample_posterior(particle_sampler, true_system, obs_data)
+    @time ffbs_result = sample_posterior_parallel(particle_sampler, true_systems, obs_data_list)
     ffbs_trajs = ffbs_result.trajectories
-    let plt = plot()
-        plot_trajectories!(scenario, ffbs_trajs, "true posterior", linealpha=0.2, linecolor=2)
-        plot_scenario!(scenario, ex_data.states, obs_data, "truth"; 
+    for i in 1:length(true_systems)
+        true_states = ex_data_list[i].states
+        x0_dist = true_systems[i].x0_dist
+
+        plt = plot(aspect_ratio=1.0, title="Run $i")
+        plot_trajectories!(scenario, ffbs_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
+        plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
             state_color=1, landmark_color=3)
-        # Car2D.plot_states!(map_result.states, "MAP states"; landmarks=[], obs_data, 
-        #     state_color=:red, state_alpha=0.6)
         display("image/png", plt)
+        fig_path=joinpath(truth_path, "posterior_$i.svg")
+        savefig(plt, fig_path)
+
+        check_params_logp(true_states[1], x0_dist, true_params, params_dist)
+        check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
     end
 
     @info("Testing parameters fitting with the correct dynamics structure...")
-    params_dist = params_distribution(sketch)
-    check_params_logp(ex_data.states[1], x0_dist, true_params, params_dist)
-    check_params_logp(ex_data.states[1], x0_dist, params_guess, params_dist)
     fit_r = @time fit_dynamics_params(
         WrappedFunc(to_p_motion_model(sketch_core, sketch)),
         ffbs_trajs,
-        x0_dist, params_dist,
-        obs_data,
+        params_dist,
+        obs_data_list,
         rand(params_dist),
         optim_options = Optim.Options(f_abstol=1e-4),
     )
@@ -162,22 +203,32 @@ function run_scenario(
         optim_options, evals_per_program=2, n_threads=Threads.nthreads())
     
     function iter_callback((; iter, trajectories, dyn_est))
-        if iter <= 10 || mod1(iter, 10) == 1
-            p = plot(title="iteration $iter")
-            plot_trajectories!(scenario, trajectories, "estimated", linealpha=0.2, linecolor=2)
-            plot_scenario!(scenario, ex_data.states, obs_data, "truth"; 
+        (iter <= 10 || mod1(iter, 10) == 1) || return
+
+        iter_path = mkdir(joinpath(save_dir, "iteration-$iter"))
+
+        for i in 1:length(true_systems)
+            true_states = ex_data_list[i].states
+            plt = plot(aspect_ratio=1.0, title="Run $i (iter=$iter)")
+            plot_trajectories!(scenario, trajectories[:, i], "estimated", linealpha=0.1, linecolor=2)
+            plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
                 state_color=1, landmark_color=3)
-            display("image/png", p)
+            fig_path=joinpath(iter_path, "posterior_$i.svg")
+            savefig(plt, fig_path)
+            i == 1 && display("image/png", plt) # only display the first one
         end
     end
 
-    iter_result = @time fit_dynamics_iterative(senum, obs_data, comps_guess, params_guess;
-        obs_model=true_system.obs_model,
+    iter_result = @time fit_dynamics_iterative(
+        senum, obs_data_list, comps_guess, params_guess;
+        obs_model=obs_dist,
         sampler=particle_sampler,
-        program_logp=prog_size_prior(0.2), fit_settings,
+        program_logp=prog_size_prior(0.5), 
+        n_fit_trajs,
+        fit_settings,
         max_iters,
         iteration_callback = iter_callback,
     )
     
-    (; ex_data, obs_data, iter_result)
+    (; ex_data_list, obs_data_list, iter_result)
 end

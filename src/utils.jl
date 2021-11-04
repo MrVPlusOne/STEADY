@@ -343,7 +343,7 @@ function parallel_map(f, xs, ctx;
     if use_distributed
         length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
         @everywhere SEDL._distributed_work_ctx[] = $ctx
-        f_task = x -> let ctx = _eval_ctx_prob[]
+        f_task = x -> let ctx = _distributed_work_ctx[]
             f(ctx, x)
         end
         try

@@ -27,7 +27,7 @@ end
 function Base.show(io::IO, iter_result::IterativeSynthesisResult; 
     first_rows::Int=5, max_rows::Int=15,
 )
-    let rows=[], step=(length(iter_result.dyn_history)-first_rows)÷max_rows
+    let rows=[], step=max((length(iter_result.dyn_history)-first_rows)÷max_rows, 1)
         for (i, (; comps, params)) in enumerate(iter_result.dyn_history)
             (i <= first_rows || i % step == 0) && push!(rows, (; i, comps, params))
         end
@@ -38,6 +38,9 @@ end
 propertynames(to_measurement([1,2,3]))
 function Plots.plot(iter_result::IterativeSynthesisResult; start_idx=1)
     (; logp_history, improve_pred_hisotry) = iter_result
+    @assert(length(logp_history) == length(improve_pred_hisotry)+1,
+        "$(length(logp_history)) != $(length(improve_pred_hisotry))+1")
+
     xs = start_idx:length(logp_history)
     mean_history = mean.(logp_history)
     std_history = std.(logp_history) .* 2
@@ -64,7 +67,7 @@ function _dynamics_change_points(iter_result::IterativeSynthesisResult)
     end |> map(x -> x+0.5)
 end
 
-function plot_params(iter_result::IterativeSynthesisResult)
+function plot_params(iter_result::IterativeSynthesisResult; left_margin=1.5cm)
     dh = iter_result.dyn_history
     change_points = _dynamics_change_points(iter_result)
     param_names = keys(dh[1].params)
@@ -74,25 +77,21 @@ function plot_params(iter_result::IterativeSynthesisResult)
         plot(1:length(dh), ys, title=param_names[i], label="value")
         vline!(change_points, label="structure change", linestyle=:dash)
     end
-    plot(plts..., layout=(N, 1), size=(400, 300N), left_margin=1cm)
+    plot(plts...; layout=(N, 1), size=(400, 300N), left_margin)
 end
 
 """
 Synthesize the dynamics using an Expectation Maximization-style loop.  
-
-## Arguments
-- `transition_dynamics((;x...,u...,params...,Δt), holes) -> distribution_of_x′`.
-- `obs_model(x) -> distribtion_of_y`.
-- `particle_smoother(stochastic_system, obs_data) -> sample_result`.
 """
 function fit_dynamics_iterative(
     senum::SynthesisEnumerationResult,
-    obs_data::NamedTuple{(:times, :obs_frames, :observations, :controls)},
+    obs_data_list::Vector{<:ObservationData},
     comps_guess::NamedTuple, 
     params_guess::Union{NamedTuple, Nothing};
     obs_model::Function,
     program_logp::Function,
     sampler::PosteriorSampler,
+    n_fit_trajs::Int, # the number of trajectories to use for fitting the dynamics
     iteration_callback = (data::NamedTuple{(:iter, :trajectories, :dyn_est)}) -> nothing,
     fit_settings::DynamicsFittingSettings = DynamicsFittingSettings(),
     max_iters::Int=100, n_quick_prune_keep=10,
@@ -105,14 +104,16 @@ function fit_dynamics_iterative(
             "comps_guess[$i] = $(comps_guess[i]) has the wrong type: $(comps_guess[i].type).")
     end
 
-    x0_dist = init_state_distribution(vdata)
     params_dist = params_distribution(sketch)
-    empty!(sampler)
+    sampler_states = [new_state(sampler) for _ in obs_data_list]
 
     function sample_data((; p_motion_model, params))
         local mm = p_motion_model(params)
-        local system = MarkovSystem(x0_dist, mm, obs_model)
-        sample_posterior(sampler, system, obs_data)
+        local systems = map(obs_data_list) do obs_data
+            MarkovSystem(obs_data.x0_dist, mm, obs_model)
+        end
+        
+        sample_posterior_parallel(sampler, systems, obs_data_list, sampler_states)
     end
 
     dyn_est = let p_est = params_guess === nothing ? rand(params_dist) : params_guess
@@ -120,29 +121,31 @@ function fit_dynamics_iterative(
         (p_motion_model = compile_motion_model(comps_guess, compile_ctx), 
             params = p_est, comps = comps_guess)
     end
-    update_id = 1
     
     dyn_history, logp_history, improve_pred_hisotry = NamedTuple[], Vector{Float64}[], Float64[]
     n_structure_synthesis = n_structure_updates = 1
 
-    @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
+    try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         (; p_motion_model, params, comps) = dyn_est
         (; trajectories, log_obs) = sample_data(dyn_est)
-        trajectories::Vector{<:Vector}
+        trajectories::Matrix{<:Vector}
         log_prior = program_logp(comps) + logpdf(params_dist, params)
         log_p = log_prior .+ (log_obs::Vector{Float64})
 
         push!(dyn_history, dyn_est)
         push!(logp_history, log_p)
 
-        score_old = let
-            system = (; motion_model=p_motion_model(params), x0_dist)
-            state_scores = states_log_score.(
-                Ref(system), Ref(obs_data), trajectories, Float64)
-            mean(state_scores) + log_prior
-        end
-
         iteration_callback((;iter, trajectories, dyn_est))
+        trajectories = trajectories[1:n_fit_trajs, :]
+        @show size(trajectories)
+
+        score_old = let
+            motion_model=p_motion_model(params)
+            state_scores = [sum(states_log_score.(
+                Ref(motion_model), Ref(obs_data_list[j]), trajectories[:, j], Float64))
+                for j in 1:length(obs_data_list)]
+            sum(state_scores) / size(trajectories, 1) + log_prior
+        end
 
         (iter == max_iters+1) && break
         
@@ -151,7 +154,8 @@ function fit_dynamics_iterative(
         comp_to_update = keys(comps)[update_id]
         @info "Iteration $iter started." comp_to_update
         p_structure_update = 
-            max(p_structure_update_min, n_structure_updates/n_structure_synthesis) |>
+            max(p_structure_update_min, 
+                length(comps) * n_structure_updates/n_structure_synthesis) |>
             x -> round(x, digits=3)
 
         if rand() < p_structure_update
@@ -160,10 +164,10 @@ function fit_dynamics_iterative(
             @time begin
                 all_comps = _candidate_comps(senum, mode)
                 # use the first trajectory to quickly prune away bad candidates
-                traj_subsets = trajectories[1:1]
+                traj_subsets = trajectories[1:1, 1:1]
                 params_map = Dict{NamedTuple, typeof(params)}()
                 fit_r = fit_dynamics(
-                    all_comps, senum, traj_subsets, obs_data, params_map;
+                    all_comps, senum, traj_subsets, obs_data_list[1:1], params_map;
                     program_logp, fit_settings=@set(fit_settings.evals_per_program=1),
                     specialize_motion_model=false,
                 )
@@ -177,7 +181,7 @@ function fit_dynamics_iterative(
                 comps ∈ subset_comps || push!(subset_comps, comps)
                 params_map = Dict{NamedTuple, typeof(params)}(comps => params)
                 fit_r = fit_dynamics(
-                    subset_comps, senum, trajectories, obs_data, params_map;
+                    subset_comps, senum, trajectories, obs_data_list, params_map;
                     program_logp, fit_settings, specialize_motion_model=true,
                 )
             end
@@ -192,7 +196,7 @@ function fit_dynamics_iterative(
             structure_updated = false
             params_map = Dict{NamedTuple, typeof(params)}(comps => params)
             fit_r = fit_dynamics(
-                [dyn_est.comps], senum, trajectories, obs_data, params_map;
+                [dyn_est.comps], senum, trajectories, obs_data_list, params_map;
                 program_logp, fit_settings, specialize_motion_model=true,
             )
             show_top_results(fit_r, 1)
@@ -205,8 +209,17 @@ function fit_dynamics_iterative(
         @info("Iteration $iter finished.", 
             log_p=to_measurement(log_p), improve_pred, 
             p_structure_update, structure_updated)
-    end
-    empty!(sampler)
+    end # end for
+    catch exception
+        @warn "Synthesis early stopped by exception."
+        for (exc, bt) in Base.catch_stack()
+            showerror(stdout, exc, bt)
+            println(stdout)
+        end
+    end # end try block
+    iter_final = length(improve_pred_hisotry)
+    dyn_history = dyn_history[1:iter_final+1]
+    logp_history = logp_history[1:iter_final+1]
     IterativeSynthesisResult(dyn_est, dyn_history, logp_history, improve_pred_hisotry)
 end
 
@@ -249,8 +262,8 @@ end
 function fit_dynamics(
     all_comps::Vector{<:NamedTuple},
     senum::SynthesisEnumerationResult,
-    particles::Vector{<:Vector},
-    (; times, observations, controls), 
+    particles::Matrix{<:Vector{<:NamedTuple}},
+    obs_data_list::Vector{<:ObservationData}, 
     params_map::Dict; 
     program_logp::Function,
     fit_settings::DynamicsFittingSettings,
@@ -260,15 +273,14 @@ function fit_dynamics(
     (; vdata, sketch, shape_env, comp_env) = senum
 
     params_dist = params_distribution(sketch)
-    x0_dist = init_state_distribution(vdata)
 
     (; evals_per_program, use_bijectors, n_threads, use_distributed, optim_options) = fit_settings
     
     compile_ctx = (; shape_env, comp_env, sketch, hide_type=!specialize_motion_model)
 
     ctx = (; compile_ctx, 
-        particles, x0_dist, params_dist, program_logp, optim_options, 
-        obs_data=(; times, controls, observations), specialize_motion_model,
+        particles, params_dist, program_logp, optim_options, 
+        obs_data_list, specialize_motion_model,
         params_map, use_bijectors, evals_per_program)
 
     progress = Progress(length(all_comps), desc="fit_dynamics", 
@@ -317,7 +329,7 @@ function evaluate_dynamics(ctx, comps)
 end
 
 function evaluate_dynamics_once(ctx, comps, p_motion_model::Function, params_guess)
-    (; particles, x0_dist, params_dist, program_logp, obs_data) = ctx
+    (; particles, params_dist, program_logp, obs_data_list) = ctx
     (; use_bijectors, optim_options) = ctx
     
     function failed(info::String)
@@ -327,7 +339,7 @@ function evaluate_dynamics_once(ctx, comps, p_motion_model::Function, params_gue
     try
         local (; value, time) = @ltimed fit_dynamics_params(
             p_motion_model, particles, 
-            x0_dist, params_dist, obs_data, params_guess; 
+            params_dist, obs_data_list, params_guess; 
             use_bijectors, optim_options)
 
         !isnan(value.f_final) || return failed("logp = NaN.")
@@ -353,13 +365,14 @@ end
 """
 function fit_dynamics_params(
     p_motion_model::WrappedFunc,
-    trajectories::Vector{<:Vector},
-    x0_dist, params_dist,
-    obs_data, 
+    trajectories::Matrix{<:Vector},
+    params_dist,
+    obs_data_list::Vector{<:ObservationData}, 
     params_guess::NamedTuple; 
     optim_options::Optim.Options,
     use_bijectors=true,
 )
+    @assert length(obs_data_list) == size(trajectories, 2)
     @assert(isfinite(logpdf(params_dist, params_guess)), 
         "params_dist=$params_dist\nparams_guess=$params_guess")
 
@@ -380,12 +393,12 @@ function fit_dynamics_params(
         values
     end
 
-    function state_liklihood(system, ::Type{T})::T where T
+    function state_liklihood(motion_model, ::Type{T})::T where T
         local r::T = 0.0
-        for tr in trajectories
-            r += states_log_score(system, obs_data, tr, T)
+        for j in 1:size(trajectories, 2), i in 1:size(trajectories, 1)
+            r += states_log_score(motion_model, obs_data_list[j], trajectories[i, j], T)
         end
-        r /= length(trajectories)
+        r /= size(trajectories, 1)
     end
 
     # Maximize the EM objective
@@ -394,8 +407,7 @@ function fit_dynamics_params(
         all(map(isfinite, params)) || return Inf
         local prior = log_score(params_dist, params, T)
         motion_model = p_motion_model(params)
-        local sys_new = (; motion_model, x0_dist)
-        local likelihood = state_liklihood(sys_new, T)
+        local likelihood = state_liklihood(motion_model, T)
         
         -(likelihood + prior)
     end

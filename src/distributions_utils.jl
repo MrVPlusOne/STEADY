@@ -285,13 +285,11 @@ extrema(::CircularNormal) = (0.0, 2π)
 rand(rng::AbstractRNG, d::CircularNormal) = 
     warp_angle(rand(rng, truncated(Normal(0.0, d.σ), -π, π)) + d.μ)
 logpdf(d::CircularNormal, x) = let
-    (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
 function log_score(d::CircularNormal, x, ::Type{T})::T where T
-    (0 <= x <= 2π) || return -Inf
     dis = warp_angle(x - d.μ)
     dis = min(dis, 2π-dis)
     log_score(Normal(0.0, d.σ), dis, T)

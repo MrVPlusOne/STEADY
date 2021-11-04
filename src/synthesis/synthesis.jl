@@ -2,6 +2,8 @@ using ProgressMeter: Progress, next!, @showprogress, progress_pmap
 using Distributed
 
 const TimeSeries{T} = Vector{T}
+const ObservationData = 
+    NamedTuple{(:times, :obs_frames, :observations, :controls, :x0_dist)}
 
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
 """
@@ -37,11 +39,10 @@ end
 
 function check_params_logp(x0, x0_dist, params, params_dist)
     x0_logp = logpdf(x0_dist, x0)
-    isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.\n 
-        x0=$x0, x0_dist=$x0_dist")
+    isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.\n
+        x0=$x0,\nx0_dist=$x0_dist")
     params_logp = logpdf(params_dist, params)
     isfinite(params_logp) || error("params_logp = $params_logp, some value may be out of its support.")
-    @info "params logp test passed."
 end
 
 function compile_motion_model(
@@ -82,26 +83,13 @@ function sample_rand_inputs(sketch::DynamicsSketch, n::Integer)
 end
 
 export VariableData
-"""
-## Fields
-- `states`: maps each state variable (e.g. `position`) to the distribution of its initial 
-value.
-- `action_vars`: a vector holding the action variables.
-"""
+
 struct VariableData{system_order}
-    states::OrderedDict{Var, <:GDistr}  
-    action_vars::Vector{Var}
     state_vars::Vector{Var}
+    action_vars::Vector{Var}
 end
 
-function VariableData(;
-    states::OrderedDict{Var, <:GDistr},
-    action_vars::Vector{Var},
-)
-    state_vars::Vector{Var} = keys(states) |> collect
-    VariableData{1}(states, action_vars, state_vars)
-end
-
+#TODO: fix this
 function VariableData(
     ::Val{order};
     states::OrderedDict{Var, <:NTuple{order, GDistr}},
@@ -119,11 +107,6 @@ function VariableData(
         states = OrderedDict(new_states),
         action_vars,
     )
-end
-
-init_state_distribution(vdata::VariableData) = begin
-    (; state_vars) = vdata
-    DistrIterator((;(s.name => vdata.states[s] for s in state_vars)...))
 end
 
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin

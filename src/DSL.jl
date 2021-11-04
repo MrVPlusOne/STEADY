@@ -232,6 +232,10 @@ Base.:-(e1::TAST, e2::TAST) = begin
     Call(:-, (e1, e2), e1.type)
 end
 
+Base.:-(e1::TAST) = begin
+    Call(:neg, (e1,), e1.type)
+end
+
 Base.:*(e1::TAST, e2::TAST) = begin
     @assert e1.type.shape == e2.type.shape
     Call(:*, (e1, e2), PType(e1.type.shape, e1.type.unit * e2.type.unit))

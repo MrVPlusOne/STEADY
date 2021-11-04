@@ -10,7 +10,7 @@ struct MarkovSystem{X, X0_Dist, Motion, ObsM}
     obs_model::ObsM
 end
 
-MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A,B,C} = begin
+MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A<:GDistr,B,C} = begin
     X = typeof(rand(x0_dist))
     MarkovSystem{X, A, B, C}(x0_dist, motion_model, obs_model)
 end
@@ -49,7 +49,7 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
 end
 
 function states_log_score(
-    (; x0_dist, motion_model), (;times, controls), states, ::Type{T}
+    motion_model::Function, (;times, controls, x0_dist), states, ::Type{T},
 )::T where T
     p::T = log_score(x0_dist, states[1], T)
     for i in 1:length(states)-1
@@ -61,7 +61,7 @@ function states_log_score(
 end
 
 function data_log_score(
-    (; obs_model), (; times, obs_frames, observations), states, ::Type{T}
+    obs_model::Function, (; times, obs_frames, observations), states, ::Type{T}
 )::T where T
     p::T = 0.0
     for t in obs_frames
@@ -78,8 +78,8 @@ function data_logp(
 end
 
 function total_log_score(system, obs_data, states, ::Type{T}) where T
-    states_log_score(system, obs_data, states, T) + 
-        data_log_score(system, obs_data, states, T)
+    states_log_score(system.motion_model, obs_data, states, T) + 
+        data_log_score(system.obs_model, obs_data, states, T)
 end
 
 function log_softmax(x::AbstractArray{<:Real})
@@ -100,8 +100,8 @@ function map_trajectory(
     
     function loss(vec::AbstractVector{T})::T where T
         local traj = structure_from_vec(traj_guess, vec)
-        local total_score = states_log_score(system, obs_data, traj, T) + 
-            data_log_score(system, obs_data, traj, T)
+        local total_score = states_log_score(system.motion_model, obs_data, traj, T) + 
+            data_log_score(system.obs_model, obs_data, traj, T)
         -total_score
     end
 

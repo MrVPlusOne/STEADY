@@ -4,33 +4,33 @@ using StatsPlots
 using DrWatson
 import Random
 
-StatsPlots.default(dpi=600, legend=:outerbottom)
+StatsPlots.default(dpi=300, legend=:outerbottom)
 ##-----------------------------------------------------------
 # generate data
 landmarks = @SVector[
-    @SVector[-1.0, 2.5], @SVector[0.5, -1.0],
-    @SVector[7.0, -6.0], @SVector[13.0, -7.5]]
+    @SVector[-1.0, 2.5], @SVector[1.0, -1.0],
+    @SVector[8.0, -5.5], @SVector[16.0, -7.5]]
 scenario = HovercraftScenario(;landmarks)
-times = collect(0.0:0.1:12)
+times = collect(0.0:0.1:14)
 obs_frames = 1:5:length(times)
 true_params = (; 
-    mass = 1.5, drag_x = 0.02, drag_y=0.05, rot_mass=1.5, rot_drag=0.07, sep=0.81,
+    mass = 1.5, drag_x = 0.035, drag_y=0.1, rot_mass=1.5, rot_drag=0.07, sep=0.81,
     σ_v=0.04, σ_ω=0.03)
 params_guess = (; 
-    mass = 1.65, drag_x = 0.025, drag_y=0.056, rot_mass=1.66, rot_drag=0.09, sep=0.87,
+    mass = 1.65, drag_x = 0.04, drag_y=0.1, rot_mass=1.66, rot_drag=0.09, sep=0.87,
     σ_v=0.1, σ_ω=0.1)
-x0 = (pos=@SVector[0.5, 0.5], vel=@SVector[0.25, 0.0], θ=0°, ω=0.0)
 
 function manual_control()
+    pert(x) = x + 0.1randn()
     @unzip times, ul_seq, ur_seq = [
         (t=0.0, ul=0.0, ur=0.0),
-        (t=0.5, ul=1.0, ur=0.4),
-        (t=2.0, ul=0.0, ur=0.0),
-        (t=3.0, ul=0.5, ur=0.5),
-        (t=5.0, ul=1.1, ur=0.5),        
-        (t=6.0, ul=0.0, ur=0.0),        
-        (t=9.0, ul=0.5, ur=1.0),   
-        (t=11.0, ul=0.0, ur=0.4),     
+        (t=pert(0.5), ul=pert(1.0), ur=pert(0.4)),
+        (t=pert(2.0), ul=0.0, ur=0.0),
+        (t=pert(3.0), ul=pert(0.5), ur=pert(0.5)),
+        (t=pert(5.0), ul=pert(1.1), ur=pert(0.5)),        
+        (t=pert(6.0), ul=0.0, ur=0.0),        
+        (t=pert(9.0), ul=pert(0.5), ur=pert(1.0)),   
+        (t=pert(11.0), ul=0.0, ur=pert(0.4)),     
         (t=12.0, ul=0.0, ur=0.0),     
         (t=15.0, ul=0.0, ur=0.0),
     ]
@@ -41,24 +41,61 @@ function manual_control()
     end
 end
 
+n_runs = 6
+n_fit_trajs = 15
+setups = map(1:n_runs) do i 
+    x0 = (
+        pos=@SVector[0.5+randn(), 0.5+randn()], 
+        vel=@SVector[0.25+0.3randn(), 0.0+0.2randn()], 
+        θ=randn()°, 
+        ω=0.2randn(),
+    )
+    ScenarioSetup(times, obs_frames, x0, manual_control())
+end
+
 comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
 # components_special_functions!(comp_env, can_grow=true)
 
 comps_guess = let 
     vars = variables(scenario)
-    (; ul, mass, rot_mass, sep) = vars
+    (; ul, mass, rot_mass, sep, loc_vx, drag_x, loc_vy, drag_y, ω, rot_drag) = vars
     f_zero = get_component(comp_env, :zero)
+    # see if it stays with this correct dynamics
+    # (f_x=-loc_vx * drag_x, f_y=-loc_vy * drag_y, f_θ = -ω * rot_drag,)
     (f_x=f_zero(ul), f_y=f_zero(ul), f_θ = f_zero(ul) * sep,)
 end
-##-----------------------------------------------------------
+##--------------------------------------F---------------------
 Random.seed!(123)
-scenario_result = run_scenario(scenario, true_params, x0, manual_control(); 
-    times, obs_frames, comp_env, comps_guess, params_guess, max_iters=150)
+scenario_result = run_scenario(scenario, true_params, setups; 
+    save_dir=datadir("sims/hovercraft"),
+    comp_env, comps_guess, params_guess, n_fit_trajs, max_iters=250)
 
 iter_result = scenario_result.iter_result
 display(iter_result)
 plot_params(iter_result) |> display
 plot(iter_result, start_idx=1) |> display
 ##-----------------------------------------------------------
+function map_sketch_inputs(f::Function, sketch, ex_data, true_params)
+    (; state_to_inputs, outputs_to_state_dist) = sketch
+    (; states, controls) = ex_data
+    map(zip(states, controls)) do (x, u)
+        inputs = state_to_inputs(x, u)
+        prog_inputs = merge(inputs, true_params)
+        f(prog_inputs)
+    end
+end
 
+function core_stats(input)
+    (; loc_vx, loc_vy, ω, ul, ur, mass, drag_x, drag_y, rot_mass, rot_drag) = input
+    f_x = drag_x * loc_vx
+    f_y = drag_y * loc_vy
+    f_θ = ω * rot_drag
+    (; ul, ur, f_x, f_y, f_θ)
+end
+
+core_outputs = map_sketch_inputs(core_stats, dynamics_sketch(scenario), 
+    scenario_result.ex_data_list[1], true_params)
+
+@df DataFrame(core_outputs) plot(times, [:ul :ur :f_x :f_y :f_θ])
+##-----------------------------------------------------------
