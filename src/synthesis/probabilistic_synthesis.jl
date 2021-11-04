@@ -160,14 +160,13 @@ function fit_dynamics_iterative(
 
         if rand() < p_structure_update
             n_structure_synthesis += 1
-            println("Use the first trajectory to perform quick pruning...")
+            println("Use fewer trajectories to perform quick pruning...")
             @time begin
                 all_comps = _candidate_comps(senum, mode)
-                # use the first trajectory to quickly prune away bad candidates
-                traj_subsets = trajectories[1:1, 1:1]
+                traj_subsets = trajectories[1:1, :]
                 params_map = Dict{NamedTuple, typeof(params)}()
                 fit_r = fit_dynamics(
-                    all_comps, senum, traj_subsets, obs_data_list[1:1], params_map;
+                    all_comps, senum, traj_subsets, obs_data_list, params_map;
                     program_logp, fit_settings=@set(fit_settings.evals_per_program=1),
                     specialize_motion_model=false,
                 )

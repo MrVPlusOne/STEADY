@@ -116,6 +116,7 @@ function run_scenario(
         time_limit=10.0,
     ),
     max_iters=501,
+    skip_tests=false,
 )
     if isdir(save_dir) 
         @warn("The save_dir '$save_dir' already exists.")
@@ -164,39 +165,41 @@ function run_scenario(
     senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
     display(senum)
     
-    @info("Sampling posterior using the correct dynamics...")
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
         n_trajs=100,
     )
-    @time ffbs_result = sample_posterior_parallel(particle_sampler, true_systems, obs_data_list)
-    ffbs_trajs = ffbs_result.trajectories
-    for i in 1:length(true_systems)
-        true_states = ex_data_list[i].states
-        x0_dist = true_systems[i].x0_dist
+    if !skip_tests
+        @info("Sampling posterior using the correct dynamics...")
+        @time ffbs_result = sample_posterior_parallel(particle_sampler, true_systems, obs_data_list)
+        ffbs_trajs = ffbs_result.trajectories
+        for i in 1:length(true_systems)
+            true_states = ex_data_list[i].states
+            x0_dist = true_systems[i].x0_dist
 
-        plt = plot(aspect_ratio=1.0, title="Run $i")
-        plot_trajectories!(scenario, ffbs_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
-        plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
-            state_color=1, landmark_color=3)
-        display("image/png", plt)
-        fig_path=joinpath(truth_path, "posterior_$i.svg")
-        savefig(plt, fig_path)
+            plt = plot(aspect_ratio=1.0, title="Run $i")
+            plot_trajectories!(scenario, ffbs_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
+            plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
+                state_color=1, landmark_color=3)
+            display("image/png", plt)
+            fig_path=joinpath(truth_path, "posterior_$i.svg")
+            savefig(plt, fig_path)
 
-        check_params_logp(true_states[1], x0_dist, true_params, params_dist)
-        check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
+            check_params_logp(true_states[1], x0_dist, true_params, params_dist)
+            check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
+        end
+
+        @info("Testing parameters fitting with the correct dynamics structure...")
+        fit_r = @time fit_dynamics_params(
+            WrappedFunc(to_p_motion_model(sketch_core, sketch)),
+            ffbs_trajs,
+            params_dist,
+            obs_data_list,
+            rand(params_dist),
+            optim_options = Optim.Options(f_abstol=1e-4),
+        )
+        display(fit_r)
     end
-
-    @info("Testing parameters fitting with the correct dynamics structure...")
-    fit_r = @time fit_dynamics_params(
-        WrappedFunc(to_p_motion_model(sketch_core, sketch)),
-        ffbs_trajs,
-        params_dist,
-        obs_data_list,
-        rand(params_dist),
-        optim_options = Optim.Options(f_abstol=1e-4),
-    )
-    display(fit_r)
 
     @info("Performing iterative dynamics synthesis...")
     fit_settings = DynamicsFittingSettings(; 
@@ -205,7 +208,7 @@ function run_scenario(
     function iter_callback((; iter, trajectories, dyn_est))
         (iter <= 10 || mod1(iter, 10) == 1) || return
 
-        iter_path = mkdir(joinpath(save_dir, "iteration-$iter"))
+        iter_path = mkpath(joinpath(save_dir, "iterations/$iter"))
 
         for i in 1:length(true_systems)
             true_states = ex_data_list[i].states
@@ -231,4 +234,14 @@ function run_scenario(
     )
     
     (; ex_data_list, obs_data_list, iter_result)
+end
+
+function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
+    (; state_to_inputs, outputs_to_state_dist) = sketch
+    (; states, controls) = ex_data
+    map(zip(states, controls)) do (x, u)
+        inputs = state_to_inputs(x, u)
+        prog_inputs = merge(inputs, true_params)
+        f(prog_inputs)
+    end
 end

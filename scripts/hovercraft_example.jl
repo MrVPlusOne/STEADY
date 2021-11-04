@@ -5,16 +5,16 @@ using DrWatson
 import Random
 
 StatsPlots.default(dpi=300, legend=:outerbottom)
-##-----------------------------------------------------------
+
 # generate data
 landmarks = @SVector[
     @SVector[-1.0, 2.5], @SVector[1.0, -1.0],
-    @SVector[8.0, -5.5], @SVector[16.0, -7.5]]
+    @SVector[8.0, -5.5], @SVector[14.0, 6.0], @SVector[16.0, -7.5]]
 scenario = HovercraftScenario(;landmarks)
 times = collect(0.0:0.1:14)
 obs_frames = 1:5:length(times)
 true_params = (; 
-    mass = 1.5, drag_x = 0.035, drag_y=0.1, rot_mass=1.5, rot_drag=0.07, sep=0.81,
+    mass = 1.5, drag_x = 0.08, drag_y=0.12, rot_mass=1.5, rot_drag=0.07, sep=0.81,
     σ_v=0.04, σ_ω=0.03)
 params_guess = (; 
     mass = 1.65, drag_x = 0.04, drag_y=0.1, rot_mass=1.66, rot_drag=0.09, sep=0.87,
@@ -36,6 +36,9 @@ function manual_control()
     ]
     ul_f = LinearInterpolation(times, ul_seq)
     ur_f = LinearInterpolation(times, ur_seq)
+    if rand() < 0.6
+        ul_f, ur_f = ur_f, ul_f
+    end
     (s, obs, t::Float64) -> begin
         (ul = ul_f(t), ur = ur_f(t))
     end
@@ -65,27 +68,31 @@ comps_guess = let
     # (f_x=-loc_vx * drag_x, f_y=-loc_vy * drag_y, f_θ = -ω * rot_drag,)
     (f_x=f_zero(ul), f_y=f_zero(ul), f_θ = f_zero(ul) * sep,)
 end
-##--------------------------------------F---------------------
+##-----------------------------------------------------------
+# run the scenario
+save_dir=datadir("sims/hovercraft")
 Random.seed!(123)
 scenario_result = run_scenario(scenario, true_params, setups; 
-    save_dir=datadir("sims/hovercraft"),
-    comp_env, comps_guess, params_guess, n_fit_trajs, max_iters=250)
-
+    save_dir, comp_env, comps_guess, params_guess, n_fit_trajs, 
+    max_iters=250)
 iter_result = scenario_result.iter_result
 display(iter_result)
-plot_params(iter_result) |> display
-plot(iter_result, start_idx=1) |> display
 ##-----------------------------------------------------------
-function map_sketch_inputs(f::Function, sketch, ex_data, true_params)
-    (; state_to_inputs, outputs_to_state_dist) = sketch
-    (; states, controls) = ex_data
-    map(zip(states, controls)) do (x, u)
-        inputs = state_to_inputs(x, u)
-        prog_inputs = merge(inputs, true_params)
-        f(prog_inputs)
-    end
+# plot and save the results
+summary_dir=joinpath(save_dir, "summary") |> mkdir
+open(joinpath(summary_dir, "iter_result.txt"), "w") do io
+    println(io, iter_result)
 end
-
+let param_plt = plot_params(iter_result)
+    display(param_plt)
+    savefig(param_plt, joinpath(summary_dir, "params.svg"))
+end
+let perf_plot = plot(iter_result, start_idx=10)
+    display(perf_plot)
+    savefig(perf_plot, joinpath(summary_dir, "performance.svg"))
+end
+##-----------------------------------------------------------
+# analyze the drag strength
 function core_stats(input)
     (; loc_vx, loc_vy, ω, ul, ur, mass, drag_x, drag_y, rot_mass, rot_drag) = input
     f_x = drag_x * loc_vx
@@ -94,7 +101,7 @@ function core_stats(input)
     (; ul, ur, f_x, f_y, f_θ)
 end
 
-core_outputs = map_sketch_inputs(core_stats, dynamics_sketch(scenario), 
+core_outputs = transform_sketch_inputs(core_stats, dynamics_sketch(scenario), 
     scenario_result.ex_data_list[1], true_params)
 
 @df DataFrame(core_outputs) plot(times, [:ul :ur :f_x :f_y :f_θ])
