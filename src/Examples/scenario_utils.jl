@@ -130,6 +130,7 @@ function run_scenario(
         time_limit=10.0,
     ),
     max_iters=501,
+    only_simulation=false,
     skip_tests=false,
 )
     if isdir(save_dir) 
@@ -172,6 +173,7 @@ function run_scenario(
         display(traj_p)
         (true_system, ex_data, obs_data, traj_p)
     end
+    only_simulation && return
     
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,

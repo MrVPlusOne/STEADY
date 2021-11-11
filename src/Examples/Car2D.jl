@@ -9,9 +9,10 @@ struct Car2dScenario{N} <: Scenario
     car_dynamics::CarDynamics
 end)
 
-struct SimpleSlidingCar <: CarDynamics 
-
-end
+@kwdef(
+struct BicycleCarDyn <: CarDynamics 
+    front_drive::Bool=true
+end)
 
 variables(::Car2dScenario) = variable_tuple(
     # state
@@ -119,24 +120,48 @@ function dynamics_sketch(sce::Car2dScenario)
     )
 end
 
-function dynamics_core(sce::Car2dScenario)
-    input -> let
-        (; loc_vx, loc_vy, ω, steer) = input
-        (; fraction_max, v̂, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
+dynamics_core(sce::Car2dScenario) = dynamics_core(sce.car_dynamics)
+function dynamics_core(dyn::BicycleCarDyn)
+    if dyn.front_drive
+        input -> let
+            (; loc_vx, loc_vy, ω, steer) = input
+            (; fraction_max, v̂, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
 
-        # assume that the tires have negligible inertia
-        # and that only the front tires are driven
-        v_tire_front = rotate2d(steer, @SVector[v̂, 0])
-        v_loc_front = @SVector[loc_vx, loc_vy + len * ω]
-        fraction_front = unit_R2(v_tire_front - v_loc_front) * fraction_max
+            # assume that the tires have negligible inertia
+            # and that only the front tires are driven
+            v_tire_front = rotate2d(steer, @SVector[v̂, 0])
+            v_loc_front = @SVector[loc_vx, loc_vy + len * ω]
+            fraction_front = unit_R2(v_tire_front - v_loc_front) * fraction_max
 
-        vy_tire_rear = loc_vy - len * ω
-        fraction_rear = -sign(vy_tire_rear) * fraction_max
+            vy_tire_rear = loc_vy - len * ω
+            fraction_rear = -sign(vy_tire_rear) * fraction_max
 
-        f_x = fraction_front[1]
-        f_y = fraction_front[2] + fraction_rear
-        f_θ = (fraction_front[2] - fraction_rear) * len
-        (; f_x, f_y, f_θ)
+            f_x = fraction_front[1]
+            f_y = fraction_front[2] + fraction_rear
+            f_θ = (fraction_front[2] - fraction_rear) * len
+            (; f_x, f_y, f_θ)
+        end
+    else
+        input -> let
+            (; loc_vx, loc_vy, ω, steer) = input
+            (; fraction_max, v̂, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
+
+            # assume that the tires have negligible inertia
+            # and that only the rear tires are driven
+            v_tire_rear = @SVector[v̂, 0]
+            v_loc_rear = @SVector[loc_vx, loc_vy - len * ω]
+            fraction_rear = unit_R2(v_tire_rear - v_loc_rear) * fraction_max
+
+            front_fraction_dir = rotate2d(steer, @SVector[0.0, 1.0])
+            v_loc_front = @SVector[loc_vx, loc_vy + len * ω] 
+            fraction_front = 
+                -fraction_max * unit_R2(project_R2(v_loc_front, front_fraction_dir))
+
+            f_x = fraction_front[1] + fraction_rear[1]
+            f_y = fraction_front[2] + fraction_rear[2]
+            f_θ = (fraction_front[2] - fraction_rear[2]) * len
+            (; f_x, f_y, f_θ)
+        end
     end
 end
 
