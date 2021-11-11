@@ -274,3 +274,4 @@ mk_R2(x, y) = @SVector [x, y]
 norm_R2(x) = sqrt(x[1]^2 + x[2]^2+eps(x[1]))
 cross_R2(x, y) = x[1]*y[2] - x[2]*y[1]
 dir_R2(θ) = @SVector[cos(θ), sin(θ)]
+unit_R2(v) = v ./ norm_R2(v)

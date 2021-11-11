@@ -3,10 +3,24 @@ using DrWatson
 import REPL
 using REPL.TerminalMenus
 
-function landmark_readings(
-    (; pos, θ), landmarks; sensor_range, σ_range, σ_bearing,
-    range_falloff=1.0, bearing_only::Val{bo}=Val(true),
-) where {bo}
+"""
+Information related to 2D landmark observations.
+"""
+@kwdef(
+struct LandmarkInfo{bo, N}
+    landmarks::SVector{N,SVector{2, Float64}}
+    σ_range::Float64=1.0
+    σ_bearing::Float64=5°
+    sensor_range::Float64=10.0
+    "The width of the sigmoid function that gives the probability of having observations 
+    near the sensor range limit."
+    range_falloff::Float64=1.0
+    "If true, will only include bearing (angle) but not range (distrance) readings."
+    bearing_only::Val{bo}=Val(false)
+end)
+
+function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where bo
+    (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff) = linfo
     DistrIterator(map(landmarks) do l
         l::AbstractVector
         rel = l - pos
@@ -158,12 +172,6 @@ function run_scenario(
         display(traj_p)
         (true_system, ex_data, obs_data, traj_p)
     end
-
-    @info("Enumerating programs...")
-    pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
-    shape_env = ℝenv()
-    senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
-    display(senum)
     
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
@@ -186,7 +194,7 @@ function run_scenario(
             savefig(plt, fig_path)
 
             check_params_logp(true_states[1], x0_dist, true_params, params_dist)
-            check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
+            params_guess === nothing || check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
         end
 
         @info("Testing parameters fitting with the correct dynamics structure...")
@@ -200,6 +208,12 @@ function run_scenario(
         )
         display(fit_r)
     end
+
+    @info("Enumerating programs...")
+    pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
+    shape_env = ℝenv()
+    senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
+    display(senum)
 
     @info("Performing iterative dynamics synthesis...")
     fit_settings = DynamicsFittingSettings(; 

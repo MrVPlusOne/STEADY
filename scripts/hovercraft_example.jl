@@ -7,6 +7,7 @@ import Random
 StatsPlots.default(dpi=300, legend=:outerbottom)
 
 # generate data
+Random.seed!(123)
 landmarks = @SVector[
     @SVector[-1.0, 2.5], @SVector[1.0, -1.0],
     @SVector[8.0, -5.5], @SVector[14.0, 6.0], @SVector[16.0, -7.5]]
@@ -71,7 +72,6 @@ end
 ##-----------------------------------------------------------
 # run the scenario
 save_dir=datadir("sims/hovercraft")
-Random.seed!(123)
 scenario_result = run_scenario(scenario, true_params, setups; 
     save_dir, comp_env, comps_guess, params_guess, n_fit_trajs, 
     max_iters=250)

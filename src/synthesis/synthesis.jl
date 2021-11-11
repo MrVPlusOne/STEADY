@@ -84,7 +84,7 @@ end
 
 export VariableData
 
-struct VariableData{system_order}
+struct VariableData
     state_vars::Vector{Var}
     action_vars::Vector{Var}
 end

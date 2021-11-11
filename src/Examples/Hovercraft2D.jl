@@ -1,11 +1,9 @@
 """
-The 2D hovercraft scenario
+The 2D hovercraft scenario.
 """
 @kwdef(
 struct HovercraftScenario{N} <: Scenario
-    landmarks::SVector{N,SVector{2, Float64}}
-    noise_scale::Float64=1.0
-    sensor_range::Float64=10.0
+    landmark_info::LandmarkInfo{false, N}
 end)
 
 variables(::HovercraftScenario) = variable_tuple(
@@ -42,7 +40,7 @@ variables(::HovercraftScenario) = variable_tuple(
 function variable_data(scenario::HovercraftScenario) 
     (; pos, vel, θ, ω) = variables(scenario) 
     (; ul, ur) = variables(scenario) 
-    VariableData{1}(
+    VariableData(
         [pos, vel, θ, ω],
         [ul, ur],
     )
@@ -57,14 +55,10 @@ function initial_state_dist(::HovercraftScenario, x0)
     ))
 end
 
-"""
-Observations consist only of landmark range and bearing readings.
-"""
+
 function observation_dist(sce::HovercraftScenario)
-    (; landmarks, noise_scale) = sce
     state -> begin
-        lmr=landmark_readings(state, landmarks; bearing_only=Val{false}(),
-            sce.sensor_range, σ_range = noise_scale * 1.2, σ_bearing = noise_scale * 5°)
+        lmr=landmark_readings(state, sce.landmark_info)
         DistrIterator((landmarks = lmr,))
     end
 end
@@ -129,7 +123,7 @@ function dynamics_core(::HovercraftScenario)
 end
 
 function plot_scenario!(sce::HovercraftScenario, states, obs_data, name; plt_args...)
-    plot_2d_scenario!(states, obs_data, name; sce.landmarks, plt_args...)
+    plot_2d_scenario!(states, obs_data, name; sce.landmark_info.landmarks, plt_args...)
 end
 
 function plot_trajectories!(::HovercraftScenario, trajectories, name; plt_args...)

@@ -1,250 +1,149 @@
-module Car2D
+abstract type CarDynamics end
 
-using Distributions
-using ..SEDL
-using ..SEDL: ℝ, ℝ2, °, norm_R2, sigmoid, get_rows
-using ..SEDL: TimeSeries, SNormal, SMvNormal, SUniform, GDistr, landmark_readings
-using StatsPlots
-using StaticArrays
-using Interpolations: LinearInterpolation
+"""
+The 2D Car with sliding scenario
+"""
+@kwdef(
+struct Car2dScenario{N} <: Scenario
+    landmark_info::LandmarkInfo{true, N}
+    car_dynamics::CarDynamics
+end)
 
-const Pos = Var(:pos, ℝ2, PUnits.Length)
-const Orientation = Var(:θ, ℝ, PUnits.Angle)
-const Vel = Var(:v, ℝ2, PUnits.Speed)
-const AngularVel = Var(:ω, ℝ, PUnits.AngularSpeed)
+struct SimpleSlidingCar <: CarDynamics 
 
-const U_Speed = Var(:v̂, ℝ, PUnits.Speed)
-const U_Turn = Var(:ϕ̂, ℝ, PUnits.Angle)
+end
 
-const Loc_V = Var(:loc_v, ℝ, PUnits.Speed)
-const Loc_Vx = Var(:loc_vx, ℝ, PUnits.Speed)
-const Loc_Vy = Var(:loc_vy, ℝ, PUnits.Speed)
+variables(::Car2dScenario) = variable_tuple(
+    # state
+    :pos => ℝ2(PUnits.Length),
+    :vel => ℝ2(PUnits.Speed),
+    :θ => ℝ(PUnits.Angle),
+    :ω => ℝ(PUnits.AngularSpeed),
+    # control
+    :v̂ => ℝ(PUnits.Speed), # wheel speed
+    :steer => ℝ(PUnits.Angle), # steering angle
 
-variable_data(x0) = VariableData(;
-    states = OrderedDict{Var, GDistr}(
-        Pos => SMvNormal(x0.pos, 0.5),
-        Orientation => CircularNormal(x0.θ, 15°),
-        Vel => SMvNormal(x0.v, @SVector[0.5, 0.01]),
-    ),
-    action_vars = [U_Speed, U_Turn],
+    # sketch
+    :loc_vx => ℝ(PUnits.Speed),
+    :loc_vy => ℝ(PUnits.Speed),
+    :f_x => ℝ(PUnits.Force),
+    :f_y => ℝ(PUnits.Force),
+    :f_θ => ℝ(PUnits.Force * PUnits.Length),
+
+    # params
+    :mass => ℝ(PUnits.Mass),
+    :drag_x => ℝ(PUnits.Force / PUnits.Speed),
+    :drag_y => ℝ(PUnits.Force / PUnits.Speed),
+    :rot_mass => ℝ(PUnits.Force * PUnits.Length / PUnits.AngularAcceleration),
+    :rot_drag => ℝ(PUnits.Force * PUnits.Length / PUnits.AngularSpeed),
+    :sep => ℝ(PUnits.Length),
+    :len => ℝ(PUnits.Length),
+    :fraction_max => ℝ(PUnits.Force),
+    :σ_v => ℝ(PUnits.Speed),
+    :σ_ω => ℝ(PUnits.AngularSpeed),
 )
 
-"""
-Return the ranges and bearings to the landmarks, as well as the speed reading.
-"""
-function sensor_dist(landmarks; noise_scale=1.0) 
-    sensor_range=7.0
-    state -> begin 
-        (; pos, θ, v) = state
-        # v_forward = rotate2d(-θ, v)[1]
-        v_forward = v[1]
+function variable_data(scenario::Car2dScenario) 
+    (; pos, vel, θ, ω) = variables(scenario) 
+    (; v̂, steer) = variables(scenario) 
+    VariableData(
+        [pos, vel, θ, ω],
+        [v̂, steer],
+    )
+end
+
+function initial_state_dist(::Car2dScenario, x0)
+    DistrIterator((
+        pos=SMvNormal(x0.pos, 0.2), 
+        vel=SMvNormal(x0.vel, 0.2), 
+        θ=CircularNormal(x0.θ, 8°),
+        ω=Normal(x0.ω, 0.1),
+    ))
+end
+
+function observation_dist(sce::Car2dScenario)
+    state -> begin
+        lmr=landmark_readings(state, sce.landmark_info)
+        DistrIterator((landmarks = lmr,))
+    end
+end
+
+function dynamics_sketch(sce::Car2dScenario)
+    vars = variables(sce)
+    inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.steer, vars.v̂]
+    outputs = [vars.f_x, vars.f_y, vars.f_θ]
+
+    params = OrderedDict{Var, GDistr}(
+        vars.mass => PertBeta(1.0, 1.45, 1.9),
+        vars.drag_x => Uniform(0.0, 0.15),
+        vars.drag_y => Uniform(0.0, 0.15),
+        vars.rot_mass => InverseGamma(5, 5),
+        vars.rot_drag => Uniform(0.0, 0.2),
+        vars.sep => PertBeta(0.3, 0.45, 0.8),
+        vars.len => PertBeta(0.3, 0.4, 0.5),
+        vars.fraction_max => PertBeta(1.0, 3.0, 10.0),
+        vars.σ_v => InverseGamma(11, 1),
+        vars.σ_ω => InverseGamma(11, 1),
+    )
+
+    state_to_inputs(state, ctrl) = begin
+        (; pos, vel, θ, ω) = state
+        (; steer, v̂) = ctrl
+        loc_v = rotate2d(-θ, vel)
+        (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, steer, v̂)
+    end
+
+    outputs_to_state_dist((; f_x, f_y, f_θ), others, Δt) = begin
+        # TODO: think about how to use leap-frog with Brownian disturbance
+
+        (; pos, vel, θ, ω, mass, rot_mass, σ_v, σ_ω) = others
+
+        loc_ax = (f_x) / mass
+        loc_ay = f_y / mass
+        der_ω = (f_θ) / rot_mass
+        acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
         DistrIterator((
-            speed = Normal(v_forward, (0.2 + 0.1norm_R2(v)) * noise_scale),
-            landmarks = landmark_readings(state, landmarks; 
-                sensor_range, σ_range = noise_scale * 1.0, σ_bearing = noise_scale * 5°),
+            pos = Dirac(pos + vel * Δt),
+            vel = SMvNormal(vel + acc * Δt, σ_v * Δt),
+            θ = Dirac(θ + ω * Δt),
+            ω = Normal(ω + der_ω * Δt, σ_ω * Δt),
         ))
     end
+
+    DynamicsSketch(;
+        inputs, 
+        outputs,
+        params,
+        state_to_inputs,
+        outputs_to_state_dist,
+    )
 end
 
-function manual_control()
-    @unzip times, v̂_seq, ϕ̂_seq = [
-        (t=0.0, v̂=0.0, ϕ̂=0.0),
-        (t=1.0, v̂=1.5, ϕ̂=0.0),
-        (t=2.0, v̂=2.0, ϕ̂=10°),
-        (t=6.0, v̂=2.2, ϕ̂=-15°),
-        (t=12.0, v̂=1.0, ϕ̂=-5°),
-        (t=15.0, v̂=1.5, ϕ̂=0.0),
-    ]
-    v̂_f = LinearInterpolation(times, v̂_seq)
-    ϕ̂_f = LinearInterpolation(times, ϕ̂_seq)
-    (s, obs, t::Float64) -> begin
-        (v̂ = v̂_f(t), ϕ̂ = ϕ̂_f(t))
+function dynamics_core(sce::Car2dScenario)
+    input -> let
+        (; loc_vx, loc_vy, ω, steer) = input
+        (; fraction_max, v̂, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
+
+        # assume that the tires have negligible inertia
+        # and that only the front tires are driven
+        v_tire_front = rotate2d(steer, @SVector[v̂, 0])
+        v_loc_front = @SVector[loc_vx, loc_vy + len * ω]
+        fraction_front = unit_R2(v_tire_front - v_loc_front) * fraction_max
+
+        vy_tire_rear = loc_vy - len * ω
+        fraction_rear = -sign(vy_tire_rear) * fraction_max
+
+        f_x = fraction_front[1]
+        f_y = fraction_front[2] + fraction_rear
+        f_θ = (fraction_front[2] - fraction_rear) * len
+        (; f_x, f_y, f_θ)
     end
 end
 
-"""
-Infer angular motion, assuming no sliding.
-"""
-angle_only_model((; σ_pos, σ_v)) = (
-    sketch = let
-        param_vars = (
-            l1 = Var(:l1, ℝ, PUnits.Length),
-            τ1 = Var(:τ1, ℝ, PUnits.Time),
-            σ_θ = Var(:σ_θ, ℝ, PUnits.unitless),
-        )
-    
-        params = OrderedDict{Var, GDistr}(
-            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
-            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
-            param_vars.σ_θ => PertBeta(0.01, 5°, 60°),
-        )
-    
-        state_to_inputs(state, ctrl) = begin
-            (; pos, θ, v) = state
-            (; v̂, ϕ̂) = ctrl
-            loc_v = v
-            (; loc_vx=loc_v[1], θ, v̂, ϕ̂)
-        end
-    
-        outputs_to_state_dist((; der_θ), others, Δt) = begin
-            (; pos, θ, v, σ_θ, τ1, v̂) = others
-            loc_vx = v[1]
-            
-            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
-            dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)
-            der_vx = (v̂ - loc_vx) / τ1
-            dv_dist = SMvNormal(@SVector[der_vx * Δt, 0.], σ_v * Δt)
-            @assert σ_θ * Δt >= zero(σ_θ) "σ_θ = $σ_θ"
-            DistrIterator((
-                pos = pos + rotate2d(θ, dpos_dist),
-                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
-                v = v + dv_dist,
-            ))
-        end
-    
-        DynamicsSketch(;
-            inputs = [Loc_Vx, Orientation, U_Speed, U_Turn],
-            outputs = [
-                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
-            params = params,
-            state_to_inputs,
-            outputs_to_state_dist,
-        )
-    end,
-    sketch_core = input -> let
-        (; loc_vx, θ, v̂, ϕ̂, τ1, l1) = input
-        der_θ = tan(ϕ̂) * loc_vx / l1
-        (; der_θ)
-    end
-)
+function plot_scenario!(sce::Car2dScenario, states, obs_data, name; plt_args...)
+    plot_2d_scenario!(states, obs_data, name; sce.landmark_info.landmarks, plt_args...)
+end
 
-"""
-No sliding.
-"""
-simple_model((; σ_pos)) = (
-    sketch = let
-        param_vars = (
-            l1 = Var(:l1, ℝ, PUnits.Length),
-            τ1 = Var(:τ1, ℝ, PUnits.Time),
-            σ_θ = Var(:σ_θ, ℝ, PUnits.unitless),
-            σ_v = Var(:σ_v, ℝ, PUnits.Speed),
-        )
-    
-        params = OrderedDict{Var, GDistr}(
-            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
-            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
-            param_vars.σ_θ => Exponential(5°),
-            param_vars.σ_v => Exponential(0.2),
-        )
-    
-        state_to_inputs(state, ctrl) = begin
-            (; pos, θ, v) = state
-            (; v̂, ϕ̂) = ctrl
-            loc_v = v
-            (; loc_vx=loc_v[1], θ, v̂, ϕ̂)
-        end
-    
-        outputs_to_state_dist((; der_vx, der_θ), others, Δt) = begin
-            (; pos, θ, v, σ_v, σ_θ) = others
-            
-            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
-            dpos_dist = SMvNormal(@SVector[v[1] * Δt, 0.], σ_pos_scaled)
-            dv_dist = SMvNormal(@SVector[der_vx * Δt, 0.], σ_v * Δt)
-            DistrIterator((
-                pos = pos + rotate2d(θ, dpos_dist),
-                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
-                v = v + dv_dist,
-            ))
-        end
-    
-        DynamicsSketch(;
-            inputs = [Loc_Vx, Orientation, U_Speed, U_Turn],
-            outputs = [
-                Var(:der_vx, ℝ, PUnits.Acceleration), 
-                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
-            params = params,
-            state_to_inputs,
-            outputs_to_state_dist,
-        )
-    end,
-    sketch_core = input -> let
-        (; loc_vx, θ, v̂, ϕ̂, τ1, l1) = input
-        der_vx = (v̂ - loc_vx) / τ1
-        der_θ = tan(ϕ̂) * loc_vx / l1
-        (; der_vx, der_θ)
-    end
-)
-
-sliding_model(x0, (; σ_pos, σ_θ, σ_v)) = (
-    vdata = VariableData(;
-        states = OrderedDict{Var, GDistr}(
-            Pos => SMvNormal(x0.pos, 5.),
-            Vel => SMvNormal(x0.v, @SVector[0.5, 0.01]),
-            Orientation => CircularNormal(x0.θ, 15°),
-            AngularVel => CircularNormal(x0.ω, 15°),
-        ),
-        action_vars = [U_Speed, U_Turn],
-    ),
-    sketch = let
-        param_vars = (
-            l1 = Var(:l1, ℝ, PUnits.Length),
-            τ1 = Var(:τ1, ℝ, PUnits.Time),
-            a1 = Var(:a1, ℝ, PUnits.Acceleration), # linear sliding fraction
-            a2 = Var(:a2, ℝ, PUnits.Acceleration), # rotational sliding fraction
-            σ_θ = Var(:σ_θ, ℝ, PUnits.unitless),
-            σ_v = Var(:σ_v, ℝ, PUnits.Speed),
-        )
-    
-        params = OrderedDict{Var, GDistr}(
-            param_vars.l1 => PertBeta(0.2, 0.55, 0.8),
-            param_vars.τ1 => PertBeta(0.01, 1.0, 10.0),
-            param_vars.a1 => PertBeta(0.5, 1.0, 5.0),
-            param_vars.a2 => PertBeta(1.0, 2.0, 10.0),
-            param_vars.σ_θ => Exponential(5°),
-            param_vars.σ_v => Exponential(0.2),
-        )
-    
-        state_to_inputs(state, ctrl) = begin
-            (; pos, v, θ, ω) = state
-            (; v̂, ϕ̂) = ctrl
-            loc_v = rotate2d(-θ, v)
-            (; loc_vx=loc_v[1], loc_vy=loc_v[2], θ, ω, v̂, ϕ̂)
-        end
-    
-        outputs_to_state_dist((; der_vx, der_vy, der_θ, der_ω ), others, Δt) = begin
-            (; pos, θ, v) = others
-            
-            σ_pos_scaled = (norm_R2(v) .+ 0.1) .* (σ_pos * Δt)
-            dpos_dist = SMvNormal(@SVector[0.,0.], σ_pos_scaled)
-            dv_dist = SMvNormal(@SVector[der_vx * Δt, der_vy * Δt], σ_v * Δt)
-            DistrIterator((
-                pos = (pos + v * Δt) + rotate2d(θ, dpos_dist),
-                θ = Normal(θ + der_θ * Δt, σ_θ * Δt),
-                v = v + rotate2d(π/2, v * der_θ) + rotate2d(θ, dv_dist),
-            ))
-        end
-    
-        DynamicsSketch(;
-            inputs = [Loc_Vx, Loc_Vy, Orientation, U_Speed, U_Turn],
-            outputs = [
-                Var(:der_vx, ℝ, PUnits.Acceleration), 
-                Var(:der_vy, ℝ, PUnits.Acceleration), 
-                Var(:der_θ, ℝ, PUnits.AngularSpeed)],
-            params = params,
-            state_to_inputs,
-            outputs_to_state_dist,
-        )
-    end,
-    sketch_core = input -> let
-        (; loc_vx, loc_vy, θ, v̂, ϕ̂, τ1, l1, v1, a1) = input
-        der_vx = (v̂ - loc_vx) / τ1
-        der_θ = tan(ϕ̂) * loc_vx / l1
-        der_vy = -a1 * tanh(loc_vy / v1)
-        (; der_vx, der_vy, der_θ)
-    end
-)
-
-
-
-
-end # module
+function plot_trajectories!(::Car2dScenario, trajectories, name; plt_args...)
+    plot_2d_trajectories!(trajectories, name; plt_args...)
+end
