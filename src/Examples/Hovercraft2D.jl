@@ -63,10 +63,55 @@ function observation_dist(sce::HovercraftScenario)
     end
 end
 
+function sindy_sketch(sce::HovercraftScenario)
+    (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = variables(sce)
+    input_vars = [loc_vx, loc_vy, ω, θ, ul, ur]
+    output_vars = [loc_ax, loc_ay, der_ω]
+
+    inputs_transform(state, ctrl) = begin
+        local (; pos, vel, θ, ω) = state
+        local (; ul, ur) = ctrl
+        local loc_v = rotate2d(-θ, vel)
+        (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, ul, ur)
+    end
+
+    outputs_transform(state) = begin
+        local (; vel, θ, ω) = state
+        local R = rotation2D(θ)
+        out -> begin
+            local (; loc_ax, loc_ay, der_ω) = out
+            local acc = R * @SVector[loc_ax, loc_ay]
+            (
+                pos = vel,
+                vel = acc,
+                θ = ω,
+                ω = der_ω,
+            )
+        end
+    end
+
+    outputs_inv_transform(state) = begin
+        local (; θ) = state
+        local R = rotation2D(-θ)
+        der -> begin
+            local (; vel, ω) = der
+            local loc_acc = R * vel
+            (
+                loc_ax = loc_acc[1],
+                loc_ay = loc_acc[2],
+                der_ω = ω,
+            )
+        end
+    end
+
+    SindySketch(input_vars, output_vars, 
+        inputs_transform, outputs_transform, outputs_inv_transform)
+end
+
 function dynamics_sketch(sce::HovercraftScenario)
     vars = variables(sce)
     inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.ul, vars.ur]
-    outputs = [vars.f_x, vars.f_y, vars.f_θ]
+    outputs = [vars.loc_ax, vars.loc_ay, vars.der_ω]
 
     params = OrderedDict{Var, GDistr}(
         vars.mass => PertBeta(1.0, 1.45, 1.9),

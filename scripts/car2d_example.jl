@@ -90,4 +90,3 @@ scenario_result = run_scenario(scenario, true_params, setups;
     max_iters=1, only_simulation=true)
 iter_result = scenario_result.iter_result
 display(iter_result)
-##-----------------------------------------------------------

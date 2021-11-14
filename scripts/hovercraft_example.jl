@@ -11,7 +11,7 @@ Random.seed!(123)
 landmarks = @SVector[
     @SVector[-1.0, 2.5], @SVector[1.0, -1.0],
     @SVector[8.0, -5.5], @SVector[14.0, 6.0], @SVector[16.0, -7.5]]
-scenario = HovercraftScenario(;landmarks)
+scenario = HovercraftScenario(LandmarkInfo(; landmarks))
 times = collect(0.0:0.1:14)
 obs_frames = 1:5:length(times)
 true_params = (; 
@@ -61,22 +61,36 @@ comp_env = ComponentEnv()
 components_scalar_arithmatic!(comp_env, can_grow=true)
 # components_special_functions!(comp_env, can_grow=true)
 
-comps_guess = let 
-    vars = variables(scenario)
-    (; ul, mass, rot_mass, sep, loc_vx, drag_x, loc_vy, drag_y, ω, rot_drag) = vars
-    f_zero = get_component(comp_env, :zero)
-    # see if it stays with this correct dynamics
-    # (f_x=-loc_vx * drag_x, f_y=-loc_vy * drag_y, f_θ = -ω * rot_drag,)
-    (f_x=f_zero(ul), f_y=f_zero(ul), f_θ = f_zero(ul) * sep,)
-end
+# comps_guess = let 
+#     vars = variables(scenario)
+#     (; ul, mass, rot_mass, sep, loc_vx, drag_x, loc_vy, drag_y, ω, rot_drag) = vars
+#     f_zero = get_component(comp_env, :zero)
+#     # see if it stays with this correct dynamics
+#     # (f_x=-loc_vx * drag_x, f_y=-loc_vy * drag_y, f_θ = -ω * rot_drag,)
+#     (f_x=f_zero(ul), f_y=f_zero(ul), f_θ = f_zero(ul) * sep,)
+# end
 ##-----------------------------------------------------------
-# run the scenario
+# simulate the scenario
 save_dir=datadir("sims/hovercraft")
-scenario_result = run_scenario(scenario, true_params, setups; 
-    save_dir, comp_env, comps_guess, params_guess, n_fit_trajs, 
-    max_iters=250)
-iter_result = scenario_result.iter_result
-display(iter_result)
+true_motion_model = let 
+    sketch=dynamics_sketch(scenario) 
+    core=dynamics_core(scenario)
+    to_p_motion_model(core, sketch)(true_params)
+end
+sim_result = simulate_scenario(scenario, true_motion_model, setups; save_dir);
+##-----------------------------------------------------------
+# test fitting the trajectories
+let
+    shape_env = ℝenv()
+    sketch = sindy_sketch(scenario)
+    basis = [compile(e, shape_env, comp_env) for e in sketch.input_vars]
+    algorithm = SindySynthesis(basis, sketch, STLSOptimizer(0.01))
+    particle_sampler = ParticleFilterSampler(
+        n_particles=60_000,
+        n_trajs=100,
+    )
+    test_scenario(scenario, sim_result, algorithm, particle_sampler)
+end
 ##-----------------------------------------------------------
 # plot and save the results
 summary_dir=joinpath(save_dir, "summary") |> mkdir

@@ -21,7 +21,6 @@ struct IterativeSynthesisResult
     dyn_est::NamedTuple
     dyn_history::Vector{<:NamedTuple}
     logp_history::Vector{Vector{Float64}}
-    improve_pred_hisotry::Vector{Float64}
 end
 
 function Base.show(io::IO, iter_result::IterativeSynthesisResult; 
@@ -35,7 +34,7 @@ function Base.show(io::IO, iter_result::IterativeSynthesisResult;
         show(io, DataFrame(rows), truncate=100)
     end
 end
-propertynames(to_measurement([1,2,3]))
+
 function Plots.plot(iter_result::IterativeSynthesisResult; start_idx=1)
     (; logp_history, improve_pred_hisotry) = iter_result
     @assert(length(logp_history) == length(improve_pred_hisotry)+1,
@@ -427,3 +426,4 @@ function fit_dynamics_params(
     (; f_init, f_final, params, stats)
 end
 
+include("SINDy_synthesis.jl")

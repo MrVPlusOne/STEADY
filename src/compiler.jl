@@ -15,9 +15,11 @@ end
     convert(R, cf.f(args))::R
 end
 
+Base.show(io::IO, ::Type{<:CompiledFunc}) = print(io, "CompiledFunc{...}")
+
 function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
-    print(io, "CompiledFunction(ast=:($ast), julia=:($julia))")
+    print(io, "CompiledFunction(`$ast`)")
 end
 
 function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFunc) 

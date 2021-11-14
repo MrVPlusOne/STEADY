@@ -1,5 +1,3 @@
-abstract type Scenario end
-
 export generate_data
 function generate_data(
     x₀::NamedTuple,

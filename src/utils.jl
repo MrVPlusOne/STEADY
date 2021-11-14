@@ -19,6 +19,28 @@ count_len(iters) = count(_ -> true, iters)
 get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
 get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
+function normalize_transform(xs::AbstractVector)
+    σ = std(xs)
+    μ = mean(xs)
+    if σ ≈ zero(σ)
+        transformed = xs
+        μ = zero(μ)
+        σ = one(σ)
+    else
+        transformed = (xs .- μ) ./ σ
+    end
+    (; transformed, μ, σ)
+end
+
+"""
+Concat columns horizontally.
+"""
+hcatreduce(xs) = reduce(hcat, xs)
+"""
+Concat rows vertically.
+"""
+vcatreduce(xs) = reduce(vcat, xs)
+
 """
 ## Example
 ```jldoctest

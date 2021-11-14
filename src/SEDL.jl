@@ -51,9 +51,10 @@ if false
     include("../scripts/car2d_example.jl")
     include("../scripts/iterate_example.jl")
     include("../scripts/test_synthesis.jl")
-    include("../scripts/rocket_example.jl")
+    # include("../scripts/rocket_example.jl")
 
     include("../scripts/archived/car1d_example.jl")
+    include("../scripts/scratch.jl")
 end
 
 end # end module

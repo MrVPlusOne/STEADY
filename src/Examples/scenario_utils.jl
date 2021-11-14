@@ -3,6 +3,8 @@ using DrWatson
 import REPL
 using REPL.TerminalMenus
 
+abstract type Scenario end
+
 """
 Information related to 2D landmark observations.
 """
@@ -117,21 +119,32 @@ struct ScenarioSetup{
     controller::Ctrl
 end
 
-function run_scenario(
-    scenario::Scenario, true_params::NamedTuple, 
-    setups::Vector{<:ScenarioSetup};
-    save_dir,
-    comp_env::ComponentEnv, comps_guess, params_guess,
-    n_fit_trajs=15,
-    max_ast_size=6,
-    optim_options = Optim.Options(
+abstract type SynthesisAlgorithm end
+
+struct SindySynthesis <: SynthesisAlgorithm 
+    basis::Vector{<:CompiledFunc}
+    sketch::SindySketch
+    optimizer::STLSOptimizer
+end
+
+@kwdef(
+struct EnumerativeSynthesis <: SynthesisAlgorithm 
+    comp_env::ComponentEnv
+    comps_guess::NamedTuple
+    params_guess::NamedTuple
+    max_ast_size::Int=6
+    optim_options::Optim.Options = Optim.Options(
         f_abstol=1e-4,
         iterations=100,
         time_limit=10.0,
-    ),
-    max_iters=501,
-    only_simulation=false,
-    skip_tests=false,
+    )
+end)
+
+function simulate_scenario(
+    scenario::Scenario,
+    true_motion_model::Function,
+    setups::Vector{<:ScenarioSetup};
+    save_dir,
 )
     if isdir(save_dir) 
         @warn("The save_dir '$save_dir' already exists.")
@@ -147,13 +160,7 @@ function run_scenario(
     mkdir(save_dir)
 
     truth_path = mkdir(joinpath(save_dir, "ground_truth"))
-
-    vdata = variable_data(scenario)
-    sketch = dynamics_sketch(scenario)
-    sketch_core = dynamics_core(scenario)
-    true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
     obs_dist = observation_dist(scenario)
-    params_dist = params_distribution(sketch)
 
     @info("Generating simulation data...")
     @unzip true_systems, ex_data_list, obs_data_list, traj_plts = map(enumerate(setups)) do (i, setup)
@@ -173,36 +180,58 @@ function run_scenario(
         display(traj_p)
         (true_system, ex_data, obs_data, traj_p)
     end
-    only_simulation && return
-    
-    particle_sampler = ParticleFilterSampler(
-        n_particles=60_000,
-        n_trajs=100,
-    )
-    if !skip_tests
-        @info("Sampling posterior using the correct dynamics...")
-        @time ffbs_result = sample_posterior_parallel(particle_sampler, true_systems, obs_data_list)
-        ffbs_trajs = ffbs_result.trajectories
-        for i in 1:length(true_systems)
-            true_states = ex_data_list[i].states
-            x0_dist = true_systems[i].x0_dist
+    (; true_systems, ex_data_list, obs_data_list, truth_path, setups)
+end
 
-            plt = plot(aspect_ratio=1.0, title="Run $i")
-            plot_trajectories!(scenario, ffbs_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
-            plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
-                state_color=1, landmark_color=3)
-            display("image/png", plt)
-            fig_path=joinpath(truth_path, "posterior_$i.svg")
-            savefig(plt, fig_path)
+function test_scenario(
+    scenario::Scenario,
+    (; true_systems, ex_data_list, obs_data_list, truth_path, setups),
+    algorithm::SynthesisAlgorithm,
+    particle_sampler::ParticleFilterSampler,
+)
+    @info("Sampling posterior using the correct dynamics...")
+    @time sampler_result = sample_posterior_parallel(particle_sampler, true_systems, obs_data_list)
+    post_trajs = sampler_result.trajectories
+    for i in 1:length(true_systems)
+        true_states = ex_data_list[i].states
+        x0_dist = true_systems[i].x0_dist
 
-            check_params_logp(true_states[1], x0_dist, true_params, params_dist)
-            params_guess === nothing || check_params_logp(true_states[1], x0_dist, params_guess, params_dist)
+        plt = plot(aspect_ratio=1.0, title="Run $i")
+        plot_trajectories!(scenario, post_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
+        plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
+            state_color=1, landmark_color=3)
+        display("image/png", plt)
+        fig_path=joinpath(truth_path, "posterior_$i.svg")
+        savefig(plt, fig_path)
+    end
+
+    if algorithm isa SindySynthesis
+        @info("Synthesizing from true posterior using SINDy...")
+        (; basis, sketch, optimizer) = algorithm
+        inputs, outputs = @time construct_inputs_outputs(post_trajs, obs_data_list, sketch)
+        @show size(outputs)
+        dynamic_comps = @time fit_dynamics_sindy(basis, inputs, outputs, optimizer)
+        @assert length(sketch.output_vars) == length(dynamic_comps)
+        dyn_est = OrderedDict(zip(sketch.output_vars, dynamic_comps))
+        display(dyn_est)
+    elseif algorithm isa EnumerativeSynthesis
+        (; params_guess) = algorithm
+        @info("Testing parameters fitting with the correct dynamics structure...")
+        sketch = dynamics_sketch(scenario)
+        sketch_core = dynamics_core(scenario)
+        # true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
+        params_dist = params_distribution(sketch)
+
+        let
+            x0_dist = obs_data_list[1].x0_dist
+            x0 = setups[1].x0
+            check_params_logp(x0, x0_dist, true_params, params_dist)
+            check_params_logp(x0, x0_dist, params_guess, params_dist)
         end
 
-        @info("Testing parameters fitting with the correct dynamics structure...")
         fit_r = @time fit_dynamics_params(
             WrappedFunc(to_p_motion_model(sketch_core, sketch)),
-            ffbs_trajs,
+            post_trajs,
             params_dist,
             obs_data_list,
             rand(params_dist),
@@ -210,7 +239,21 @@ function run_scenario(
         )
         display(fit_r)
     end
+    nothing
+end
 
+function synthesize_scenario(
+    scenario::Scenario,
+    algorithm::EnumerativeSynthesis,
+    (; true_systems, ex_data_list, obs_data_list, truth_path);
+    n_fit_trajs=15,
+    particle_sampler = ParticleFilterSampler(
+        n_particles=60_000,
+        n_trajs=100,
+    ),
+    max_iters=501,
+)
+    (; comp_env) = algorithm
     @info("Enumerating programs...")
     pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
     shape_env = ℝenv()
@@ -220,7 +263,7 @@ function run_scenario(
     @info("Performing iterative dynamics synthesis...")
     fit_settings = DynamicsFittingSettings(; 
         optim_options, evals_per_program=2, n_threads=Threads.nthreads())
-    
+
     function iter_callback((; iter, trajectories, dyn_est))
         (iter <= 10 || mod1(iter, 10) == 1) || return
 
@@ -248,7 +291,7 @@ function run_scenario(
         max_iters,
         iteration_callback = iter_callback,
     )
-    
+
     (; ex_data_list, obs_data_list, iter_result)
 end
 

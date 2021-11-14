@@ -352,12 +352,18 @@ function log_score(d::OptionalDistr, x)
     end
 end
 
+struct GenericSamplable{F}
+    rand_f::F
+end
+
+rand(s::GenericSamplable) = s.rand_f()
+
 """
 Perform a bijective transformation to a distribution to obtain a new one.
 Should implement the following
-- `forward_transform(::DistrMap, x) -> y`: performs the forward transformation to a sample.
-- `inverse_transform(::DistrMap, y) -> x`: performs the inverse transformation to a sample.
-- `DistrMap.core::GDistr`: get the underlying distribution being transformed.
+- `forward_transform(::DistrTransform, x) -> y`: performs the forward transformation to a sample.
+- `inverse_transform(::DistrTransform, y) -> x`: performs the inverse transformation to a sample.
+- `DistrTransform.core::GDistr`: get the underlying distribution being transformed.
 """
 abstract type DistrTransform <: ExtDistr end
 
@@ -370,6 +376,19 @@ logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
 
 log_score(d::DistrTransform, x, ::Type{T}) where T = 
     log_score(d.core, inverse_transform(d, x), T)::T
+
+struct GenericDistrTransform{C<:GDistr, F<:Function, B<:Function} <: DistrTransform
+    core::C
+    transform::F
+    inv_transform::B
+end
+
+Base.show(io::IO, ::Type{<:GenericDistrTransform}) = 
+    print(io, "GenericDistrTransform{...}")
+
+forward_transform(d::GenericDistrTransform, x) = d.transform(x)
+inverse_transform(d::GenericDistrTransform, x) = d.inv_transform(x)
+
 
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.
