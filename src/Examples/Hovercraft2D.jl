@@ -114,7 +114,8 @@ function sindy_core(
     (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env)
-    cp = lexpr -> compile(to_TAST(lexpr), ℝenv(), comp_env)
+    # cp = lexpr -> compile(to_TAST(lexpr), ℝenv(), comp_env)
+    cp = identity
     (
         loc_ax = GaussianComponent(cp(
             LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 

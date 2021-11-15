@@ -12,6 +12,19 @@ struct DynamicsFittingSettings
     n_threads::Int=6
 end)
 
+@kwdef(
+struct EnumerativeSynthesis <: SynthesisAlgorithm 
+    comp_env::ComponentEnv
+    comps_guess::NamedTuple
+    params_guess::NamedTuple
+    max_ast_size::Int=6
+    optim_options::Optim.Options = Optim.Options(
+        f_abstol=1e-4,
+        iterations=100,
+        time_limit=10.0,
+    )
+end)
+
 compute_avg_score(scores, avg_window, iter) = let
     start = max(iter - avg_window, 1)
     mean(scores[start:iter])
@@ -425,5 +438,3 @@ function fit_dynamics_params(
     stats = (converged=Optim.converged(sol), iterations=Optim.iterations(sol))
     (; f_init, f_final, params, stats)
 end
-
-include("SINDy_synthesis.jl")

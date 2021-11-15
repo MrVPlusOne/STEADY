@@ -119,26 +119,6 @@ struct ScenarioSetup{
     controller::Ctrl
 end
 
-abstract type SynthesisAlgorithm end
-
-struct SindySynthesis <: SynthesisAlgorithm 
-    basis::Vector{<:CompiledFunc}
-    sketch::SindySketch
-    optimizer::STLSOptimizer
-end
-
-@kwdef(
-struct EnumerativeSynthesis <: SynthesisAlgorithm 
-    comp_env::ComponentEnv
-    comps_guess::NamedTuple
-    params_guess::NamedTuple
-    max_ast_size::Int=6
-    optim_options::Optim.Options = Optim.Options(
-        f_abstol=1e-4,
-        iterations=100,
-        time_limit=10.0,
-    )
-end)
 
 function simulate_scenario(
     scenario::Scenario,
@@ -190,7 +170,7 @@ function test_scenario(
     particle_sampler::ParticleFilterSampler,
 )
     @info("Sampling posterior using the correct dynamics...")
-    sampler_result = sample_posterior_parallel(
+    @time sampler_result = sample_posterior_parallel(
         particle_sampler, true_systems, obs_data_list)
     post_trajs = sampler_result.trajectories
     for i in 1:length(true_systems)
@@ -247,8 +227,9 @@ end
 
 function synthesize_scenario(
     scenario::Scenario,
-    algorithm::EnumerativeSynthesis,
-    (; true_systems, ex_data_list, obs_data_list, truth_path);
+    (; true_systems, ex_data_list, obs_data_list, truth_path),
+    syn_alg::SynthesisAlgorithm,
+    comps_guess;
     n_fit_trajs=15,
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
@@ -256,18 +237,7 @@ function synthesize_scenario(
     ),
     max_iters=501,
 )
-    (; comp_env) = algorithm
-    @info("Enumerating programs...")
-    pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
-    shape_env = ℝenv()
-    senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
-    display(senum)
-
-    @info("Performing iterative dynamics synthesis...")
-    fit_settings = DynamicsFittingSettings(; 
-        optim_options, evals_per_program=2, n_threads=Threads.nthreads())
-
-    function iter_callback((; iter, trajectories, dyn_est))
+    function iteration_callback((; iter, trajectories, dyn_est))
         (iter <= 10 || mod1(iter, 10) == 1) || return
 
         iter_path = mkpath(joinpath(save_dir, "iterations/$iter"))
@@ -283,17 +253,39 @@ function synthesize_scenario(
             i == 1 && display("image/png", plt) # only display the first one
         end
     end
+    obs_model = true_systems[1].obs_model
 
-    iter_result = @time fit_dynamics_iterative(
-        senum, obs_data_list, comps_guess, params_guess;
-        obs_model=obs_dist,
-        sampler=particle_sampler,
-        program_logp=prog_size_prior(0.5), 
-        n_fit_trajs,
-        fit_settings,
-        max_iters,
-        iteration_callback = iter_callback,
-    )
+    iter_result = 
+        if syn_alg isa SindySynthesis
+            (; basis, sketch, optimizer) = syn_alg
+            @info("Running EM with Sindy...")
+            @time em_sindy(obs_data_list, syn_alg, comps_guess; 
+                obs_model, sampler=particle_sampler, n_fit_trajs, 
+                iteration_callback, max_iters)
+        elseif syn_alg isa EnumerativeSynthesis
+            (; comp_env) = syn_alg
+            @info("Enumerating programs...")
+            pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
+            shape_env = ℝenv()
+            senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
+            display(senum)
+
+            @info("Performing iterative dynamics synthesis...")
+            fit_settings = DynamicsFittingSettings(; 
+                optim_options, evals_per_program=2, n_threads=Threads.nthreads())
+
+            @time fit_dynamics_iterative(
+                senum, obs_data_list, comps_guess, params_guess;
+                obs_model,
+                sampler=particle_sampler,
+                program_logp=prog_size_prior(0.5), 
+                n_fit_trajs,
+                fit_settings,
+                max_iters,
+                iteration_callback,
+            )
+        end
+        
 
     (; ex_data_list, obs_data_list, iter_result)
 end

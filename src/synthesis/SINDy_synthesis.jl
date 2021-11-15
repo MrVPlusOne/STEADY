@@ -8,6 +8,8 @@ struct STLSOptimizer <: SparseOptimizer
     λ::Float64
 end
 
+STLSOptimizer() = SparseOptimizer(0.1)
+
 """
 return `(; coeffs, active_ids, iterations)`.
 """
@@ -133,21 +135,28 @@ function sindy_motion_model(sketch::SindySketch, comps::NamedTuple{names}) where
     sindy_motion_model(sketch, core)
 end
 
+struct SindySynthesis <: SynthesisAlgorithm
+    comp_env::ComponentEnv
+    basis::Vector{<:CompiledFunc}
+    sketch::SindySketch
+    optimizer::STLSOptimizer
+end
+
 """
 Synthesize the dynamics using an Expectation Maximization-style loop and SINDy.  
 """
 function em_sindy(
-    basis::Vector{<:CompiledFunc},
     obs_data_list::Vector{<:ObservationData},
-    comps_guess::OrderedDict{Symbol, <:GaussianComponent},
-    sketch::SindySketch;
+    sindy_synthesis::SindySynthesis,
+    comps_guess::OrderedDict{Symbol, <:GaussianComponent};
     obs_model::Function,
     sampler::PosteriorSampler,
     n_fit_trajs::Int, # the number of trajectories to use for fitting the dynamics
     iteration_callback = (data::NamedTuple{(:iter, :trajectories, :dyn_est)}) -> nothing,
-    optimizer::STLSOptimizer = STLSOptimizer(0.1),
     max_iters::Int=100,
 )
+    (; comp_env, basis, sketch, optimizer) = sindy_synthesis
+
     sampler_states = [new_state(sampler) for _ in obs_data_list]
 
     function sample_data(motion_model)
@@ -157,13 +166,22 @@ function em_sindy(
         
         sample_posterior_parallel(sampler, systems, obs_data_list, sampler_states)
     end
+
+    function compile_component(comp::GaussianComponent)
+        if comp.μ_f isa LinearExpression
+            GaussianComponent(compile(comp.μ_f, comp_env), comp.σ)
+        else
+            comp
+        end
+    end
     
     dyn_history = OrderedDict{Symbol, <:GaussianComponent}[]
     logp_history = Vector{Float64}[]
     dyn_est = comps_guess
 
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
-        motion_model = sindy_motion_model(sketch, NamedTuple(dyn_est))
+        comps_compiled = map(compile_component, NamedTuple(dyn_est))
+        motion_model = sindy_motion_model(sketch, comps_compiled)
         (; trajectories, log_obs) = sample_data(motion_model)
         trajectories::Matrix{<:Vector}
 
@@ -174,24 +192,18 @@ function em_sindy(
         iteration_callback((;iter, trajectories, dyn_est))
         trajectories = trajectories[1:n_fit_trajs, :]
 
-        score_old = let
-            state_scores = [sum(states_log_score.(
-                Ref(motion_model), Ref(obs_data_list[j]), trajectories[:, j], Float64))
-                for j in 1:length(obs_data_list)]
-            sum(state_scores) / size(trajectories, 1)
-        end
-
         (iter == max_iters+1) && break
 
         inputs, outputs = construct_inputs_outputs(
             trajectories, obs_data_list, sketch)
         output_types = [v.type for v in sketch.output_vars]
+        output_names = [v.name for v in sketch.output_vars]
         (; comps, stats) = fit_dynamics_sindy(basis, inputs, outputs, output_types, optimizer)
-        dyn_est = OrderedDict(zip(sketch.output_vars, comps))
+        dyn_est = OrderedDict(zip(output_names, comps))
 
         @info em_sindy iter
         @info em_sindy dyn_est
-        @show em_sindy stats
+        @info em_sindy stats
     end # end for
     catch exception
         @warn "Synthesis early stopped by exception."

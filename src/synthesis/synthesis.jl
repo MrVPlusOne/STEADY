@@ -6,6 +6,9 @@ const ObservationData =
     NamedTuple{(:times, :obs_frames, :observations, :controls, :x0_dist)}
 
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
+
+abstract type SynthesisAlgorithm end
+
 """
 A sketch for some missing dynamics. 
 
@@ -245,3 +248,4 @@ include("synthesis_utils.jl")
 include("deterministic_synthesis.jl")
 include("posterior_sampling.jl")
 include("probabilistic_synthesis.jl")
+include("SINDy_synthesis.jl")
