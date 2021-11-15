@@ -20,7 +20,7 @@ function regression(
 )
     X = @views basis[:, active_ids]
     coeffs = X \ target
-    is_active = coeffs .> opt.λ
+    is_active = abs.(coeffs) .> opt.λ
     if all(is_active)
         return (; coeffs, active_ids, iterations)
     end
