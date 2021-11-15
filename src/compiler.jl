@@ -3,7 +3,7 @@
 """
 struct CompiledFunc{return_type, F} <: Function
     f::F
-    ast::TAST
+    ast::Any
     julia::Expr
 end
 
@@ -44,6 +44,22 @@ when synthesis is run multiple times.
 """
 const compile_cache = Dict{Expr, RuntimeGeneratedFunction}()
 const compile_cache_lock = ReentrantLock()
+
+"""
+Compile a Julia code expression into a runtime generated function and cache it.
+"""
+function compile_julia_expr(f_ex)
+    rgf = @lock compile_cache_lock get(compile_cache, f_ex, nothing)
+
+    if rgf === nothing
+        rgf = @RuntimeGeneratedFunction(f_ex)
+        @lock compile_cache_lock begin
+            compile_cache[f_ex] = rgf
+        end
+    end
+    rgf
+end
+
 
 macro with_type(e, ty)
     quote  
@@ -88,14 +104,7 @@ function compile(
 
     body_ex = compile_body(prog)::Expr
     f_ex = :(args -> $body_ex)
-    rgf = @lock compile_cache_lock get(compile_cache, f_ex, nothing)
-
-    if rgf === nothing
-        rgf = @RuntimeGeneratedFunction(f_ex)
-        @lock compile_cache_lock begin
-            compile_cache[f_ex] = rgf
-        end
-    end
+    rgf = compile_julia_expr(f_ex)
     
     rtype = shape_env.return_type[prog.type.shape]
     ftype = hide_type ? Function : typeof(rgf)

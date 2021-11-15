@@ -63,17 +63,34 @@ Base.show(io::IO, ::MIME"text/plain", expr::LinearExpression) = show(io, expr)
     shift + map(f -> f(in), basis)'coeffs
 end
 
-function to_TAST(lexpr::LinearExpression)
-    (; shift, coeffs, basis, type) = lexpr
-    terms = map(coeffs, basis) do a, b
-        be = b.ast
-        Const(a, type.shape(type.unit / be.type.unit)) * be
-    end
-    foldl(+, terms, init=Const(shift, type))
-end
+# function to_TAST(lexpr::LinearExpression)
+#     (; shift, coeffs, basis, type) = lexpr
+#     terms = map(coeffs, basis) do a, b
+#         be = b.ast
+#         Const(a, type.shape(type.unit / be.type.unit)) * be
+#     end
+#     foldl(+, terms, init=Const(shift, type))
+# end
 
-compile(lexpr::LinearExpression, comp_env, shape_env=ℝenv()) = 
-    compile(to_TAST(lexpr), shape_env, comp_env)
+function compile(lexpr::LinearExpression, shape_env=ℝenv())
+    annot = shape_env.type_annots[lexpr.type.shape]
+    rtype = shape_env.return_type[lexpr.type.shape]
+
+    terms = Any[:(shift::$annot)]
+    if !isempty(lexpr.coeffs)
+        (; coeffs, basis) = lexpr
+        foreach(enumerate(basis)) do (i, e)
+            push!(terms, :(coeffs[$i] * $(e.julia)))
+        end
+    end
+    body_ex = Expr(:call, :+, terms...)
+    f_ex = :((args, shift, coeffs) -> $body_ex)
+    rgf = compile_julia_expr(f_ex)
+
+    param_f = args -> rgf(args, lexpr.shift, lexpr.coeffs)
+
+    CompiledFunc{rtype, typeof(param_f)}(param_f, lexpr, body_ex)
+end
 
 struct GaussianComponent{F<:Function, R<:Real} <: Function
     μ_f::F
@@ -120,12 +137,11 @@ function Base.show(io::IO, ::Type{<:SindySketch})
 end
 
 function sindy_motion_model(sketch::SindySketch, core::Function)
-    (; inputs_transform, outputs_transform) = sketch
     (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
         GenericSamplable(rng -> begin
-            local inputs = inputs_transform(x, u)
+            local inputs = sketch.inputs_transform(x, u)
             local outputs = core(rng, inputs)
-            outputs_transform(x, outputs, Δt)
+            sketch.outputs_transform(x, outputs, Δt)
         end)
     end
 end
@@ -140,6 +156,14 @@ struct SindySynthesis <: SynthesisAlgorithm
     basis::Vector{<:CompiledFunc}
     sketch::SindySketch
     optimizer::STLSOptimizer
+end
+
+function compile_component(comp::GaussianComponent)
+    if comp.μ_f isa LinearExpression
+        GaussianComponent(compile(comp.μ_f), comp.σ)
+    else
+        comp
+    end
 end
 
 """
@@ -166,14 +190,6 @@ function em_sindy(
         
         sample_posterior_parallel(sampler, systems, obs_data_list, sampler_states)
     end
-
-    function compile_component(comp::GaussianComponent)
-        if comp.μ_f isa LinearExpression
-            GaussianComponent(compile(comp.μ_f, comp_env), comp.σ)
-        else
-            comp
-        end
-    end
     
     dyn_history = OrderedDict{Symbol, <:GaussianComponent}[]
     logp_history = Vector{Float64}[]
@@ -182,7 +198,7 @@ function em_sindy(
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         comps_compiled = map(compile_component, NamedTuple(dyn_est))
         motion_model = sindy_motion_model(sketch, comps_compiled)
-        (; trajectories, log_obs) = sample_data(motion_model)
+        @time (; trajectories, log_obs) = sample_data(motion_model)
         trajectories::Matrix{<:Vector}
 
         push!(dyn_history, dyn_est)
@@ -198,7 +214,7 @@ function em_sindy(
             trajectories, obs_data_list, sketch)
         output_types = [v.type for v in sketch.output_vars]
         output_names = [v.name for v in sketch.output_vars]
-        (; comps, stats) = fit_dynamics_sindy(basis, inputs, outputs, output_types, optimizer)
+        @time (; comps, stats) = fit_dynamics_sindy(basis, inputs, outputs, output_types, optimizer)
         dyn_est = OrderedDict(zip(output_names, comps))
 
         @info em_sindy iter

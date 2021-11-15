@@ -56,6 +56,7 @@ setups = map(1:n_runs) do i
     )
     ScenarioSetup(times, obs_frames, x0, manual_control())
 end
+nothing
 ##-----------------------------------------------------------
 # simulate the scenario
 save_dir=datadir("sims/hovercraft")
@@ -67,23 +68,31 @@ old_motion_model = let
 end
 println("Ground truth motion model:")
 display(OrderedDict(pairs(sindy_core(scenario, true_params))))
+algorithm = let
+    sketch = sindy_sketch(scenario)
+    shape_env = ℝenv()
+    comp_env = ComponentEnv()
+    components_scalar_arithmatic!(comp_env, can_grow=true)
+
+    basis = [compile(e, shape_env, comp_env) for e in sketch.input_vars]
+    SindySynthesis(comp_env, basis, sketch, STLSOptimizer(0.05))
+end
+
 new_motion_model = let
     sketch = sindy_sketch(scenario)
     core = sindy_core(scenario, true_params)
+    core = map(core) do comp
+        compile_component(comp)
+    end
+    println("Compiled sindy model:") 
+    display(core[1].μ_f.julia)
     sindy_motion_model(sketch, core)
 end
 sim_result = simulate_scenario(scenario, new_motion_model, setups; save_dir)
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
-let
-    shape_env = ℝenv()
-    comp_env = ComponentEnv()
-    components_scalar_arithmatic!(comp_env, can_grow=true)
-
-    sketch = sindy_sketch(scenario)
-    basis = [compile(e, shape_env, comp_env) for e in sketch.input_vars]
-    algorithm = SindySynthesis(comp_env, basis, sketch, STLSOptimizer(0.1))
+em_result = let
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
         n_trajs=100,
@@ -95,21 +104,21 @@ let
         :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
-    em_result = synthesize_scenario(
+    synthesize_scenario(
         scenario, sim_result, algorithm, comps_guess; particle_sampler)
-    nothing
 end
+nothing
 ##-----------------------------------------------------------
 # plot and save the results
 summary_dir=joinpath(save_dir, "summary") |> mkdir
 open(joinpath(summary_dir, "iter_result.txt"), "w") do io
-    println(io, iter_result)
+    println(io, em_result)
 end
-let param_plt = plot_params(iter_result)
+let param_plt = plot_params(em_result)
     display(param_plt)
     savefig(param_plt, joinpath(summary_dir, "params.svg"))
 end
-let perf_plot = plot(iter_result, start_idx=10)
+let perf_plot = plot(em_result, start_idx=10)
     display(perf_plot)
     savefig(perf_plot, joinpath(summary_dir, "performance.svg"))
 end
