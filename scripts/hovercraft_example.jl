@@ -72,19 +72,28 @@ components_scalar_arithmatic!(comp_env, can_grow=true)
 ##-----------------------------------------------------------
 # simulate the scenario
 save_dir=datadir("sims/hovercraft")
-true_motion_model = let 
+old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)
     to_p_motion_model(core, sketch)(true_params)
 end
-sim_result = simulate_scenario(scenario, true_motion_model, setups; save_dir);
+println("Ground truth motion model:")
+display(OrderedDict(pairs(sindy_core(scenario, true_params))))
+sindy_motion_model = let
+    sketch = sindy_sketch(scenario)
+    core = sindy_core(scenario, true_params)
+    @show core
+    sindy_motion_model(sketch, core)
+end
+sim_result = simulate_scenario(scenario, old_motion_model, setups; save_dir)
+nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
 let
     shape_env = ℝenv()
     sketch = sindy_sketch(scenario)
     basis = [compile(e, shape_env, comp_env) for e in sketch.input_vars]
-    algorithm = SindySynthesis(basis, sketch, STLSOptimizer(0.01))
+    algorithm = SindySynthesis(basis, sketch, STLSOptimizer(0.1))
     particle_sampler = ParticleFilterSampler(
         n_particles=60_000,
         n_trajs=100,

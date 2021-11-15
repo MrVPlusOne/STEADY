@@ -68,44 +68,62 @@ function sindy_sketch(sce::HovercraftScenario)
     input_vars = [loc_vx, loc_vy, ω, θ, ul, ur]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    inputs_transform(state, ctrl) = begin
+    inputs_transform = (state, ctrl) -> begin
         local (; pos, vel, θ, ω) = state
         local (; ul, ur) = ctrl
         local loc_v = rotate2d(-θ, vel)
         (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, ul, ur)
     end
 
-    outputs_transform(state) = begin
-        local (; vel, θ, ω) = state
-        local R = rotation2D(θ)
-        out -> begin
-            local (; loc_ax, loc_ay, der_ω) = out
-            local acc = R * @SVector[loc_ax, loc_ay]
-            (
-                pos = vel,
-                vel = acc,
-                θ = ω,
-                ω = der_ω,
-            )
-        end
+    outputs_transform = (state, outputs, Δt) -> begin
+        local (; pos, vel, θ, ω) = state
+        local (; loc_ax, loc_ay, der_ω) = outputs
+        local acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
+        (
+            pos = pos + vel * Δt,
+            vel = vel + acc * Δt,
+            θ = θ + ω * Δt,
+            ω = ω + der_ω * Δt,
+        )
     end
 
-    outputs_inv_transform(state) = begin
+    outputs_inv_transform = (state, state1, Δt) -> begin
         local (; θ) = state
-        local R = rotation2D(-θ)
-        der -> begin
-            local (; vel, ω) = der
-            local loc_acc = R * vel
-            (
-                loc_ax = loc_acc[1],
-                loc_ay = loc_acc[2],
-                der_ω = ω,
-            )
-        end
+        local acc = (state1.vel - state.vel) / Δt
+        local loc_acc = rotate2d(-θ, acc)
+        local der_ω = (state1.ω - state.ω) / Δt
+        (
+            loc_ax = loc_acc[1],
+            loc_ay = loc_acc[2],
+            der_ω = der_ω,
+        )
     end
 
     SindySketch(input_vars, output_vars, 
         inputs_transform, outputs_transform, outputs_inv_transform)
+end
+
+function sindy_core(
+    sce::HovercraftScenario, 
+    (; σ_v, σ_ω, mass, rot_mass, sep, drag_x, drag_y, rot_drag),
+)
+    (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
+    comp_env = ComponentEnv()
+    components_scalar_arithmatic!(comp_env)
+    cp = lexpr -> compile(to_TAST(lexpr), ℝenv(), comp_env)
+    (
+        loc_ax = GaussianComponent(cp(
+            LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
+                [ul, ur, loc_vx], loc_ax.ast.type)), 
+            σ_v),
+        loc_ay = GaussianComponent(cp(
+            LinearExpression(0.0, [-drag_y/mass], [loc_vy], loc_ay.ast.type)), 
+            σ_v),
+        der_ω = GaussianComponent(cp(
+            LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
+                [ur, ul, ω], der_ω.ast.type)), 
+            σ_ω),
+    )
 end
 
 function dynamics_sketch(sce::HovercraftScenario)

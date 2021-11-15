@@ -356,7 +356,7 @@ struct GenericSamplable{F}
     rand_f::F
 end
 
-rand(s::GenericSamplable) = s.rand_f()
+rand(rng::Random.AbstractRNG, s::GenericSamplable) = s.rand_f(rng)
 
 """
 Perform a bijective transformation to a distribution to obtain a new one.

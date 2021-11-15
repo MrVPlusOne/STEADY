@@ -68,6 +68,11 @@ function compile(
         rtype = shape_env.type_annots[v.type.shape]
         :($e::$rtype)
     end
+    function compile_body(c::Const)
+        e = c.value
+        rtype = shape_env.type_annots[c.type.shape]
+        :($e::$rtype)
+    end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
         local args = compile_body.(call.args)
@@ -93,6 +98,8 @@ function compile(
         rgf, prog, body_ex,
     )
 end
+
+compile(prog::TAST) = compile(prog, ℝenv(), ComponentEnv())
 
 """
 Hide the type of the wrapped function. Useful for avoiding expensive compilation 

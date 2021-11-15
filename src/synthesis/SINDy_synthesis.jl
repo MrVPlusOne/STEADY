@@ -32,21 +32,25 @@ struct LinearExpression{N} <: Function
     shift::Float64
     coeffs::SVector{N, Float64}
     basis::SVector{N, <:CompiledFunc}
+    type::PType
 end
 
-LinearExpression(shift::Float64, coeffs::AbstractVector, basis::AbstractVector) = begin 
+function LinearExpression(
+    shift::Float64, coeffs::AbstractVector, basis::AbstractVector, type::PType
+)
     @assert (n=length(coeffs)) == length(basis)
-    LinearExpression(shift, SVector{n, Float64}(coeffs), SVector{n, CompiledFunc}(basis))
+    LinearExpression(
+        shift, SVector{n, Float64}(coeffs), SVector{n, CompiledFunc}(basis), type)
 end
 
 function Base.show(io::IO, expr::LinearExpression; digits=3)
-    (; shift, coeffs, basis) = expr
+    (; shift, coeffs, basis, type) = expr
     print(io, "LinearExpression(`", shift)
     for i in 1:length(coeffs)
         op = coeffs[i] >= 0 ? " + " : " - "
         print(io, op,  round_values(abs(coeffs[i]); digits), basis[i].ast)
     end
-    print(io, "`)")
+    print(io, "`)::", type)
 end
 
 Base.show(io::IO, ::MIME"text/plain", expr::LinearExpression) = show(io, expr)
@@ -57,6 +61,18 @@ Base.show(io::IO, ::MIME"text/plain", expr::LinearExpression) = show(io, expr)
     shift + map(f -> f(in), basis)'coeffs
 end
 
+function to_TAST(lexpr::LinearExpression)
+    (; shift, coeffs, basis, type) = lexpr
+    e = Const(shift, type)
+    foreach(coeffs, basis) do a, b
+        be = b.ast
+        e += Const(a, type.shape(type.unit / be.type.unit)) * be
+    end
+    e
+end
+
+compile(lexpr::LinearExpression, comp_env, shape_env=ℝenv()) = 
+    compile(to_TAST(lexpr), shape_env, comp_env)
 
 struct GaussianComponent{F<:Function, R<:Real} <: Function
     μ_f::F
@@ -83,17 +99,19 @@ Base.show(io::IO, ::MIME"text/plain", expr::GaussianComponent) = show(io, expr)
 
 """
 The output transformation needs to be a bijection.
+
+Use [sindy_motion_model](@ref) to construct the motion model from the sketch and components.
 """
 @kwdef(
 struct SindySketch{F1, F2, F3}
     input_vars::Vector{Var}
     output_vars::Vector{Var}
     "genereate sketch inputs from state and control"
-    inputs_transform::F1 = (x, u) -> merge(x, u)
-    "transform state and sketch outputs into state derivatives"
-    outputs_transform::F2 = x -> o -> o
-    "inversely compute sketch outputs from state and state dervatives"
-    outputs_inv_transform::F3 = x -> o -> o
+    inputs_transform::F1
+    "transform (state, outputs, Δt) into next state"
+    outputs_transform::F2
+    "inversely compute sketch outputs from (state, next_state, Δt)"
+    outputs_inv_transform::F3
 end)
 
 function Base.show(io::IO, ::Type{<:SindySketch})
@@ -103,12 +121,15 @@ end
 function sindy_motion_model(sketch::SindySketch, comps::NamedTuple)
     (; inputs_transform, outputs_transform, outputs_inv_transform) = sketch
     (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
-        local inputs = inputs_transform(x, u)
-        local outputs = map(f -> f(inputs), comps)
-        local core = DistrIterator(outputs)
         # GenericDistrTransform(core, outputs_transform(x), outputs_inv_transform(x))
-        local outf = outputs_transform(x)
-        GenericSamplable(() -> outf(rand(core)))
+        GenericSamplable(rng -> begin
+            local inputs = inputs_transform(x, u)
+            local outputs = map(comps) do f
+                f::GaussianComponent
+                f.μ_f(inputs) + f.σ * randn(rng)
+            end
+            outputs_transform(x, outputs, Δt)
+        end)
     end
 end
 
@@ -164,10 +185,13 @@ function em_sindy(
 
         inputs, outputs = construct_inputs_outputs(
             trajectories, obs_data_list, sketch)
-        dynamic_comps = fit_dynamics_sindy(basis, inputs, outputs, optimizer)
-        dyn_est = OrderedDict(zip(sketch.output_vars, dynamic_comps))
+        output_types = [v.type for v in sketch.output_vars]
+        (; comps, stats) = fit_dynamics_sindy(basis, inputs, outputs, output_types, optimizer)
+        dyn_est = OrderedDict(zip(sketch.output_vars, comps))
 
-        @info("Iteration $iter finished.", dyn_est)
+        @info em_sindy iter
+        @info em_sindy dyn_est
+        @show em_sindy stats
     end # end for
     catch exception
         @warn "Synthesis early stopped by exception."
@@ -184,10 +208,11 @@ Fit the dynamics from trajectory data using the SINDy algorithm.
 """
 function fit_dynamics_sindy(
     basis::Vector{<:CompiledFunc},
-    inputs::AbstractVector{<:NamedTuple},
+    inputs::AbsVec{<:NamedTuple},
     outputs::AbstractMatrix{Float64},
+    output_types::AbsVec{PType},
     optimizer::STLSOptimizer,
-)::Vector{<:GaussianComponent}
+)
     foreach(basis) do f
         f isa CompiledFunc && @assert f.ast.type.shape == ℝ "basis $f is not a scalar."
     end
@@ -199,22 +224,26 @@ function fit_dynamics_sindy(
     basis_data = hcatreduce(transformed)
     all(isfinite, basis_data) || @error "Basis data contains NaN or Inf: $basis_data."
 
-    map(1:size(outputs, 2)) do c
+    @unzip comps, stats = map(1:size(outputs, 2)) do c
         target, target_μ, target_σ = normalize_transform(outputs[:, c])
         (; coeffs, active_ids, iterations) = regression(optimizer, target, basis_data)
         comp = if isempty(active_ids) 
-            GaussianComponent(LinearExpression(target_μ, [], []), target_σ)
+            GaussianComponent(LinearExpression(target_μ, [], [], output_types[c]), target_σ)
         else
             fs = basis[active_ids]
             μ_sub = μ[active_ids]
             σ_sub = σ[active_ids]
             coeffs1 = coeffs ./ σ_sub .* target_σ
             μ1 = target_μ - coeffs1'μ_sub
-            lexpr = LinearExpression(μ1, coeffs1, fs)
+            lexpr = LinearExpression(μ1, coeffs1, fs, output_types[c])
             σ_f = std(lexpr.(inputs) .- outputs[:, c])
             GaussianComponent(lexpr, σ_f)
         end
+        stat = (; term_weights = coeffs, iterations)
+        (comp, stat)
     end
+    comps::Vector{<:GaussianComponent}
+    (; comps, stats)
 end
 
 function construct_inputs_outputs(
@@ -234,11 +263,8 @@ function construct_inputs_outputs(
                 s = tr[t]
                 s1 = tr[t+1]
                 Δt = times[t+1] - times[t]
-                dsdt = map(s, s1) do a, b 
-                    (b - a) / Δt
-                end
-                dsdt′ = outputs_inv_transform(s)(dsdt)
-                push!(outputs, transpose(collect(dsdt′)))
+                o = outputs_inv_transform(s, s1, Δt)
+                push!(outputs, transpose(collect(o)))
             end
         end
     end

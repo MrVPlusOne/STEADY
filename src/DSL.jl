@@ -133,6 +133,12 @@ Typed AST for numerical expressions.
 abstract type TAST end
 
 @auto_hash_equals(
+struct Const <: TAST
+    value::Any
+    type::PType
+end)
+
+@auto_hash_equals(
 struct Var <: TAST
     name::Symbol
     type::PType
@@ -164,6 +170,7 @@ Base.show(io::IO, v::Call) = begin
 end
 
 julia_expr(v::Var) = v.name
+julia_expr(c::Const) = c.value
 julia_expr(c::Call) = begin 
     Expr(:call, c.f, julia_expr.(c.args)...)
 end
@@ -223,7 +230,7 @@ derivative(v::Var, t::PUnit = PUnits.Time) =
 ##-----------------------------------------------------------
 # AST construction helpers
 Base.:+(e1::TAST, e2::TAST) = begin
-    @assert e1.type == e2.type
+    @assert e1.type == e2.type "$(e1.type) != $(e2.type)"
     Call(:+, (e1, e2), e1.type)
 end
 
