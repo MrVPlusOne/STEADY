@@ -190,7 +190,7 @@ function test_scenario(
     particle_sampler::ParticleFilterSampler,
 )
     @info("Sampling posterior using the correct dynamics...")
-    @time sampler_result = sample_posterior_parallel(
+    sampler_result = sample_posterior_parallel(
         particle_sampler, true_systems, obs_data_list)
     post_trajs = sampler_result.trajectories
     for i in 1:length(true_systems)

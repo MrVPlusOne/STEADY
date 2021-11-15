@@ -75,17 +75,18 @@ save_dir=datadir("sims/hovercraft")
 old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)
+    @show core
     to_p_motion_model(core, sketch)(true_params)
 end
 println("Ground truth motion model:")
 display(OrderedDict(pairs(sindy_core(scenario, true_params))))
-sindy_motion_model = let
+new_motion_model = let
     sketch = sindy_sketch(scenario)
     core = sindy_core(scenario, true_params)
-    @show core
+    @show display(core[1].μ_f)
     sindy_motion_model(sketch, core)
 end
-sim_result = simulate_scenario(scenario, old_motion_model, setups; save_dir)
+sim_result = simulate_scenario(scenario, new_motion_model, setups; save_dir)
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories

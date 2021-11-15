@@ -6,6 +6,12 @@ struct HovercraftScenario{N} <: Scenario
     landmark_info::LandmarkInfo{false, N}
 end)
 
+dummy_state(::HovercraftScenario) = 
+    (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())
+
+dummy_control(::HovercraftScenario) = 
+    (ul=randn(), ur=randn())
+
 variables(::HovercraftScenario) = variable_tuple(
     # state
     :pos => ℝ2(PUnits.Length),
@@ -63,44 +69,42 @@ function observation_dist(sce::HovercraftScenario)
     end
 end
 
+function hover_inputs_transform((; pos, vel, θ, ω), (; ul, ur))
+    local loc_v = rotate2d(-θ, vel)
+    (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, ul, ur)
+end
+
+function hover_outputs_transform(state, outputs, Δt)
+    local (; pos, vel, θ, ω) = state
+    local (; loc_ax, loc_ay, der_ω) = outputs
+    local acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
+    (
+        pos = pos + vel * Δt,
+        vel = vel + acc * Δt,
+        θ = θ + ω * Δt,
+        ω = ω + der_ω * Δt,
+    )
+end
+
+function hover_outputs_inv_transform(state, state1, Δt)
+    local (; θ) = state
+    local acc = (state1.vel - state.vel) / Δt
+    local loc_acc = rotate2d(-θ, acc)
+    local der_ω = (state1.ω - state.ω) / Δt
+    (
+        loc_ax = loc_acc[1],
+        loc_ay = loc_acc[2],
+        der_ω = der_ω,
+    )
+end
+
 function sindy_sketch(sce::HovercraftScenario)
     (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = variables(sce)
     input_vars = [loc_vx, loc_vy, ω, θ, ul, ur]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    inputs_transform = (state, ctrl) -> begin
-        local (; pos, vel, θ, ω) = state
-        local (; ul, ur) = ctrl
-        local loc_v = rotate2d(-θ, vel)
-        (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, ul, ur)
-    end
-
-    outputs_transform = (state, outputs, Δt) -> begin
-        local (; pos, vel, θ, ω) = state
-        local (; loc_ax, loc_ay, der_ω) = outputs
-        local acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
-        (
-            pos = pos + vel * Δt,
-            vel = vel + acc * Δt,
-            θ = θ + ω * Δt,
-            ω = ω + der_ω * Δt,
-        )
-    end
-
-    outputs_inv_transform = (state, state1, Δt) -> begin
-        local (; θ) = state
-        local acc = (state1.vel - state.vel) / Δt
-        local loc_acc = rotate2d(-θ, acc)
-        local der_ω = (state1.ω - state.ω) / Δt
-        (
-            loc_ax = loc_acc[1],
-            loc_ay = loc_acc[2],
-            der_ω = der_ω,
-        )
-    end
-
     SindySketch(input_vars, output_vars, 
-        inputs_transform, outputs_transform, outputs_inv_transform)
+        hover_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
 end
 
 function sindy_core(

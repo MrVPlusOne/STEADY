@@ -22,7 +22,11 @@ function Base.show(io::IO, @nospecialize cf::CompiledFunc)
     print(io, "CompiledFunction(`$ast`)")
 end
 
-function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFunc) 
+function Base.show(
+    io::IO, mime::MIME"text/plain",
+    @nospecialize cf::CompiledFunc{return_type}
+) where return_type
+    (; ast, julia) = cf 
     io = IOIndents.IOIndent(io)
     (; ast, julia) = cf
     println(io, "--- CompiledFunction ---")
@@ -30,6 +34,7 @@ function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFun
     println(io, ast, Dedent())
     println(io, "Julia Code:", Indent())
     println(io, repr(mime, julia), Dedent())
+    println(io, "Return type: ", return_type)
     println(io, "--- End ---")
 end
 

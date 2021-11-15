@@ -63,12 +63,11 @@ end
 
 function to_TAST(lexpr::LinearExpression)
     (; shift, coeffs, basis, type) = lexpr
-    e = Const(shift, type)
-    foreach(coeffs, basis) do a, b
+    terms = map(coeffs, basis) do a, b
         be = b.ast
-        e += Const(a, type.shape(type.unit / be.type.unit)) * be
+        Const(a, type.shape(type.unit / be.type.unit)) * be
     end
-    e
+    foldl(+, terms, init=Const(shift, type))
 end
 
 compile(lexpr::LinearExpression, comp_env, shape_env=ℝenv()) = 
@@ -118,19 +117,20 @@ function Base.show(io::IO, ::Type{<:SindySketch})
     print(io, "SindySketch{...}")
 end
 
-function sindy_motion_model(sketch::SindySketch, comps::NamedTuple)
-    (; inputs_transform, outputs_transform, outputs_inv_transform) = sketch
+function sindy_motion_model(sketch::SindySketch, core::Function)
+    (; inputs_transform, outputs_transform) = sketch
     (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
-        # GenericDistrTransform(core, outputs_transform(x), outputs_inv_transform(x))
         GenericSamplable(rng -> begin
             local inputs = inputs_transform(x, u)
-            local outputs = map(comps) do f
-                f::GaussianComponent
-                f.μ_f(inputs) + f.σ * randn(rng)
-            end
+            local outputs = core(rng, inputs)
             outputs_transform(x, outputs, Δt)
         end)
     end
+end
+
+function sindy_motion_model(sketch::SindySketch, comps::NamedTuple{names}) where names
+    core = (rng, x) -> NamedTuple{names}(map(f->rand(rng, f(x)), values(comps)))
+    sindy_motion_model(sketch, core)
 end
 
 """
