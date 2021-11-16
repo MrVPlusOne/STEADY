@@ -17,9 +17,13 @@ end
 
 Base.show(io::IO, ::Type{<:CompiledFunc}) = print(io, "CompiledFunc{...}")
 
-function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
+Base.show(io::IO, @nospecialize cf::CompiledFunc) = print(io, cf)
+function Base.print(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
-    print(io, "CompiledFunction(`$ast`)")
+    compact = get(io, :compact, false)
+    !compact && print(io, "CompiledFunc(")
+    print(io, "`", ast, "`")
+    !compact && print(io, ")")
 end
 
 function Base.show(

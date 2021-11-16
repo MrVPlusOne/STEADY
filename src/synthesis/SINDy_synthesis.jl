@@ -45,17 +45,20 @@ function LinearExpression(
         shift, SVector{n, Float64}(coeffs), SVector{n, CompiledFunc}(basis), type)
 end
 
-function Base.show(io::IO, expr::LinearExpression; digits=3)
+function Base.print(io::IO, expr::LinearExpression)
     (; shift, coeffs, basis, type) = expr
-    print(io, "LinearExpression(`", shift)
+    compact = get(io, :compact, false)
+    !compact && print(io, "LinearExpression(")
+    print(io, "`", shift)
     for i in 1:length(coeffs)
         op = coeffs[i] >= 0 ? " + " : " - "
-        print(io, op,  round_values(abs(coeffs[i]); digits), basis[i].ast)
+        print(io, op, abs(coeffs[i]), " ", basis[i].ast)
     end
-    print(io, "`)::", type)
+    print(io, "`")
+    !compact && print(io, ")::", type)
 end
 
-Base.show(io::IO, ::MIME"text/plain", expr::LinearExpression) = show(io, expr)
+Base.show(io::IO, expr::LinearExpression) = print(io, expr)
 
 (lexpr::LinearExpression{0})(in) = lexpr.shift
 (lexpr::LinearExpression)(in) = begin
@@ -102,10 +105,11 @@ end
     Normal(μ_f(in), σ)
 end
 
-function Base.show(io::IO, expr::GaussianComponent)
+function Base.print(io::IO, expr::GaussianComponent)
+    compact = get(io, :compact, false)
     (; μ_f, σ) = expr
-    print(io, "GaussianComponent(μ = ") 
-    show(io, μ_f) 
+    !compact && print(io, "GaussianComponent") 
+    print(io, "(μ = ", μ_f)
     print(io, ", σ = ", σ, ")")
 end
 
@@ -113,7 +117,7 @@ function Base.show(io::IO, ::Type{<:GaussianComponent})
     print(io, "GaussianComponent{...}")
 end
 
-Base.show(io::IO, ::MIME"text/plain", expr::GaussianComponent) = show(io, expr)
+Base.show(io::IO, comp::GaussianComponent) = print(io, comp)
 
 """
 The output transformation needs to be a bijection.
@@ -229,6 +233,16 @@ function em_sindy(
         end
     end # end try block
     (; dyn_est, dyn_history, logp_history)
+end
+
+function show_dyn_history(dyn_history; io=stdout, first_rows=5, max_rows=15, table_width=100)
+    let rows=[], step=max((length(dyn_history)-first_rows)÷max_rows, 1)
+        for (i, dyn) in enumerate(dyn_history)
+            (i <= first_rows || i % step == 0) && push!(rows, dyn)
+        end
+        println(io, "=====Dynamics History=====")
+        show(io, MIME"text/plain"(), DataFrame(rows), truncate=table_width)
+    end
 end
 
 """
