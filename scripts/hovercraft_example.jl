@@ -46,7 +46,7 @@ function manual_control()
 end
 
 n_runs = 6
-n_fit_trajs = 15
+n_fit_trajs = 1
 setups = map(1:n_runs) do i 
     x0 = (
         pos=@SVector[0.5+randn(), 0.5+randn()], 
@@ -68,15 +68,6 @@ old_motion_model = let
 end
 println("Ground truth motion model:")
 display(OrderedDict(pairs(sindy_core(scenario, true_params))))
-algorithm = let
-    sketch = sindy_sketch(scenario)
-    shape_env = ℝenv()
-    comp_env = ComponentEnv()
-    components_scalar_arithmatic!(comp_env, can_grow=true)
-
-    basis = [compile(e, shape_env, comp_env) for e in sketch.input_vars]
-    SindySynthesis(comp_env, basis, sketch, STLSOptimizer(0.05))
-end
 
 new_motion_model = let
     sketch = sindy_sketch(scenario)
@@ -92,24 +83,55 @@ sim_result = simulate_scenario(scenario, new_motion_model, setups; save_dir)
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
+algorithm = let
+    sketch = sindy_sketch(scenario)
+    shape_env = ℝenv()
+    comp_env = ComponentEnv()
+    components_scalar_arithmatic!(comp_env, can_grow=true)
+
+    basis_expr = TAST[Const(1.0, ℝ(unitless))]
+    basis_weights = Float64[0.0]
+    for v1 in sketch.input_vars
+        push!(basis_expr, v1)
+        push!(basis_weights, 25.0)
+        for v2 in sketch.input_vars
+            if v1.name == v2.name 
+                push!(basis_expr, v1*v2)
+                push!(basis_weights, 200.0)
+            end
+        end
+    end
+    @show basis_expr
+    basis = [compile(e, shape_env, comp_env) for e in basis_expr]
+    optimizer = STLSOptimizer(0.1, basis_weights)
+    SindySynthesis(comp_env, basis, sketch, optimizer)
+end
+
 em_result = let
-    particle_sampler = ParticleFilterSampler(
+    post_sampler = ParticleFilterSampler(
         n_particles=60_000,
         n_trajs=100,
     )
-    # test_scenario(scenario, sim_result, algorithm, particle_sampler)
-
+    # post_sampler = ParticleGibbsSampler(
+    #     n_particles=5000,
+    #     n_jumps=10,
+    #     thining=5,
+    # )
+    comps_σ = [0.1,0.1,0.1]
     comps_guess = OrderedDict(
         :loc_ax => GaussianComponent(_ -> 0.0, 0.1),
         :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
-    synthesize_scenario(
-        scenario, sim_result, algorithm, comps_guess; particle_sampler)
+
+    test_scenario(scenario, sim_result, algorithm, comps_σ, post_sampler)
+    # synthesize_scenario(
+        # scenario, sim_result, algorithm, comps_guess; post_sampler)
 end
 nothing
 ##-----------------------------------------------------------
 # plot and save the results
+show_dyn_history(em_result.iter_result.dyn_history, table_width=50)
 summary_dir=joinpath(save_dir, "summary") |> mkdir
 open(joinpath(summary_dir, "iter_result.txt"), "w") do io
     println(io, em_result)

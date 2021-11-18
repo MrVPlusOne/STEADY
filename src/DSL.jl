@@ -138,6 +138,14 @@ struct Const <: TAST
     type::PType
 end)
 
+Base.show(io::IO, v::Const) = begin
+    print(io, v.value)
+end
+
+Base.show(io::IO, ::MIME"text/plain", v::Const) = begin
+    print(io, v.value, "::", v.type)
+end
+
 @auto_hash_equals(
 struct Var <: TAST
     name::Symbol

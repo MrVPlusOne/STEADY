@@ -352,11 +352,13 @@ function log_score(d::OptionalDistr, x)
     end
 end
 
-struct GenericSamplable{F}
+struct GenericSamplable{F, G}
     rand_f::F
+    log_pdf::G
 end
 
 rand(rng::Random.AbstractRNG, s::GenericSamplable) = s.rand_f(rng)
+logpdf(s::GenericSamplable, x) = s.log_pdf(x)
 
 """
 Perform a bijective transformation to a distribution to obtain a new one.

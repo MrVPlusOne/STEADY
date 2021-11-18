@@ -95,8 +95,9 @@ function plot_2d_scenario!(
 end
 
 function plot_2d_trajectories!(
-    trajectories::AbsVec{<:AbsVec}, name::String; linealpha=0.2, linecolor=4,
+    trajectories::AbsVec{<:AbsVec}, name::String; linecolor=4,
 )
+    linealpha=1.0 / sqrt(length(trajectories))
     xs, ys = Float64[], Float64[]
     for tr in trajectories
         @unzip tr_xs, tr_ys = map(x -> x.pos, tr)
@@ -143,7 +144,7 @@ function simulate_scenario(
     obs_dist = observation_dist(scenario)
 
     @info("Generating simulation data...")
-    @unzip true_systems, ex_data_list, obs_data_list, traj_plts = map(enumerate(setups)) do (i, setup)
+    data_list = map(enumerate(setups)) do (i, setup)
         (; times, obs_frames, x0, controller) = setup
         x0_dist = initial_state_dist(scenario, x0)
         true_system = MarkovSystem(x0_dist, true_motion_model, obs_dist)
@@ -160,6 +161,7 @@ function simulate_scenario(
         display(traj_p)
         (true_system, ex_data, obs_data, traj_p)
     end
+    @unzip true_systems, ex_data_list, obs_data_list, traj_plts = data_list
     (; true_systems, ex_data_list, obs_data_list, truth_path, setups)
 end
 
@@ -167,18 +169,19 @@ function test_scenario(
     scenario::Scenario,
     (; true_systems, ex_data_list, obs_data_list, truth_path, setups),
     algorithm::SynthesisAlgorithm,
-    particle_sampler::ParticleFilterSampler,
+    comps_σ::AbstractVector{Float64},
+    post_sampler::PosteriorSampler,
 )
     @info("Sampling posterior using the correct dynamics...")
     @time sampler_result = sample_posterior_parallel(
-        particle_sampler, true_systems, obs_data_list)
+        post_sampler, true_systems, obs_data_list)
     post_trajs = sampler_result.trajectories
     for i in 1:length(true_systems)
         true_states = ex_data_list[i].states
         x0_dist = true_systems[i].x0_dist
 
         plt = plot(aspect_ratio=1.0, title="Run $i")
-        plot_trajectories!(scenario, post_trajs[:, i], "true posterior", linealpha=0.1, linecolor=2)
+        plot_trajectories!(scenario, post_trajs[:, i], "true posterior", linecolor=2)
         plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
             state_color=1, landmark_color=3)
         display("image/png", plt)
@@ -190,11 +193,12 @@ function test_scenario(
         @info("Synthesizing from true posterior using SINDy...")
         (; basis, sketch, optimizer) = algorithm
         output_types = [v.type for v in sketch.output_vars]
-        inputs, outputs = @time construct_inputs_outputs(post_trajs, obs_data_list, sketch)
+        inputs, outputs = 
+            @time construct_inputs_outputs(post_trajs, obs_data_list, sketch)
         (; comps, stats) = @time fit_dynamics_sindy(
-            basis, inputs, outputs, output_types, optimizer)
+            basis, inputs, outputs, output_types, comps_σ, optimizer)
         @assert length(sketch.output_vars) == length(comps)
-        dyn_est = OrderedDict(zip(sketch.output_vars, comps))
+        dyn_est = OrderedDict(zip([v.name for v in sketch.output_vars], comps))
         @info "test_scenario" dyn_est
         @info "test_scenario" stats
     elseif algorithm isa EnumerativeSynthesis
@@ -231,7 +235,7 @@ function synthesize_scenario(
     syn_alg::SynthesisAlgorithm,
     comps_guess;
     n_fit_trajs=15,
-    particle_sampler = ParticleFilterSampler(
+    post_sampler = ParticleFilterSampler(
         n_particles=60_000,
         n_trajs=100,
     ),
@@ -245,7 +249,7 @@ function synthesize_scenario(
         for i in 1:length(true_systems)
             true_states = ex_data_list[i].states
             plt = plot(aspect_ratio=1.0, title="Run $i (iter=$iter)")
-            plot_trajectories!(scenario, trajectories[:, i], "estimated", linealpha=0.1, linecolor=2)
+            plot_trajectories!(scenario, trajectories[:, i], "estimated", linecolor=2)
             plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
                 state_color=1, landmark_color=3)
             fig_path=joinpath(iter_path, "posterior_$i.svg")
@@ -260,7 +264,7 @@ function synthesize_scenario(
             (; basis, sketch, optimizer) = syn_alg
             @info("Running EM with Sindy...")
             @time em_sindy(obs_data_list, syn_alg, comps_guess; 
-                obs_model, sampler=particle_sampler, n_fit_trajs, 
+                obs_model, sampler=post_sampler, n_fit_trajs, 
                 iteration_callback, max_iters)
         elseif syn_alg isa EnumerativeSynthesis
             (; comp_env) = syn_alg
@@ -277,7 +281,7 @@ function synthesize_scenario(
             @time fit_dynamics_iterative(
                 senum, obs_data_list, comps_guess, params_guess;
                 obs_model,
-                sampler=particle_sampler,
+                sampler=post_sampler,
                 program_logp=prog_size_prior(0.5), 
                 n_fit_trajs,
                 fit_settings,

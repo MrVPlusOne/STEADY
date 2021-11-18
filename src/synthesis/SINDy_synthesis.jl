@@ -1,14 +1,19 @@
+using LinearAlgebra
+
 abstract type SparseOptimizer end
 
 """
 Sequential thresholded least squares.
 """
-struct STLSOptimizer <: SparseOptimizer
-    "Discarding threshold."
-    λ::Float64
+struct STLSOptimizer{L2 <: Optional{Vector{Float64}}} <: SparseOptimizer
+    "Discarding threshold"
+    ϵ::Float64
+    "L2 regularization"
+    λ::L2
 end
 
-STLSOptimizer() = SparseOptimizer(0.1)
+Base.:*(opt::STLSOptimizer, s::Real) = 
+    STLSOptimizer(opt.ϵ * s, map_optional(x -> x / s, opt.λ))
 
 """
 return `(; coeffs, active_ids, iterations)`.
@@ -21,8 +26,14 @@ function regression(
     iterations::Int=1,
 )
     X = @views basis[:, active_ids]
-    coeffs = X \ target
-    is_active = abs.(coeffs) .> opt.λ
+    coeffs = if opt.λ === nothing
+        X \ target
+    else
+        λ = opt.λ[active_ids]
+        (X'X + I(length(λ)) .* λ) \ X'target
+    end
+    
+    is_active = abs.(coeffs) .> opt.ϵ
     if all(is_active)
         return (; coeffs, active_ids, iterations)
     end
@@ -49,7 +60,8 @@ function Base.print(io::IO, expr::LinearExpression)
     (; shift, coeffs, basis, type) = expr
     compact = get(io, :compact, false)
     !compact && print(io, "LinearExpression(")
-    print(io, "`", shift)
+    print(io, "`")
+    shift != 0.0 && print(io, shift)
     for i in 1:length(coeffs)
         op = coeffs[i] >= 0 ? " + " : " - "
         print(io, op, abs(coeffs[i]), " ", basis[i].ast)
@@ -79,12 +91,14 @@ function compile(lexpr::LinearExpression, shape_env=ℝenv())
     annot = shape_env.type_annots[lexpr.type.shape]
     rtype = shape_env.return_type[lexpr.type.shape]
 
-    terms = Any[:(shift::$annot)]
-    if !isempty(lexpr.coeffs)
-        (; coeffs, basis) = lexpr
-        foreach(enumerate(basis)) do (i, e)
-            push!(terms, :(coeffs[$i] * $(e.julia)))
-        end
+    (; shift, coeffs, basis) = lexpr
+
+    terms = Any[]
+    if isempty(coeffs) || shift != 0.0
+        push!(terms, :(shift::$annot))
+    end
+    foreach(enumerate(basis)) do (i, e)
+        push!(terms, :(coeffs[$i] * $(e.julia)))
     end
     body_ex = Expr(:call, :+, terms...)
     f_ex = :((args, shift, coeffs) -> $body_ex)
@@ -140,19 +154,21 @@ function Base.show(io::IO, ::Type{<:SindySketch})
     print(io, "SindySketch{...}")
 end
 
-function sindy_motion_model(sketch::SindySketch, core::Function)
-    (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
-        GenericSamplable(rng -> begin
-            local inputs = sketch.inputs_transform(x, u)
-            local outputs = core(rng, inputs)
-            sketch.outputs_transform(x, outputs, Δt)
-        end)
-    end
-end
-
 function sindy_motion_model(sketch::SindySketch, comps::NamedTuple{names}) where names
-    core = (rng, x) -> NamedTuple{names}(map(f->rand(rng, f(x)), values(comps)))
-    sindy_motion_model(sketch, core)
+    (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
+        local inputs = sketch.inputs_transform(x, u)
+        local outputs_dist = DistrIterator(map(f -> f(inputs), values(comps)))
+        GenericSamplable(
+            rng -> begin
+                local out = NamedTuple{names}(rand(rng, outputs_dist))
+                sketch.outputs_transform(x, out, Δt)
+            end, 
+            x1 -> begin 
+                local out = sketch.outputs_inv_transform(x, x1, Δt)
+                logpdf(outputs_dist, values(out))
+            end
+        )
+    end
 end
 
 struct SindySynthesis <: SynthesisAlgorithm
@@ -210,15 +226,17 @@ function em_sindy(
         println("Estimated log_obs: $(to_measurement(log_obs))")
 
         iteration_callback((;iter, trajectories, dyn_est))
-        trajectories = trajectories[1:n_fit_trajs, :]
+        trajectories = trajectories[1:min(n_fit_trajs, end), :]
 
         (iter == max_iters+1) && break
 
+        comps_σ = [comp.σ for comp in values(comps_guess)]
         inputs, outputs = construct_inputs_outputs(
             trajectories, obs_data_list, sketch)
         output_types = [v.type for v in sketch.output_vars]
         output_names = [v.name for v in sketch.output_vars]
-        @time (; comps, stats) = fit_dynamics_sindy(basis, inputs, outputs, output_types, optimizer)
+        @time (; comps, stats) = fit_dynamics_sindy(
+            basis, inputs, outputs, output_types, comps_σ, optimizer)
         dyn_est = OrderedDict(zip(output_names, comps))
 
         @info em_sindy iter
@@ -253,35 +271,37 @@ function fit_dynamics_sindy(
     inputs::AbsVec{<:NamedTuple},
     outputs::AbstractMatrix{Float64},
     output_types::AbsVec{PType},
-    optimizer::STLSOptimizer,
+    comps_σ::AbsVec{Float64},
+    optimizer::STLSOptimizer;
 )
     foreach(basis) do f
         f isa CompiledFunc && @assert f.ast.type.shape == ℝ "basis $f is not a scalar."
     end
     @assert size(outputs, 1) == size(inputs, 1)
 
-    @unzip transformed, μ, σ = map(basis) do f
-        normalize_transform(f.(inputs)) # TODO: handle exceptions
+    @unzip features, scales = map(basis) do f
+        feature = f.(inputs)
+        scale = sqrt(feature'feature / length(feature))
+        feature/scale, scale
     end
-    basis_data = hcatreduce(transformed)
+    basis_data = hcatreduce(features)
     all(isfinite, basis_data) || @error "Basis data contains NaN or Inf: $basis_data."
 
     @unzip comps, stats = map(1:size(outputs, 2)) do c
-        target, target_μ, target_σ = normalize_transform(outputs[:, c])
-        (; coeffs, active_ids, iterations) = regression(optimizer, target, basis_data)
+        target = outputs[:, c]
+        opt_scaled = optimizer * comps_σ[c]
+        (; coeffs, active_ids, iterations) = regression(opt_scaled, target, basis_data)
         comp = if isempty(active_ids) 
-            GaussianComponent(LinearExpression(target_μ, [], [], output_types[c]), target_σ)
+            lexpr = LinearExpression(mean(target), [], [], output_types[c])
+            GaussianComponent(lexpr, std(target))
         else
             fs = basis[active_ids]
-            μ_sub = μ[active_ids]
-            σ_sub = σ[active_ids]
-            coeffs1 = coeffs ./ σ_sub .* target_σ
-            μ1 = target_μ - coeffs1'μ_sub
-            lexpr = LinearExpression(μ1, coeffs1, fs, output_types[c])
+            coeffs1 = coeffs ./ scales[active_ids]
+            lexpr = LinearExpression(0.0, coeffs1, fs, output_types[c])
             σ_f = std(lexpr.(inputs) .- outputs[:, c])
             GaussianComponent(lexpr, σ_f)
         end
-        stat = (; term_weights = coeffs, iterations)
+        stat = (; term_weights = coeffs ./ comps_σ[c], iterations)
         (comp, stat)
     end
     comps::Vector{<:GaussianComponent}
