@@ -10,6 +10,7 @@ import LineSearches
 
 const Optional{X} = Union{X, Nothing}
 const AbsVec = AbstractVector
+const AbsMat = AbstractMatrix
 
 specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)

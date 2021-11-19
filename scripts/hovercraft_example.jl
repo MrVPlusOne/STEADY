@@ -46,7 +46,7 @@ function manual_control()
 end
 
 n_runs = 6
-n_fit_trajs = 1
+n_fit_trajs = 10
 setups = map(1:n_runs) do i 
     x0 = (
         pos=@SVector[0.5+randn(), 0.5+randn()], 
@@ -89,8 +89,8 @@ algorithm = let
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env, can_grow=true)
 
-    basis_expr = TAST[Const(1.0, ℝ(unitless))]
-    basis_weights = Float64[0.0]
+    basis_expr = TAST[]
+    basis_weights = Float64[]
     for v1 in sketch.input_vars
         push!(basis_expr, v1)
         push!(basis_weights, 25.0)
@@ -103,7 +103,9 @@ algorithm = let
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-    optimizer = STLSOptimizer(0.1, basis_weights)
+    # regressor = LassoRegression(100.0; fit_intercept=false)
+    regressor = RidgeRegression(10.0; fit_intercept=false)
+    optimizer = SeqThresholdOptimizer(0.1, regressor)
     SindySynthesis(comp_env, basis, sketch, optimizer)
 end
 
@@ -124,9 +126,9 @@ em_result = let
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
 
-    test_scenario(scenario, sim_result, algorithm, comps_σ, post_sampler)
-    # synthesize_scenario(
-        # scenario, sim_result, algorithm, comps_guess; post_sampler)
+    test_scenario(scenario, sim_result, algorithm, comps_σ, post_sampler, n_fit_trajs)
+    synthesize_scenario(
+        scenario, sim_result, algorithm, comps_guess; post_sampler, n_fit_trajs)
 end
 nothing
 ##-----------------------------------------------------------

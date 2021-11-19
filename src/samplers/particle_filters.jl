@@ -128,8 +128,8 @@ function filter_smoother(system, obs_data;
         system, obs_data, n_particles; resample_threshold, score_f, 
         use_auxiliary_proposal, cache, showprogress)
     traj_ids = systematic_resample(softmax(log_weights), n_trajs)
-    trajectories = particle_trajectories(particles, ancestors, traj_ids)
-    (; trajectories, log_obs)
+    (;  trajectories, n_effective) = particle_trajectories(particles, ancestors, traj_ids)
+    (; trajectories, n_effective, log_obs)
 end
 
 """
@@ -138,17 +138,22 @@ out the ancestral lineages.
 """
 function particle_trajectories(
     particles::Matrix{P}, ancestors::Matrix{Int}, indices::Vector{Int},
-)::Vector{Vector{P}} where P
+) where P
     N, T = size(particles)
     indices = copy(indices)
+    n_unique = 0
+    n_unique += length(Set(indices))
     M = length(indices)
     trajs = Matrix{P}(undef, M, T)
     trajs[:, T] = particles[indices, T]
     for t in T-1:-1:1
         indices .= ancestors[indices, t+1]
+        n_unique += length(Set(indices))
         trajs[:, t] = particles[indices, t]
     end
-    get_rows(trajs) |> collect
+    trajectories::Vector{Vector{P}} = get_rows(trajs) |> collect
+    n_effective = n_unique / T
+    (; trajectories, n_effective)
 end
 
 """

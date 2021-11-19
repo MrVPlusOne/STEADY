@@ -171,10 +171,12 @@ function test_scenario(
     algorithm::SynthesisAlgorithm,
     comps_σ::AbstractVector{Float64},
     post_sampler::PosteriorSampler,
+    n_fit_trajs,
 )
     @info("Sampling posterior using the correct dynamics...")
     @time sampler_result = sample_posterior_parallel(
         post_sampler, true_systems, obs_data_list)
+    @info test_scenario sampler_result.n_effective
     post_trajs = sampler_result.trajectories
     for i in 1:length(true_systems)
         true_states = ex_data_list[i].states
@@ -194,7 +196,7 @@ function test_scenario(
         (; basis, sketch, optimizer) = algorithm
         output_types = [v.type for v in sketch.output_vars]
         inputs, outputs = 
-            @time construct_inputs_outputs(post_trajs, obs_data_list, sketch)
+            @time construct_inputs_outputs(post_trajs[1:n_fit_trajs, :], obs_data_list, sketch)
         (; comps, stats) = @time fit_dynamics_sindy(
             basis, inputs, outputs, output_types, comps_σ, optimizer)
         @assert length(sketch.output_vars) == length(comps)

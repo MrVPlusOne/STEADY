@@ -5,7 +5,7 @@ Particle Gibbs with Ancestor Sampling MCMC Kernel.
 """
 function PGAS_kernel(
     system::MarkovSystem{X}, (; times, obs_frames, controls, observations); 
-    n_particles, resample_threshold::Float64,
+    n_particles, resample_threshold::Float64, showprogress=true,
 ) where X
     @assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
@@ -26,6 +26,7 @@ function PGAS_kernel(
         weights .= 1 / N
         log_weights .= -log(N) 
 
+        showprogress && (progress = Progress(T-1, desc="PG Kernel", output=stdout))
         for t in 1:T
             if t > 1
                 Δt = times[t] - times[t-1]
@@ -64,6 +65,8 @@ function PGAS_kernel(
             log_z_t = logsumexp(log_weights)            
             log_weights .-= log_z_t
             weights .= exp.(log_weights)
+
+            showprogress && next!(progress)
         end
 
         k = rand(Categorical(weights))

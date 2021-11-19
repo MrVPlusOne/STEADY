@@ -139,7 +139,7 @@ function fit_dynamics_iterative(
 
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         (; p_motion_model, params, comps) = dyn_est
-        (; trajectories, log_obs) = sample_data(dyn_est)
+        (; trajectories, n_effective, log_obs) = sample_data(dyn_est)
         trajectories::Matrix{<:Vector}
         log_prior = program_logp(comps) + logpdf(params_dist, params)
         log_p = log_prior .+ (log_obs::Vector{Float64})

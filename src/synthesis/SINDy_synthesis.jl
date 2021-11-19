@@ -1,47 +1,50 @@
 using LinearAlgebra
+using MLJLinearModels
 
 abstract type SparseOptimizer end
 
 """
-Sequential thresholded least squares.
+Sequential thresholded optimizer.
 """
-struct STLSOptimizer{L2 <: Optional{Vector{Float64}}} <: SparseOptimizer
+struct SeqThresholdOptimizer{Reg <: GLR} <: SparseOptimizer
     "Discarding threshold"
     ϵ::Float64
-    "L2 regularization"
-    λ::L2
+    regressor::Reg
 end
 
-Base.:*(opt::STLSOptimizer, s::Real) = 
-    STLSOptimizer(opt.ϵ * s, map_optional(x -> x / s, opt.λ))
+Base.:*(opt::SeqThresholdOptimizer, s::Real) = 
+    SeqThresholdOptimizer(opt.ϵ * s, opt.regressor * s)
+
+Base.:*(reg::GLR, s::Real) = 
+    GLR(reg.loss, reg.penalty / s, reg.fit_intercept, reg.penalize_intercept)
 
 """
-return `(; coeffs, active_ids, iterations)`.
+return `(; coeffs, intercept, active_ids, iterations)`.
 """
 function regression(
-    opt::STLSOptimizer, 
-    target::AbstractVector{Float64},
-    basis::AbstractMatrix{Float64}, 
+    opt::SeqThresholdOptimizer, 
+    target::AbsVec{Float64},
+    basis::AbsMat{Float64}, 
     active_ids::Vector{Int64} = collect(1:size(basis, 2)),
     iterations::Int=1,
 )
     X = @views basis[:, active_ids]
-    coeffs = if opt.λ === nothing
-        X \ target
+    θ = MLJLinearModels.fit(opt.regressor, X, target)
+    (coeffs, intercept) = if opt.regressor.fit_intercept
+        (θ[1:end-1], θ[end])
     else
-        λ = opt.λ[active_ids]
-        (X'X + I(length(λ)) .* λ) \ X'target
+        (θ, 0.0)
     end
     
     is_active = abs.(coeffs) .> opt.ϵ
     if all(is_active)
-        return (; coeffs, active_ids, iterations)
+        return (; coeffs, intercept, active_ids, iterations)
     end
     active_ids = active_ids[is_active]
     return regression(opt, target, basis, active_ids, iterations+1)
 end
 
-struct LinearExpression{N} <: Function
+struct LinearExpression{N}
     shift::Float64
     coeffs::SVector{N, Float64}
     basis::SVector{N, <:CompiledFunc}
@@ -71,21 +74,6 @@ function Base.print(io::IO, expr::LinearExpression)
 end
 
 Base.show(io::IO, expr::LinearExpression) = print(io, expr)
-
-(lexpr::LinearExpression{0})(in) = lexpr.shift
-(lexpr::LinearExpression)(in) = begin
-    (; shift, coeffs, basis) = lexpr
-    shift + map(f -> f(in), basis)'coeffs
-end
-
-# function to_TAST(lexpr::LinearExpression)
-#     (; shift, coeffs, basis, type) = lexpr
-#     terms = map(coeffs, basis) do a, b
-#         be = b.ast
-#         Const(a, type.shape(type.unit / be.type.unit)) * be
-#     end
-#     foldl(+, terms, init=Const(shift, type))
-# end
 
 function compile(lexpr::LinearExpression, shape_env=ℝenv())
     annot = shape_env.type_annots[lexpr.type.shape]
@@ -123,8 +111,8 @@ function Base.print(io::IO, expr::GaussianComponent)
     compact = get(io, :compact, false)
     (; μ_f, σ) = expr
     !compact && print(io, "GaussianComponent") 
-    print(io, "(μ = ", μ_f)
-    print(io, ", σ = ", σ, ")")
+    print(io, "(σ = ", σ)
+    print(io, ", μ = ", μ_f, ")")
 end
 
 function Base.show(io::IO, ::Type{<:GaussianComponent})
@@ -175,7 +163,7 @@ struct SindySynthesis <: SynthesisAlgorithm
     comp_env::ComponentEnv
     basis::Vector{<:CompiledFunc}
     sketch::SindySketch
-    optimizer::STLSOptimizer
+    optimizer::SparseOptimizer
 end
 
 function compile_component(comp::GaussianComponent)
@@ -184,6 +172,18 @@ function compile_component(comp::GaussianComponent)
     else
         comp
     end
+end
+
+"""
+A very crude estimation by counting the number of unique particles.
+"""
+function n_effective_trajectoreis(trajectories::Matrix)
+    T = length(trajectories[1])
+    n_unique = 0
+    for t in 1:T
+        n_unique += length(Set(tr[t] for tr in trajectories))
+    end
+    n_unique / T
 end
 
 """
@@ -227,6 +227,7 @@ function em_sindy(
 
         iteration_callback((;iter, trajectories, dyn_est))
         trajectories = trajectories[1:min(n_fit_trajs, end), :]
+        n_effective = n_effective_trajectoreis(trajectories)
 
         (iter == max_iters+1) && break
 
@@ -235,11 +236,13 @@ function em_sindy(
             trajectories, obs_data_list, sketch)
         output_types = [v.type for v in sketch.output_vars]
         output_names = [v.name for v in sketch.output_vars]
+        optimizer::SeqThresholdOptimizer
+        optimizer1 = @set optimizer.regressor.penalty *= 1/sqrt(n_effective)
         @time (; comps, stats) = fit_dynamics_sindy(
-            basis, inputs, outputs, output_types, comps_σ, optimizer)
+            basis, inputs, outputs, output_types, comps_σ, optimizer1)
         dyn_est = OrderedDict(zip(output_names, comps))
 
-        @info em_sindy iter
+        @info em_sindy iter n_effective
         @info em_sindy dyn_est
         @info em_sindy stats
     end # end for
@@ -272,7 +275,7 @@ function fit_dynamics_sindy(
     outputs::AbstractMatrix{Float64},
     output_types::AbsVec{PType},
     comps_σ::AbsVec{Float64},
-    optimizer::STLSOptimizer;
+    optimizer::SparseOptimizer;
 )
     foreach(basis) do f
         f isa CompiledFunc && @assert f.ast.type.shape == ℝ "basis $f is not a scalar."
@@ -290,17 +293,18 @@ function fit_dynamics_sindy(
     @unzip comps, stats = map(1:size(outputs, 2)) do c
         target = outputs[:, c]
         opt_scaled = optimizer * comps_σ[c]
-        (; coeffs, active_ids, iterations) = regression(opt_scaled, target, basis_data)
+        (; coeffs, intercept, active_ids, iterations) = regression(opt_scaled, target, basis_data)
+        
         comp = if isempty(active_ids) 
-            lexpr = LinearExpression(mean(target), [], [], output_types[c])
-            GaussianComponent(lexpr, std(target))
+            lexpr = LinearExpression(intercept, [], [], output_types[c])
+            σ_f = std(target)
         else
             fs = basis[active_ids]
             coeffs1 = coeffs ./ scales[active_ids]
-            lexpr = LinearExpression(0.0, coeffs1, fs, output_types[c])
-            σ_f = std(lexpr.(inputs) .- outputs[:, c])
-            GaussianComponent(lexpr, σ_f)
+            σ_f = std(basis_data[:, active_ids] * coeffs1 .- outputs[:, c])
+            lexpr = LinearExpression(intercept, coeffs1, fs, output_types[c])
         end
+        comp = GaussianComponent(compile(lexpr), σ_f)
         stat = (; term_weights = coeffs ./ comps_σ[c], iterations)
         (comp, stat)
     end
