@@ -12,6 +12,16 @@ const Optional{X} = Union{X, Nothing}
 const AbsVec = AbstractVector
 const AbsMat = AbstractMatrix
 
+abstract type Either end
+
+struct Left{X} <: Either
+    value::X
+end
+
+struct Right{Y} <: Either
+    value::Y
+end
+
 specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
 
@@ -43,6 +53,8 @@ Concat rows vertically.
 vcatreduce(xs) = reduce(vcat, xs)
 
 """
+    @unzip xs, [ys,...] = collection
+
 ## Example
 ```jldoctest
 julia> @unzip as, bs = [("a", "b", "c") for i in 1:3]
@@ -311,6 +323,13 @@ using Statistics: norm
 Base.show(io::IO, d::ForwardDiff.Dual) = 
     print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
 
+function assert_finite(x::NamedTuple)
+    if !all(isfinite, x)
+        @error "some components are not finite" x
+        throw(ErrorException("assert_finite failed."))
+    end
+    x
+end
 
 """
 A helper macro to find functions by name.
@@ -367,29 +386,47 @@ function parallel_map(f, xs, ctx;
         length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
         @everywhere SEDL._distributed_work_ctx[] = $ctx
         f_task = x -> let ctx = _distributed_work_ctx[]
-            f(ctx, x)
+            try
+                Right(f(ctx, x))
+            catch e
+                Left((e, stacktrace(catch_backtrace())))
+            end
         end
         try
-            eval_results = progress_pmap(f_task, xs; progress)
+            map_results = progress_pmap(f_task, xs; progress)
         finally
             @everywhere SEDL._distributed_work_ctx[] = nothing
         end
     else
-        eval_task(e) = let r = f(ctx, e)
-            next!(progress)
-            r
+        eval_task(e) = try
+            let r = f(ctx, e)
+                next!(progress)
+                Right(r)
+            end
+        catch e
+            Left((e, stacktrace(catch_backtrace())))
         end
         if n_threads <= 1
-            eval_results = map(eval_task, xs)
+            map_results = map(eval_task, xs)
         else
             pool = ThreadPools.QueuePool(2, n_threads)
-            try
-                eval_results = ThreadPools.tmap(eval_task, pool, xs)
-            finally
-                close(pool)
-            end
+            map_results = ThreadPools.tmap(eval_task, pool, xs)
+            close(pool)
         end
     end
+    eval_results = 
+        if all(x -> x isa Right, map_results)
+            map(x -> x.value, map_results)
+        else
+            for x in map_results
+                if x isa Left
+                    (e, trace) = x.value
+                    @error "Exception in parallel_map: $(repr("text/plain", e))"
+                    @error "Caused by: $(repr("text/plain", trace))"
+                    error("parallel_map failed.")
+                end
+            end
+        end
     eval_results
 end
 
