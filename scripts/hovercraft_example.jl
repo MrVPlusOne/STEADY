@@ -13,7 +13,7 @@ landmarks = @SVector[
     @SVector[8.0, -5.5], @SVector[14.0, 6.0], @SVector[16.0, -7.5]]
 scenario = HovercraftScenario(LandmarkInfo(; landmarks))
 times = collect(0.0:0.1:14)
-obs_frames = 1:5:length(times)
+obs_frames = 1:4:length(times)
 true_params = (; 
     mass = 1.5, drag_x = 0.08, drag_y=0.12, rot_mass=1.5, rot_drag=0.07, sep=0.81,
     σ_v=0.04, σ_ω=0.03)
@@ -67,16 +67,16 @@ old_motion_model = let
     to_p_motion_model(core, sketch)(true_params)
 end
 println("Ground truth motion model:")
-display(OrderedDict(pairs(sindy_core(scenario, true_params))))
+true_comps = OrderedDict(pairs(sindy_core(scenario, true_params)))
+display(true_comps)
 
 new_motion_model = let
     sketch = sindy_sketch(scenario)
     core = sindy_core(scenario, true_params)
-    core = map(core) do comp
-        compile_component(comp)
-    end
     println("Compiled sindy model:") 
-    display(core[1].μ_f.julia)
+    for f in core
+        display(f.μ_f.julia)
+    end
     sindy_motion_model(sketch, core)
 end
 sim_result = simulate_scenario(scenario, new_motion_model, setups; save_dir)
@@ -95,7 +95,7 @@ algorithm = let
         push!(basis_expr, v1)
         push!(basis_weights, 25.0)
         for v2 in sketch.input_vars
-            if v1.name == v2.name 
+            if v2.name <= v1.name
                 push!(basis_expr, v1*v2)
                 push!(basis_weights, 200.0)
             end
@@ -103,8 +103,9 @@ algorithm = let
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-    # regressor = LassoRegression(100.0; fit_intercept=false)
-    regressor = RidgeRegression(10.0; fit_intercept=false)
+    regressor = LassoRegression(1.0; fit_intercept=true)
+    # regressor = RidgeRegression(1.0; fit_intercept=true)
+    # regressor = LinearRegression(fit_intercept=true)
     optimizer = SeqThresholdOptimizer(0.1, regressor)
     SindySynthesis(comp_env, basis, sketch, optimizer)
 end
@@ -114,17 +115,13 @@ em_result = let
         n_particles=60_000,
         n_trajs=100,
     )
-    # post_sampler = ParticleGibbsSampler(
-    #     n_particles=5000,
-    #     n_jumps=10,
-    #     thining=5,
-    # )
     comps_σ = [0.1,0.1,0.1]
     comps_guess = OrderedDict(
         :loc_ax => GaussianComponent(_ -> 0.0, 0.1),
         :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
+    # comps_guess = true_comps
 
     test_scenario(scenario, sim_result, algorithm, comps_σ, post_sampler, n_fit_trajs)
     synthesize_scenario(
@@ -138,26 +135,14 @@ summary_dir=joinpath(save_dir, "summary") |> mkdir
 open(joinpath(summary_dir, "iter_result.txt"), "w") do io
     println(io, em_result)
 end
-let param_plt = plot_params(em_result)
-    display(param_plt)
-    savefig(param_plt, joinpath(summary_dir, "params.svg"))
-end
-let perf_plot = plot(em_result, start_idx=10)
+# let param_plt = plot_params(em_result)
+#     display(param_plt)
+#     savefig(param_plt, joinpath(summary_dir, "params.svg"))
+# end
+typeof(em_result.iter_result)
+let perf_plot = plot_performance(em_result, start_idx=10)
     display(perf_plot)
     savefig(perf_plot, joinpath(summary_dir, "performance.svg"))
 end
 ##-----------------------------------------------------------
-# analyze the drag strength
-function core_stats(input)
-    (; loc_vx, loc_vy, ω, ul, ur, mass, drag_x, drag_y, rot_mass, rot_drag) = input
-    f_x = drag_x * loc_vx
-    f_y = drag_y * loc_vy
-    f_θ = ω * rot_drag
-    (; ul, ur, f_x, f_y, f_θ)
-end
 
-core_outputs = transform_sketch_inputs(core_stats, dynamics_sketch(scenario), 
-    scenario_result.ex_data_list[1], true_params)
-
-@df DataFrame(core_outputs) plot(times, [:ul :ur :f_x :f_y :f_θ])
-##-----------------------------------------------------------

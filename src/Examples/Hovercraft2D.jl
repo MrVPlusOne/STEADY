@@ -2,8 +2,8 @@
 The 2D hovercraft scenario.
 """
 @kwdef(
-struct HovercraftScenario{N} <: Scenario
-    landmark_info::LandmarkInfo{false, N}
+struct HovercraftScenario{LI<:LandmarkInfo} <: Scenario
+    landmark_info::LI
 end)
 
 dummy_state(::HovercraftScenario) = 

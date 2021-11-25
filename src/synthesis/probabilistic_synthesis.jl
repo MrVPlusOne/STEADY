@@ -72,6 +72,10 @@ function Plots.plot(iter_result::IterativeSynthesisResult; start_idx=1)
     plot(p1, p2, layout=(2,1), size=(600,800))
 end
 
+function plot_performance((; dyn_history, logp_history))
+
+end
+
 function _dynamics_change_points(iter_result::IterativeSynthesisResult)
     dh = iter_result.dyn_history
     filter(1:length(dh)-1) do i

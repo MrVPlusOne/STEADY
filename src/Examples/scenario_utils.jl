@@ -17,12 +17,13 @@ struct LandmarkInfo{bo, N}
     "The width of the sigmoid function that gives the probability of having observations 
     near the sensor range limit."
     range_falloff::Float64=1.0
+    p_detect_min::Float64=1e-4
     "If true, will only include bearing (angle) but not range (distrance) readings."
     bearing_only::Val{bo}=Val(false)
 end)
 
 function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where bo
-    (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff) = linfo
+    (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff, p_detect_min) = linfo
     DistrIterator(map(landmarks) do l
         l::AbstractVector
         rel = l - pos
@@ -36,6 +37,7 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where bo
             (; range, bearing)
         end
         p_detect = sigmoid(4(sensor_range - dis) / range_falloff)
+        p_detect = clamp(p_detect, p_detect_min, 1-p_detect_min) # to avoid an infinite loop
         OptionalDistr(p_detect, DistrIterator(core))
     end)
 end
@@ -165,32 +167,63 @@ function simulate_scenario(
     (; true_systems, ex_data_list, obs_data_list, truth_path, setups)
 end
 
-function test_scenario(
+function test_posterior_sampling(
     scenario::Scenario,
-    (; true_systems, ex_data_list, obs_data_list, truth_path, setups),
-    algorithm::SynthesisAlgorithm,
-    comps_σ::AbstractVector{Float64},
+    motion_model::Function, 
+    (; ex_data_list, obs_data_list, truth_path, setups),
     post_sampler::PosteriorSampler,
-    n_fit_trajs,
 )
+    state_se(s1::NamedTuple, s2::NamedTuple) = 
+        map((x, y) -> sum((values(x) .- values(y)).^2), s1, s2) |> sum
+
+    systems = map(setups) do setup
+        x0_dist = initial_state_dist(scenario, setup.x0)
+        obs_dist = observation_dist(scenario)
+        MarkovSystem(x0_dist, motion_model, obs_dist)
+    end
     @info("Sampling posterior using the correct dynamics...")
     @time sampler_result = sample_posterior_parallel(
-        post_sampler, true_systems, obs_data_list)
-    @info test_scenario sampler_result.n_effective
+        post_sampler, systems, obs_data_list)
+    @info test_posterior_sampling sampler_result.n_effective
     post_trajs = sampler_result.trajectories
-    for i in 1:length(true_systems)
+    
+    @unzip mse_list, = map(1:length(systems)) do i
         true_states = ex_data_list[i].states
-        x0_dist = true_systems[i].x0_dist
+        x0_dist = systems[i].x0_dist
 
         plt = plot(aspect_ratio=1.0, title="Run $i")
-        plot_trajectories!(scenario, post_trajs[:, i], "true posterior", linecolor=2)
+        run_trajs = post_trajs[:, i]
+        plot_trajectories!(scenario, run_trajs, "true posterior", linecolor=2)
         plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
             state_color=1, landmark_color=3)
         display("image/png", plt)
         fig_path=joinpath(truth_path, "posterior_$i.svg")
         savefig(plt, fig_path)
+
+        # analyze numerical metrics
+        mse = map(run_trajs) do tr
+            @assert length(tr) == length(true_states)
+            map(tr, true_states) do s1, s2
+                state_se(s1, s2)
+            end |> mean
+        end |> mean
+        (; mse)
     end
 
+    log_obs = sampler_result.log_obs |> mean
+    metrics = OrderedDict(:mse=>mean(mse_list), :log_obs=>log_obs)
+    
+    (; post_trajs, metrics)
+end
+
+function test_dynamics_fitting(
+    scenario::Scenario,
+    post_trajs,
+    obs_data_list,
+    algorithm::SynthesisAlgorithm,
+    comps_σ::AbstractVector{Float64},
+    n_fit_trajs,
+)
     if algorithm isa SindySynthesis
         @info("Synthesizing from true posterior using SINDy...")
         (; basis, sketch, optimizer) = algorithm
@@ -233,7 +266,7 @@ end
 
 function synthesize_scenario(
     scenario::Scenario,
-    (; true_systems, ex_data_list, obs_data_list, truth_path),
+    (; ex_data_list, obs_data_list, truth_path),
     syn_alg::SynthesisAlgorithm,
     comps_guess;
     n_fit_trajs=15,
@@ -248,7 +281,7 @@ function synthesize_scenario(
 
         iter_path = mkpath(joinpath(save_dir, "iterations/$iter"))
 
-        for i in 1:length(true_systems)
+        for i in 1:length(ex_data_list)
             true_states = ex_data_list[i].states
             plt = plot(aspect_ratio=1.0, title="Run $i (iter=$iter)")
             plot_trajectories!(scenario, trajectories[:, i], "estimated", linecolor=2)
@@ -259,7 +292,7 @@ function synthesize_scenario(
             i == 1 && display("image/png", plt) # only display the first one
         end
     end
-    obs_model = true_systems[1].obs_model
+    obs_model = observation_dist(scenario)
 
     iter_result = 
         if syn_alg isa SindySynthesis
