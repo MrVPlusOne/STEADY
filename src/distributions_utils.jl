@@ -327,6 +327,13 @@ struct OptionalDistr{R<:Real, Core<:GDistr} <: ExtDistr
     end
 end
 
+Base.print(io::IO, d::OptionalDistr) = 
+    print(io, "OptionalDistr(p=$(d.p), core=$(d.core))")
+
+Base.show(io::IO, d::OptionalDistr) = print(io, d)
+
+Base.show(io::IO, ::Type{<:OptionalDistr}) = print(io, "OptionalDistr{...}")
+
 function rand(rng::AbstractRNG, d::OptionalDistr)
     b = rand(rng, Bernoulli(d.p))::Bool
     if b

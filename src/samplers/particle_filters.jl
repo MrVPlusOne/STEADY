@@ -25,6 +25,10 @@ function systematic_resample!(indices, weights, bins_buffer)
 end
 
 function systematic_resample(weights::AbstractArray{N}, n_samples::Integer) where N
+    if !isfinite(weights)
+        @error "Weights must be finite." weights
+        throw(ArgumentError("Weights must be finite."))
+    end
     indices = collect(1:n_samples)
     bins_buffer = fill(zero(N), length(weights))
     systematic_resample!(indices, weights, bins_buffer)
@@ -38,6 +42,7 @@ function forward_filter(
     resample_threshold::Float64 = 0.5, score_f=logpdf, 
     use_auxiliary_proposal::Bool=false, showprogress=true,
     cache::Dict=Dict(),
+    check_finite::Bool=false,
 ) where X
     @assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
@@ -67,12 +72,26 @@ function forward_filter(
     for t in 1:T
         if t in obs_frames
             for i in 1:N
-                log_weights[i] += score_f(obs_model(particles[i, t]), observations[t])
+                x_i = particles[i, t]
+                obs_dist=obs_model(x_i)
+                log_obs_ti = score_f(obs_dist, observations[t])
+                if check_finite && !isfinite(log_obs_ti)
+                    @error "log_obs_ti is not finite" x_i obs=observations[t] obs_dist
+                    throw(ErrorException("log_obs_ti is not finite."))
+                end
+                log_weights[i] += log_obs_ti
             end
             log_z_t = logsumexp(log_weights)
             log_weights .-= log_z_t
             weights .= exp.(log_weights)
             log_obs += log_z_t
+
+            if check_finite && !(abs(sum(weights) - 1.0) < 1e-6)
+                @error "Weights must sum to one." t sum=sum(weights) log_z_t
+                @error "Weights must sum to one." weights log_weights 
+                @error "Weights must sum to one." particles=particles[:, t]
+                throw(ErrorException("Bad weights produced."))
+            end
 
             # optionally resample
             if effective_particles(weights) < N * resample_threshold
@@ -124,10 +143,10 @@ function filter_smoother(system, obs_data;
     showprogress=true,
     cache::Dict=Dict(),
 )
-    (; particles, log_weights, ancestors, log_obs) = forward_filter(
+    (; particles, weights, log_weights, ancestors, log_obs) = forward_filter(
         system, obs_data, n_particles; resample_threshold, score_f, 
         use_auxiliary_proposal, cache, showprogress)
-    traj_ids = systematic_resample(softmax(log_weights), n_trajs)
+    traj_ids = systematic_resample(weights, n_trajs)
     (;  trajectories, n_effective) = particle_trajectories(particles, ancestors, traj_ids)
     (; trajectories, n_effective, log_obs)
 end

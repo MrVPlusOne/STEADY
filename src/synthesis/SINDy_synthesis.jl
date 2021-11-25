@@ -51,6 +51,8 @@ struct LinearExpression{N}
     type::PType
 end
 
+num_terms(::LinearExpression{N}) where N = N
+
 function LinearExpression(
     shift::Float64, coeffs::AbstractVector, basis::AbstractVector, type::PType
 )
@@ -149,10 +151,10 @@ function sindy_motion_model(sketch::SindySketch, comps::NamedTuple{names}) where
         GenericSamplable(
             rng -> begin
                 local out = NamedTuple{names}(rand(rng, outputs_dist))
-                sketch.outputs_transform(x, out, Δt)
+                sketch.outputs_transform(x, out, Δt)# |> assert_finite
             end, 
             x1 -> begin 
-                local out = sketch.outputs_inv_transform(x, x1, Δt)
+                local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
                 logpdf(outputs_dist, values(out))
             end
         )
@@ -237,12 +239,12 @@ function em_sindy(
         output_types = [v.type for v in sketch.output_vars]
         output_names = [v.name for v in sketch.output_vars]
         optimizer::SeqThresholdOptimizer
-        optimizer1 = @set optimizer.regressor.penalty *= 1/sqrt(n_effective)
-        @time (; comps, stats) = fit_dynamics_sindy(
-            basis, inputs, outputs, output_types, comps_σ, optimizer1)
+        # optimizer1 = @set optimizer.regressor.penalty *= 1/sqrt(n_effective)
+        @time (; comps, stats, lexprs) = fit_dynamics_sindy(
+            basis, inputs, outputs, output_types, comps_σ, optimizer)
         dyn_est = OrderedDict(zip(output_names, comps))
 
-        @info em_sindy iter n_effective
+        @info em_sindy iter n_effective num_terms=sum(num_terms, lexprs)
         @info em_sindy dyn_est
         @info em_sindy stats
     end # end for
@@ -290,7 +292,7 @@ function fit_dynamics_sindy(
     basis_data = hcatreduce(features)
     all(isfinite, basis_data) || @error "Basis data contains NaN or Inf: $basis_data."
 
-    @unzip comps, stats = map(1:size(outputs, 2)) do c
+    @unzip comps, stats, lexprs = map(1:size(outputs, 2)) do c
         target = outputs[:, c]
         opt_scaled = optimizer * comps_σ[c]
         (; coeffs, intercept, active_ids, iterations) = regression(opt_scaled, target, basis_data)
@@ -300,16 +302,16 @@ function fit_dynamics_sindy(
             σ_f = std(target)
         else
             fs = basis[active_ids]
+            σ_f = @views std(basis_data[:, active_ids] * coeffs .+ intercept - target)
             coeffs1 = coeffs ./ scales[active_ids]
-            σ_f = std(basis_data[:, active_ids] * coeffs1 .- outputs[:, c])
             lexpr = LinearExpression(intercept, coeffs1, fs, output_types[c])
         end
         comp = GaussianComponent(compile(lexpr), σ_f)
         stat = (; term_weights = coeffs ./ comps_σ[c], iterations)
-        (comp, stat)
+        (comp, stat, lexpr)
     end
     comps::Vector{<:GaussianComponent}
-    (; comps, stats)
+    (; comps, stats, lexprs)
 end
 
 function construct_inputs_outputs(

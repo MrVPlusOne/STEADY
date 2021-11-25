@@ -34,6 +34,24 @@ using Metatheory.Library: commutative_monoid
 
 Metatheory.@metatheory_init()
 
+# temporary fix for the julia 1.7-rc2 bug
+function Base.collect(itr::Base.Generator)
+    isz = Base.IteratorSize(itr.iter)
+    et = Base.@default_eltype(itr)
+    if isa(isz, Base.SizeUnknown)
+        return Base.grow_to!(Vector{et}(), itr)
+    else
+        shp = Base._similar_shape(itr, isz)
+        y = iterate(itr)
+        if y === nothing
+            return Base._array_for(et, isz, shp)
+        end
+        v1, st = y
+        dest = Base._array_for(typeof(v1), isz, shp)
+        Base.collect_to_with_first!(dest, v1, itr, st)
+    end
+end
+
 include("utils.jl")
 include("distributions_utils.jl")
 include("samplers/samplers.jl")
