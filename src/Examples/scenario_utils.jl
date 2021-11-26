@@ -2,6 +2,8 @@ using Interpolations: LinearInterpolation
 using DrWatson
 import REPL
 using REPL.TerminalMenus
+import JSON
+using TensorBoardLogger: TBLogger
 
 abstract type Scenario end
 
@@ -164,13 +166,14 @@ function simulate_scenario(
         (true_system, ex_data, obs_data, traj_p)
     end
     @unzip true_systems, ex_data_list, obs_data_list, traj_plts = data_list
-    (; true_systems, ex_data_list, obs_data_list, truth_path, setups)
+    (; true_systems, ex_data_list, obs_data_list, setups, save_dir)
 end
 
 function test_posterior_sampling(
     scenario::Scenario,
     motion_model::Function, 
-    (; ex_data_list, obs_data_list, truth_path, setups),
+    test_name::String,
+    (; ex_data_list, obs_data_list, save_dir, setups),
     post_sampler::PosteriorSampler,
 )    
     state_se(s1::NamedTuple, s2::NamedTuple) = 
@@ -181,6 +184,7 @@ function test_posterior_sampling(
         obs_dist = observation_dist(scenario)
         MarkovSystem(x0_dist, motion_model, obs_dist)
     end
+    result_dir = joinpath(save_dir, test_name) |> mkpath
     @info("Sampling posterior using the correct dynamics...")
     @time sampler_result = sample_posterior_parallel(
         post_sampler, systems, obs_data_list)
@@ -197,7 +201,7 @@ function test_posterior_sampling(
         plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
             state_color=1, landmark_color=3)
         display("image/png", plt)
-        fig_path=joinpath(truth_path, "posterior_$i.svg")
+        fig_path=joinpath(result_dir, "posterior_$i.svg")
         savefig(plt, fig_path)
 
         # analyze numerical metrics
@@ -212,6 +216,9 @@ function test_posterior_sampling(
 
     log_obs = sampler_result.log_obs |> mean
     metrics = OrderedDict(:mse=>mean(mse_list), :log_obs=>log_obs)
+    open(joinpath(result_dir, "metrics.json"), "w") do io
+        JSON.print(io, metrics, 4)
+    end
     
     (; post_trajs, metrics)
 end
@@ -271,7 +278,7 @@ end
 function synthesize_scenario(
     scenario::Scenario,
     train_split::Int,
-    (; ex_data_list, obs_data_list, truth_path),
+    (; ex_data_list, obs_data_list, save_dir),
     syn_alg::SynthesisAlgorithm,
     comps_guess;
     n_fit_trajs=15,
@@ -281,6 +288,11 @@ function synthesize_scenario(
     ),
     max_iters=501,
 )
+    if isdir(joinpath(save_dir, "tb_logs"))
+        @warn "Removing existing tensorboard logs..."
+        rm(joinpath(save_dir, "tb_logs"), recursive=true)
+    end
+    logger = TBLogger(joinpath(save_dir, "tb_logs"))
     function iteration_callback((; iter, trajectories, dyn_est))
         (iter <= 10 || mod1(iter, 10) == 1) || return
 
@@ -294,17 +306,21 @@ function synthesize_scenario(
                 state_color=1, landmark_color=3)
             fig_path=joinpath(iter_path, "posterior_$i.svg")
             savefig(plt, fig_path)
+            plt_arg = [Symbol("run_$i") => plt]
+            Base.with_logger(logger) do
+                @info "posterior" plt_arg... log_step_increment=0
+            end
             i == 1 && display("image/png", plt) # only display the first one
         end
     end
     obs_model = observation_dist(scenario)
 
-    iter_result = 
+    syn_result = 
         if syn_alg isa SindySynthesis
             @info("Running EM with Sindy...")
             @time em_sindy(train_split, obs_data_list, syn_alg, comps_guess; 
                 obs_model, sampler=post_sampler, n_fit_trajs, 
-                iteration_callback, max_iters)
+                iteration_callback, logger, max_iters)
         elseif syn_alg isa EnumerativeSynthesis
             (; comp_env) = syn_alg
             @info("Enumerating programs...")
@@ -328,9 +344,8 @@ function synthesize_scenario(
                 iteration_callback,
             )
         end
-        
 
-    (; ex_data_list, obs_data_list, iter_result)
+    syn_result
 end
 
 function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)

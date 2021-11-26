@@ -139,7 +139,7 @@ nothing
 # save results
 using Serialization
 summary_dir=joinpath(save_dir, "summary") |> mkpath
-found_comps = em_result.iter_result.dyn_est
+found_comps = em_result.dyn_est
 open(joinpath(summary_dir, "found_dynamics.txt"), "w") do io
     show(io, "text/plain", found_comps)
 end
@@ -156,9 +156,9 @@ end
 
 test_sim_result = simulate_scenario(scenario, old_motion_model, test_setups; save_dir=test_save_dir)
 metrics_trained = test_posterior_sampling(
-    scenario, test_mm, test_sim_result, post_sampler).metrics
+    scenario, test_mm, "test_trained", test_sim_result, post_sampler).metrics
 metrics_truth = test_posterior_sampling(
-    scenario, old_motion_model, test_sim_result, post_sampler).metrics
+    scenario, old_motion_model, "test_truth", test_sim_result, post_sampler).metrics
 metrics_trained
 metrics_truth
 ##-----------------------------------------------------------

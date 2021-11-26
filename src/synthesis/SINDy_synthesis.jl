@@ -1,5 +1,6 @@
 using LinearAlgebra
 using MLJLinearModels
+using TimerOutputs
 
 abstract type SparseOptimizer end
 
@@ -167,7 +168,7 @@ struct SindySynthesis <: SynthesisAlgorithm
     sketch::SindySketch
     "A list of optimizers with different levels of regularization strength."
     optimizer_list::Vector{<:SparseOptimizer}
-    optimizer_descs::Vector{<:NamedTuple}
+    optimizer_param_list::Vector{<:NamedTuple}
 end
 
 function compile_component(comp::GaussianComponent)
@@ -202,9 +203,11 @@ function em_sindy(
     sampler::PosteriorSampler,
     n_fit_trajs::Int, # the number of trajectories to use for fitting the dynamics
     iteration_callback = (data::NamedTuple{(:iter, :trajectories, :dyn_est)}) -> nothing,
+    logger=Base.current_logger(),
     max_iters::Int=100,
 )
     (; comp_env, basis, sketch, optimizer_list) = sindy_synthesis
+    timer = TimerOutput()
     
     @smart_assert train_split < length(obs_data_list)
     n_valid = length(obs_data_list) - train_split
@@ -226,14 +229,15 @@ function em_sindy(
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
         comps_compiled = map(compile_component, NamedTuple(dyn_est))
         motion_model = sindy_motion_model(sketch, comps_compiled)
-        @time (; trajectories, log_obs) = sample_data(motion_model)
+        (; trajectories, log_obs) = @timeit timer "sample_data" sample_data(motion_model)
         trajectories::Matrix{<:Vector}
 
         push!(dyn_history, dyn_est)
         push!(logp_history, log_obs)
-        println("Estimated log_obs: $(mean(log_obs))")
 
-        iteration_callback((;iter, trajectories, dyn_est))
+        @timeit timer "iteration_callback" begin
+            iteration_callback((;iter, trajectories, dyn_est))
+        end
 
         (iter == max_iters+1) && break
 
@@ -242,17 +246,29 @@ function em_sindy(
         output_names = [v.name for v in sketch.output_vars]
 
         n_fit_trajs = min(n_fit_trajs, size(trajectories, 1))
-        solutions = fit_dynamics_sindy_validated(
-            sindy_synthesis, trajectories, obs_data_list, train_split, comps_σ;
-            output_types, n_fit_trajs)
+        solutions = @timeit timer "fit_dynamics_sindy_validated" begin 
+            fit_dynamics_sindy_validated(
+                sindy_synthesis, trajectories, obs_data_list, train_split, comps_σ;
+                output_types, n_fit_trajs)
+        end
 
         sol = max_by(x -> x.valid_score)(solutions)
-        (; comps, stats, lexprs, valid_score) = sol
+        (; comps, stats, lexprs, train_score, valid_score, optimizer_params) = sol
         dyn_est = OrderedDict(zip(output_names, comps))
 
-        @info em_sindy iter num_terms=sum(num_terms, lexprs)
-        @info em_sindy dyn_est
-        @info em_sindy stats
+        Base.with_logger(logger) do
+            @info "performance" log_obs=mean(log_obs)
+            @info "performance" train_score valid_score log_step_increment=0
+            @info("model", 
+                num_terms=sum(num_terms, lexprs), 
+                comp_σ=(x -> x.σ).(comps), 
+                comps=repr("text/plain", dyn_est),
+                log_step_increment=0)
+            @info "optimizer" optimizer_params... log_step_increment=0
+        end
+        @info "model" iter log_obs=mean(log_obs)
+        @info "model" dyn_est
+        @info "model" stats
     end # end for
     catch exception
         @warn "Synthesis early stopped by exception."
@@ -261,7 +277,8 @@ function em_sindy(
             println(stdout)
         end
     end # end try block
-    (; dyn_est, dyn_history, logp_history)
+    display(timer)
+    (; dyn_est, dyn_history, logp_history, timer)
 end
 
 function show_dyn_history(dyn_history; io=stdout, first_rows=5, max_rows=15, table_width=100)
@@ -291,7 +308,7 @@ function fit_dynamics_sindy_validated(
     n_fit_trajs::Int,
     n_valid_trajs::Int=size(trajectories, 1),
 )
-    (; basis, sketch, optimizer_list, optimizer_descs) = synthesis
+    (; sketch) = synthesis
     @smart_assert train_split < size(trajectories, 2)
     @smart_assert n_fit_trajs <= size(trajectories, 1)
     @smart_assert n_valid_trajs <= size(trajectories, 1)
@@ -304,19 +321,20 @@ function fit_dynamics_sindy_validated(
         train_data, obs_data_list[1:train_split], sketch)
     valid_inputs, valid_outputs = construct_inputs_outputs(
         valid_data, obs_data_list[train_split+1:end], sketch)
-    solutions = @time parallel_map(optimizer_list, nothing) do _, optimizer
+    solutions = @time parallel_map(eachindex(synthesis.optimizer_list), synthesis) do syn, i
+        optimizer, optimizer_params = syn.optimizer_list[i], syn.optimizer_param_list[i]
         optimizer::SeqThresholdOptimizer
 
         (; comps, stats, lexprs) = fit_dynamics_sindy(
-            basis, inputs, outputs, output_types, comps_σ_guess, optimizer)
+            syn.basis, inputs, outputs, output_types, comps_σ_guess, optimizer)
         train_score = data_likelihood(comps, inputs, outputs)
         valid_score = data_likelihood(comps, valid_inputs, valid_outputs)
-        (; comps, stats, lexprs, train_score, valid_score)
+        (; comps, stats, lexprs, train_score, valid_score, optimizer_params)
     end
     println("Pareto analysis: ")
     ordering = sortperm(solutions, rev=true, by=x -> x.valid_score)
-    local rows = map(optimizer_descs, optimizer_list, solutions, ordering) do desc, opt, sol, rank
-        (; desc..., sol.train_score, sol.valid_score, rank)
+    local rows = map(solutions, ordering) do sol, rank
+        (; sol.optimizer_params..., sol.train_score, sol.valid_score, rank)
     end
     display(DataFrame(rows))
 
