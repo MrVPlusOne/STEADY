@@ -148,7 +148,7 @@ function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
         @assert keys(diter.core) == keys(xs) "keys do not match:\n\
             distributions: $(diter.core)\nvalues:$xs"
     end
-    @assert length(diter.core) == length(xs)
+    @smart_assert length(diter.core) == length(xs)
 
     if xs isa Union{Tuple, NamedTuple, StaticArray}
         log_score_static(diter.core, xs, Val{T}(), Val{length(xs)}())

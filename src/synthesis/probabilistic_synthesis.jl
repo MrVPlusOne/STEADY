@@ -50,8 +50,7 @@ end
 
 function Plots.plot(iter_result::IterativeSynthesisResult; start_idx=1)
     (; logp_history, improve_pred_hisotry) = iter_result
-    @assert(length(logp_history) == length(improve_pred_hisotry)+1,
-        "$(length(logp_history)) != $(length(improve_pred_hisotry))+1")
+    @smart_assert length(logp_history) == length(improve_pred_hisotry)+1
 
     xs = start_idx:length(logp_history)
     mean_history = mean.(logp_history)
@@ -114,7 +113,7 @@ function fit_dynamics_iterative(
     p_structure_update_min=0.1,
 )
     (; vdata, sketch) = senum
-    @assert keys(comps_guess) == tuple((v.name for v in sketch.outputs)...)
+    @smart_assert keys(comps_guess) == tuple((v.name for v in sketch.outputs)...)
     for (i, v) in enumerate(sketch.outputs)
         @assert(v.type == comps_guess[i].type,
             "comps_guess[$i] = $(comps_guess[i]) has the wrong type: $(comps_guess[i].type).")
@@ -256,7 +255,7 @@ end
 function _candidate_comps(
     senum, prev_comps::NamedTuple, ::Val{update_id},
 ) where {update_id}
-    @assert update_id isa Integer
+    @smart_assert update_id isa Integer
     update_var = senum.sketch.outputs[update_id]
     update_key = keys(prev_comps)[update_id]
     map(senum.enum_result[update_var.type]) do comp
@@ -387,8 +386,8 @@ function fit_dynamics_params(
     optim_options::Optim.Options,
     use_bijectors=true,
 )
-    @assert length(obs_data_list) == size(trajectories, 2)
-    @assert(isfinite(logpdf(params_dist, params_guess)), 
+    @smart_assert length(obs_data_list) == size(trajectories, 2)
+    @smart_assert(isfinite(logpdf(params_dist, params_guess)), 
         "params_dist=$params_dist\nparams_guess=$params_guess")
 
     if use_bijectors
@@ -396,7 +395,7 @@ function fit_dynamics_params(
         p_inv = inv(p_bj)
         guess_original = params_guess
         guess = p_bj(guess_original)
-        @assert structure_to_vec(p_inv(guess)) ≈ structure_to_vec(guess_original)
+        @smart_assert structure_to_vec(p_inv(guess)) ≈ structure_to_vec(guess_original)
     else
         p_bj = identity
         lower, upper = _compute_bounds(params_dist)

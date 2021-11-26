@@ -202,7 +202,7 @@ function test_posterior_sampling(
 
         # analyze numerical metrics
         mse = map(run_trajs) do tr
-            @assert length(tr) == length(true_states)
+            @smart_assert length(tr) == length(true_states)
             map(tr, true_states) do s1, s2
                 state_se(s1, s2)
             end |> mean
@@ -236,7 +236,7 @@ function test_dynamics_fitting(
             output_types, m_fit_trajs)
         sol = max_by(x -> x.valid_score)(solutions)
         (; comps, stats, lexprs, valid_score) = sol
-        @assert length(sketch.output_vars) == length(comps)
+        @smart_assert length(sketch.output_vars) == length(comps)
         dyn_est = OrderedDict(zip([v.name for v in sketch.output_vars], lexprs))
         @info "test_scenario" dyn_est
         @info "test_scenario" stats

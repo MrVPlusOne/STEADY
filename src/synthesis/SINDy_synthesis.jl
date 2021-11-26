@@ -56,7 +56,7 @@ num_terms(::LinearExpression{N}) where N = N
 function LinearExpression(
     shift::Float64, coeffs::AbstractVector, basis::AbstractVector, type::PType
 )
-    @assert (n=length(coeffs)) == length(basis)
+    @smart_assert (n=length(coeffs)) == length(basis)
     LinearExpression(
         shift, SVector{n, Float64}(coeffs), SVector{n, CompiledFunc}(basis), type)
 end
@@ -335,9 +335,9 @@ function fit_dynamics_sindy(
     optimizer::SparseOptimizer;
 )
     foreach(basis) do f
-        f isa CompiledFunc && @assert f.ast.type.shape == ℝ "basis $f is not a scalar."
+        f isa CompiledFunc && @smart_assert f.ast.type.shape == ℝ "basis $f is not a scalar."
     end
-    @assert size(outputs, 1) == size(inputs, 1)
+    @smart_assert size(outputs, 1) == size(inputs, 1)
 
     @unzip features, scales = map(basis) do f
         feature = f.(inputs)

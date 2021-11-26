@@ -115,7 +115,7 @@ end
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
     check_type(var, value) = begin
         t = shape_env[var.type]
-        @assert value isa t "Prior distribution for \
+        @smart_assert value isa t "Prior distribution for \
             $var produced value $value, expected type: $t"
     end
 

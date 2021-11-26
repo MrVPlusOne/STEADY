@@ -27,7 +27,7 @@ function structure_to_vec!(arr, v::Union{AbstractVector, Tuple, NamedTuple})
         nothing
     end
     rec(v)
-    @assert i[] == length(arr)
+    @smart_assert i[] == length(arr)
     arr
 end
 

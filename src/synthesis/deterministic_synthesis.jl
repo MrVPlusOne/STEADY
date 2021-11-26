@@ -154,7 +154,7 @@ function map_trajectory(
         bj_inv = inv(bj)
         guess_original = guess
         guess = bj(guess_original)
-        @assert structure_to_vec(bj_inv(guess)) ≈ structure_to_vec(guess_original)
+        @smart_assert structure_to_vec(bj_inv(guess)) ≈ structure_to_vec(guess_original)
     else
         lower, upper = _compute_bounds(prior_dist)
     end

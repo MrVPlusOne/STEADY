@@ -7,7 +7,7 @@ function PGAS_kernel(
     system::MarkovSystem{X}, (; times, obs_frames, controls, observations); 
     n_particles, resample_threshold::Float64, showprogress=true,
 ) where X
-    @assert eltype(obs_frames) <: Integer
+    @smart_assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
     (; x0_dist, motion_model, obs_model) = system
 

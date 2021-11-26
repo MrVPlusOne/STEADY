@@ -30,6 +30,41 @@ count_len(iters) = count(_ -> true, iters)
 get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
 get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
+"""
+Like @assert, but try to print out additional information about the arguments.
+## Examples
+```julia
+julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+
+ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+Stacktrace:
+...
+```
+"""
+macro smart_assert(ex, msg=nothing)
+    if @capture(ex, op_(lhs_, rhs_))
+        ex_q = QuoteNode(ex)
+        lhs_q = QuoteNode(lhs)
+        rhs_q = QuoteNode(rhs)
+        has_msg = msg === nothing
+        quote
+            lv = $(esc(lhs))
+            rv = $(esc(rhs))
+            if ! $(esc(op))(lv, rv)
+                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+                if $has_msg
+                    msg_v = $(esc(msg))
+                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
+                else
+                    throw(AssertionError(reason_text))
+                end
+            end
+        end
+    else
+        :(@assert($ex, $msg))
+    end
+end
+
 function normalize_transform(xs::AbstractVector)
     σ = std(xs)
     μ = mean(xs)
@@ -122,41 +157,6 @@ macro unzip_named(assign)
     Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
 end
 
-"""
-Like @assert, but try to print out additional information about the arguments.
-## Examples
-```julia
-julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
-
-ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
-Stacktrace:
-...
-```
-"""
-macro smart_assert(ex, msg=nothing)
-    if @capture(ex, op_(lhs_, rhs_))
-        ex_q = QuoteNode(ex)
-        lhs_q = QuoteNode(lhs)
-        rhs_q = QuoteNode(rhs)
-        has_msg = msg === nothing
-        quote
-            lv = $(esc(lhs))
-            rv = $(esc(rhs))
-            if ! $(esc(op))(lv, rv)
-                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
-                if $has_msg
-                    msg_v = $(esc(msg))
-                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
-                else
-                    throw(AssertionError(reason_text))
-                end
-            end
-        end
-    else
-        :(@assert($ex, $msg))
-    end
-end
-
 
 @inline rotation2D(θ) = @SArray(
     [cos(θ) -sin(θ)
@@ -207,14 +207,14 @@ Apply a tuple of functions to a NamedTuple of corresponding arguments. The resul
 NamedTuple.
 """
 @inline function zipmap(fs, xs::X)::X where {X<:NamedTuple}
-    @assert length(fs) == length(xs) "Need the same number of functions and values.\
+    @smart_assert length(fs) == length(xs) "Need the same number of functions and values.\
         \nfs = $fs\nxs = $xs."
     t = ntuple(i -> fs[i](xs[i]), length(xs))
     NamedTuple{keys(xs)}(t)
 end
 
 function zipmap(fs, xs::AbstractVector)
-    @assert length(fs) == length(xs) "Need the same number of functions and values"
+    @smart_assert length(fs) == length(xs) "Need the same number of functions and values"
     map((f, x) -> f(x), fs, xs)
 end
 
