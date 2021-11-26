@@ -172,7 +172,7 @@ function test_posterior_sampling(
     motion_model::Function, 
     (; ex_data_list, obs_data_list, truth_path, setups),
     post_sampler::PosteriorSampler,
-)
+)    
     state_se(s1::NamedTuple, s2::NamedTuple) = 
         map((x, y) -> sum((values(x) .- values(y)).^2), s1, s2) |> sum
 
@@ -218,22 +218,26 @@ end
 
 function test_dynamics_fitting(
     scenario::Scenario,
-    post_trajs,
+    train_split::Int,
+    post_trajs::Matrix,
     obs_data_list,
     algorithm::SynthesisAlgorithm,
     comps_σ::AbstractVector{Float64},
-    n_fit_trajs,
+    m_fit_trajs,
 )
+    @smart_assert train_split < length(obs_data_list)
+
     if algorithm isa SindySynthesis
         @info("Synthesizing from true posterior using SINDy...")
-        (; basis, sketch, optimizer) = algorithm
+        (; basis, sketch, optimizer_list) = algorithm
         output_types = [v.type for v in sketch.output_vars]
-        inputs, outputs = 
-            @time construct_inputs_outputs(post_trajs[1:n_fit_trajs, :], obs_data_list, sketch)
-        (; comps, stats) = @time fit_dynamics_sindy(
-            basis, inputs, outputs, output_types, comps_σ, optimizer)
+        solutions = fit_dynamics_sindy_validated(
+            algorithm, post_trajs, obs_data_list, train_split, comps_σ;
+            output_types, m_fit_trajs)
+        sol = max_by(x -> x.valid_score)(solutions)
+        (; comps, stats, lexprs, valid_score) = sol
         @assert length(sketch.output_vars) == length(comps)
-        dyn_est = OrderedDict(zip([v.name for v in sketch.output_vars], comps))
+        dyn_est = OrderedDict(zip([v.name for v in sketch.output_vars], lexprs))
         @info "test_scenario" dyn_est
         @info "test_scenario" stats
     elseif algorithm isa EnumerativeSynthesis
@@ -266,6 +270,7 @@ end
 
 function synthesize_scenario(
     scenario::Scenario,
+    train_split::Int,
     (; ex_data_list, obs_data_list, truth_path),
     syn_alg::SynthesisAlgorithm,
     comps_guess;
@@ -296,9 +301,8 @@ function synthesize_scenario(
 
     iter_result = 
         if syn_alg isa SindySynthesis
-            (; basis, sketch, optimizer) = syn_alg
             @info("Running EM with Sindy...")
-            @time em_sindy(obs_data_list, syn_alg, comps_guess; 
+            @time em_sindy(train_split, obs_data_list, syn_alg, comps_guess; 
                 obs_model, sampler=post_sampler, n_fit_trajs, 
                 iteration_callback, max_iters)
         elseif syn_alg isa EnumerativeSynthesis

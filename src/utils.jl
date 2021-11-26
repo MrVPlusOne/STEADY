@@ -122,6 +122,41 @@ macro unzip_named(assign)
     Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
 end
 
+"""
+Like @assert, but try to print out additional information about the arguments.
+## Examples
+```julia
+julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+
+ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+Stacktrace:
+...
+```
+"""
+macro smart_assert(ex, msg=nothing)
+    if @capture(ex, op_(lhs_, rhs_))
+        ex_q = QuoteNode(ex)
+        lhs_q = QuoteNode(lhs)
+        rhs_q = QuoteNode(rhs)
+        has_msg = msg === nothing
+        quote
+            lv = $(esc(lhs))
+            rv = $(esc(rhs))
+            if ! $(esc(op))(lv, rv)
+                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+                if $has_msg
+                    msg_v = $(esc(msg))
+                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
+                else
+                    throw(AssertionError(reason_text))
+                end
+            end
+        end
+    else
+        :(@assert($ex, $msg))
+    end
+end
+
 
 @inline rotation2D(θ) = @SArray(
     [cos(θ) -sin(θ)

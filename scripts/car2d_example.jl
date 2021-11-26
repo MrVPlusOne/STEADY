@@ -101,10 +101,15 @@ algorithm = let
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-    regressor = LassoRegression(1.0; fit_intercept=true)
-    # regressor = RidgeRegression(10.0; fit_intercept=false)
-    optimizer = SeqThresholdOptimizer(0.1, regressor)
-    SindySynthesis(comp_env, basis, sketch, optimizer)
+    lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8]
+    @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
+        regressor = LassoRegression(λ; fit_intercept=true)
+        GeneralizedLinearRegression()
+        # regressor = RidgeRegression(10.0; fit_intercept=false)
+        SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+    end
+    
+    SindySynthesis(comp_env, basis, sketch, optimizer_list, optimizer_descs)
 end
 
 post_sampler = ParticleFilterSampler(
@@ -119,12 +124,15 @@ em_result = let
         :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
-    true_post_trajs = test_posterior_sampling(
-        scenario, old_motion_model, sim_result, post_sampler).post_trajs
-    test_dynamics_fitting(scenario, true_post_trajs, sim_result.obs_data_list, 
-        algorithm, comps_σ, n_fit_trajs)
+    train_split = n_runs ÷ 2
+    # true_post_trajs = test_posterior_sampling(
+    #     scenario, old_motion_model, sim_result, post_sampler).post_trajs
+    # test_dynamics_fitting(
+    #     scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
+    #     algorithm, comps_σ, n_fit_trajs)
     synthesize_scenario(
-        scenario, sim_result, algorithm, comps_guess; post_sampler, n_fit_trajs)
+        scenario, train_split, sim_result, algorithm, comps_guess; 
+        post_sampler, n_fit_trajs)
 end
 nothing
 ##-----------------------------------------------------------
