@@ -15,7 +15,7 @@ scenario = HovercraftScenario(LandmarkInfo(; landmarks))
 times = collect(0.0:0.1:14)
 obs_frames = 1:4:length(times)
 true_params = (; 
-    mass = 1.5, drag_x = 0.08, drag_y=0.12, rot_mass=1.5, rot_drag=0.07, sep=0.81,
+    mass = 1.5, drag_x = 0.06, drag_y=0.10, rot_mass=1.5, rot_drag=0.07, sep=0.81,
     σ_v=0.04, σ_ω=0.03)
 params_guess = (; 
     mass = 1.65, drag_x = 0.04, drag_y=0.1, rot_mass=1.66, rot_drag=0.09, sep=0.87,
@@ -62,9 +62,6 @@ train_setups, test_setups = let
     end
     setups[1:n_runs], setups[n_runs+1:n_runs+n_test_runs]
 end
-
-state_distance(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
-
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
@@ -101,11 +98,14 @@ algorithm = let
     basis_expr = TAST[]
     for v1 in sketch.input_vars
         push!(basis_expr, v1)
-        for v2 in sketch.input_vars
-            if v2.name <= v1.name
-                push!(basis_expr, v1*v2)
-            end
+        for v in sketch.input_vars
+            push!(basis_expr, v*v)
         end
+        # for v2 in sketch.input_vars
+        #     if v2.name <= v1.name
+        #         push!(basis_expr, v1*v2)
+        #     end
+        # end
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
@@ -134,39 +134,21 @@ em_result = let
     )
     true_post_trajs = test_posterior_sampling(
         scenario, old_motion_model, "test_truth", 
-        sim_result, post_sampler, state_distance).post_trajs
+        sim_result, post_sampler, L2_in_SE2).post_trajs
     test_dynamics_fitting(
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
         algorithm, comps_σ, n_fit_trajs)
     synthesize_scenario(
         scenario, train_split, sim_result, algorithm, comps_guess; 
-        post_sampler, n_fit_trajs, max_iters=10)
+        post_sampler, n_fit_trajs, max_iters=501)
 end
 nothing
 ##-----------------------------------------------------------
 # test found dynamics
-test_save_dir=datadir("sims/car2d/test")
-trained_mm = let 
-    sketch = sindy_sketch(scenario)
-    sindy_motion_model(sketch, NamedTuple(em_result.dyn_est))
-end
-
-test_sim_result = simulate_scenario(
-    scenario, old_motion_model, test_setups; save_dir=test_save_dir)
-metrics_trained = test_posterior_sampling(
-    scenario, trained_mm, "test_trained", 
-    test_sim_result, post_sampler, state_distance).metrics
-metrics_truth = test_posterior_sampling(
-    scenario, old_motion_model, "test_truth", 
-    test_sim_result, post_sampler, state_distance).metrics
-metrics_baseline = test_posterior_sampling(
-    scenario, simplified_motion_model(scenario, true_params), "test_baseline", 
-    test_sim_result, post_sampler, state_distance).metrics
-
-DataFrame([
-    (name="baseline", metrics_baseline...),
-    (name="trained", metrics_trained...),
-    (name="true model", metrics_truth...),
-])
+analyze_motion_model_performance(
+    scenario, em_result.dyn_est, old_motion_model, 
+    get_simplified_motion_model(scenario, true_params), test_setups;
+    save_dir, post_sampler, state_L2_loss=L2_in_SE2,
+)
 ##-----------------------------------------------------------
 

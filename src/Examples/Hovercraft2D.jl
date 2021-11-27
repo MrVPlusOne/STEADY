@@ -212,7 +212,15 @@ function sindy_core(
     )
 end
 
-function simplified_motion_model(
+function plot_scenario!(sce::HovercraftScenario, states, obs_data, name; plt_args...)
+    plot_2d_scenario!(states, obs_data, name; sce.landmark_info.landmarks, plt_args...)
+end
+
+function plot_trajectories!(::HovercraftScenario, trajectories, name; plt_args...)
+    plot_2d_trajectories!(trajectories, name; plt_args...)
+end
+
+function get_simplified_motion_model(
     sce::HovercraftScenario, 
     (; σ_v, σ_ω, mass, rot_mass, sep),
 )
@@ -220,12 +228,4 @@ function simplified_motion_model(
     comps = sindy_core(sce, (; σ_v, σ_ω, mass, rot_mass, sep, 
         drag_x=0.0, drag_y=0.0, rot_drag=0.0))
     sindy_motion_model(sketch, comps)
-end
-
-function plot_scenario!(sce::HovercraftScenario, states, obs_data, name; plt_args...)
-    plot_2d_scenario!(states, obs_data, name; sce.landmark_info.landmarks, plt_args...)
-end
-
-function plot_trajectories!(::HovercraftScenario, trajectories, name; plt_args...)
-    plot_2d_trajectories!(trajectories, name; plt_args...)
 end

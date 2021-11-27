@@ -167,10 +167,23 @@ rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
 
 const ° = π / 180
 
-to_measurement(values) = begin
+to_measurement(values::AbsVec{<:Real}) = begin
+    @assert !isempty(values)
     μ = mean(values)
     σ = std(values)
     μ ± σ
+end
+
+to_measurement(values::AbsVec{<:AbstractDict}) = begin
+    @assert !isempty(values)
+    
+    keyset = Set(keys(values[1]))
+
+    for d in values
+        @smart_assert keyset == Set(keys(d))
+    end
+
+    (key => to_measurement(map(x -> x[key], values)) for key in keyset) |> Dict
 end
 
 """

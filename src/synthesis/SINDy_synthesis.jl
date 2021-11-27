@@ -256,17 +256,22 @@ function em_sindy(
         (; comps, stats, lexprs, train_score, valid_score, optimizer_params) = sol
         dyn_est = OrderedDict(zip(output_names, comps))
 
+        log_obs_train = mean(log_obs[1:train_split])
+        log_obs_valid = mean(log_obs[train_split+1:end])
+        σ_list = [Symbol(name, ".σ") => comp.σ for (name, comp) in dyn_est]
+
         Base.with_logger(logger) do
-            @info "performance" log_obs=mean(log_obs)
+            @info "performance" log_obs_train log_obs_valid
             @info "performance" train_score valid_score log_step_increment=0
             @info("model", 
                 num_terms=sum(num_terms, lexprs), 
-                comp_σ=(x -> x.σ).(comps), 
+                σ_list...,
                 comps=repr("text/plain", dyn_est),
                 log_step_increment=0)
             @info "optimizer" optimizer_params... log_step_increment=0
         end
-        @info "model" iter log_obs=mean(log_obs)
+        @info "performance" iter log_obs_train log_obs_valid 
+        @info "model" num_terms=sum(num_terms, lexprs)
         @info "model" dyn_est
         @info "model" stats
     end # end for

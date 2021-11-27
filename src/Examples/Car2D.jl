@@ -189,3 +189,23 @@ end
 function plot_trajectories!(::Car2dScenario, trajectories, name; plt_args...)
     plot_2d_trajectories!(trajectories, name; plt_args...)
 end
+
+function get_simplified_motion_model(
+    sce::Car2dScenario,
+    (; len, σ_v, σ_ω),
+)
+    (state::NamedTuple, ctrl::NamedTuple, Δt::Real) -> begin
+        (; pos, vel, θ, ω) = state
+        (; steer, v̂) = ctrl
+
+        vel_pred = rotate2d(θ, @SVector[v̂, 0.0])
+        ω_pred = tan(steer) * v̂ / 2len
+        
+        DistrIterator((
+            pos = SMvNormal(pos + vel_pred * Δt, 5max(abs(v̂), 0.1) * Δt * σ_v),
+            vel = Dirac(vel_pred),
+            θ = Normal(θ + ω_pred * Δt, 5max(abs(ω_pred), 0.1) * Δt * σ_ω),
+            ω = Dirac(ω_pred),
+        ))
+    end
+end

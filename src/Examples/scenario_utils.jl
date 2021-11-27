@@ -5,6 +5,7 @@ using REPL.TerminalMenus
 import JSON
 using TensorBoardLogger: TBLogger
 using Serialization
+using ProgressLogging: @withprogress, @logprogress
 
 abstract type Scenario end
 
@@ -44,6 +45,11 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where bo
         OptionalDistr(p_detect, DistrIterator(core))
     end)
 end
+
+"""
+The L2 loss defined on the SE(2) manifold.
+"""
+L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
 
 """
 ## Examples
@@ -175,8 +181,9 @@ function test_posterior_sampling(
     motion_model::Function, 
     test_name::String,
     (; ex_data_list, obs_data_list, save_dir, setups),
-    post_sampler::PosteriorSampler,
+    post_sampler::PosteriorSampler;
     state_L2_loss::Function, # (x, y) -> Float64
+    generate_plots::Bool=true,
 )    
     systems = map(setups) do setup
         x0_dist = initial_state_dist(scenario, setup.x0)
@@ -193,15 +200,17 @@ function test_posterior_sampling(
     @unzip RMSE_list, = map(1:length(systems)) do i
         true_states = ex_data_list[i].states
         x0_dist = systems[i].x0_dist
-
-        plt = plot(aspect_ratio=1.0, title="Run $i")
         run_trajs = post_trajs[:, i]
-        plot_trajectories!(scenario, run_trajs, "true posterior", linecolor=2)
-        plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
-            state_color=1, landmark_color=3)
-        display("image/png", plt)
-        fig_path=joinpath(result_dir, "posterior_$i.svg")
-        savefig(plt, fig_path)
+
+        if generate_plots
+            plt = plot(aspect_ratio=1.0, title="Run $i")
+            plot_trajectories!(scenario, run_trajs, "true posterior", linecolor=2)
+            plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
+                state_color=1, landmark_color=3)
+            display("image/png", plt)
+            fig_path=joinpath(result_dir, "posterior_$i.svg")
+            savefig(plt, fig_path)
+        end
 
         # analyze numerical metrics
         RMSE = map(run_trajs) do tr
@@ -352,6 +361,51 @@ function synthesize_scenario(
         end
 
     syn_result
+end
+
+function analyze_motion_model_performance(
+    scenario::Scenario,
+    dyn_est::OrderedDict,
+    true_mm::Function,
+    baseline_mm::Function,
+    test_setups::AbsVec{<:ScenarioSetup};
+    save_dir,
+    post_sampler,
+    state_L2_loss,
+    n_repeat::Int=5,
+)
+    test_save_dir=joinpath(save_dir, "test")
+    trained_mm = let 
+        sketch = sindy_sketch(scenario)
+        sindy_motion_model(sketch, NamedTuple(dyn_est))
+    end
+
+    test_sim_result = simulate_scenario(
+        scenario, true_mm, test_setups; save_dir=test_save_dir)
+
+    motion_models = [
+        ("baseline", baseline_mm), ("trained", trained_mm), ("true_model", true_mm)]
+    
+    prog_step = 0
+    rows = @withprogress name="analyze_motion_model_performance" begin
+        map(motion_models) do (name, mm)
+            row = map(1:n_repeat) do i
+                @logprogress prog_step/(length(motion_models) * n_repeat)
+                prog_step+=1
+                test_posterior_sampling(
+                    scenario, mm, name, 
+                    test_sim_result, post_sampler; 
+                    state_L2_loss, generate_plots=i==1
+                ).metrics
+            end |> to_measurement
+            (; name, row...)
+        end
+    end
+    metric_table = DataFrame(rows)
+    write(joinpath(test_save_dir, "metrics.txt"), repr(metric_table))
+    @tagsave(joinpath(test_save_dir, "metrics.jld2"), @strdict(metric_table))
+
+    metric_table
 end
 
 function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
