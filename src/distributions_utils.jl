@@ -271,6 +271,16 @@ end
 
 """
 Like a normal distribution, but always warp values to [0, 2π). 
+
+## Examples
+```julia
+using Plots
+let cd = CircularNormal(0.5, 0.5)
+    histogram(rand(cd, 10000), normalize=true, bins=100, label="sample")
+    plot!(0:0.01:2π, pdf(cd, 0:0.01:2π), label="analytical")
+end
+...
+```
 """
 struct CircularNormal{T1, T2} <: ContinuousUnivariateDistribution
     μ::T1
@@ -285,13 +295,11 @@ extrema(::CircularNormal) = (0.0, 2π)
 rand(rng::AbstractRNG, d::CircularNormal) = 
     warp_angle(rand(rng, truncated(Normal(0.0, d.σ), -π, π)) + d.μ)
 logpdf(d::CircularNormal, x) = let
-    dis = warp_angle(x - d.μ)
-    dis = min(dis, 2π-dis)
+    dis = angular_distance(x, d.μ)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
 function log_score(d::CircularNormal, x, ::Type{T})::T where T
-    dis = warp_angle(x - d.μ)
-    dis = min(dis, 2π-dis)
+    dis = angular_distance(x, d.μ)
     log_score(Normal(0.0, d.σ), dis, T)
 end
 

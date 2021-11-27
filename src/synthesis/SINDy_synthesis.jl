@@ -321,7 +321,7 @@ function fit_dynamics_sindy_validated(
         train_data, obs_data_list[1:train_split], sketch)
     valid_inputs, valid_outputs = construct_inputs_outputs(
         valid_data, obs_data_list[train_split+1:end], sketch)
-    solutions = @time parallel_map(eachindex(synthesis.optimizer_list), synthesis) do syn, i
+    solutions = parallel_map(eachindex(synthesis.optimizer_list), synthesis) do syn, i
         optimizer, optimizer_params = syn.optimizer_list[i], syn.optimizer_param_list[i]
         optimizer::SeqThresholdOptimizer
 

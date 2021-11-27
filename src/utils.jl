@@ -230,6 +230,11 @@ warp_angle(angle::Real) = let
     x < 0 ? x + 2π : x
 end
 
+angular_distance(θ1, θ2) = begin
+    Δ = abs(θ1-θ2) % 2π
+    min(Δ, 2π-Δ)
+end
+
 """
 Lightweight version of @timed.
 """

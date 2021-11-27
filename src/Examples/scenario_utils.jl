@@ -4,6 +4,7 @@ import REPL
 using REPL.TerminalMenus
 import JSON
 using TensorBoardLogger: TBLogger
+using Serialization
 
 abstract type Scenario end
 
@@ -175,23 +176,21 @@ function test_posterior_sampling(
     test_name::String,
     (; ex_data_list, obs_data_list, save_dir, setups),
     post_sampler::PosteriorSampler,
+    state_L2_loss::Function, # (x, y) -> Float64
 )    
-    state_se(s1::NamedTuple, s2::NamedTuple) = 
-        map((x, y) -> sum((values(x) .- values(y)).^2), s1, s2) |> sum
-
     systems = map(setups) do setup
         x0_dist = initial_state_dist(scenario, setup.x0)
         obs_dist = observation_dist(scenario)
         MarkovSystem(x0_dist, motion_model, obs_dist)
     end
     result_dir = joinpath(save_dir, test_name) |> mkpath
-    @info("Sampling posterior using the correct dynamics...")
+    @info("[$test_name] Sampling posterior using the provided motion model...")
     @time sampler_result = sample_posterior_parallel(
         post_sampler, systems, obs_data_list)
     @info test_posterior_sampling sampler_result.n_effective
     post_trajs = sampler_result.trajectories
     
-    @unzip mse_list, = map(1:length(systems)) do i
+    @unzip RMSE_list, = map(1:length(systems)) do i
         true_states = ex_data_list[i].states
         x0_dist = systems[i].x0_dist
 
@@ -205,17 +204,17 @@ function test_posterior_sampling(
         savefig(plt, fig_path)
 
         # analyze numerical metrics
-        mse = map(run_trajs) do tr
+        RMSE = map(run_trajs) do tr
             @smart_assert length(tr) == length(true_states)
             map(tr, true_states) do s1, s2
-                state_se(s1, s2)
+                state_L2_loss(s1, s2)
             end |> mean
-        end |> mean
-        (; mse)
+        end |> mean |> sqrt
+        (; RMSE)
     end
 
     log_obs = sampler_result.log_obs |> mean
-    metrics = OrderedDict(:mse=>mean(mse_list), :log_obs=>log_obs)
+    metrics = OrderedDict(:RMSE=>mean(RMSE_list), :log_obs=>log_obs)
     open(joinpath(result_dir, "metrics.json"), "w") do io
         JSON.print(io, metrics, 4)
     end
@@ -230,7 +229,7 @@ function test_dynamics_fitting(
     obs_data_list,
     algorithm::SynthesisAlgorithm,
     comps_σ::AbstractVector{Float64},
-    m_fit_trajs,
+    n_fit_trajs,
 )
     @smart_assert train_split < length(obs_data_list)
 
@@ -240,7 +239,7 @@ function test_dynamics_fitting(
         output_types = [v.type for v in sketch.output_vars]
         solutions = fit_dynamics_sindy_validated(
             algorithm, post_trajs, obs_data_list, train_split, comps_σ;
-            output_types, m_fit_trajs)
+            output_types, n_fit_trajs)
         sol = max_by(x -> x.valid_score)(solutions)
         (; comps, stats, lexprs, valid_score) = sol
         @smart_assert length(sketch.output_vars) == length(comps)
@@ -311,6 +310,13 @@ function synthesize_scenario(
                 @info "posterior" plt_arg... log_step_increment=0
             end
             i == 1 && display("image/png", plt) # only display the first one
+        end
+
+        open(joinpath(iter_path, "dyn_est.txt"), "w") do io
+            show(io, "text/plain", dyn_est)
+        end
+        open(joinpath(iter_path, "dyn_est.serial"), "w") do io
+            serialize(io, dyn_est)
         end
     end
     obs_model = observation_dist(scenario)

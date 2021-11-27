@@ -62,17 +62,18 @@ end
 n_runs = 6
 n_fit_trajs = 15
 n_test_runs = 5
-setups = map(1:n_runs+n_test_runs) do i
-    x0 = (
-        pos=@SVector[-6.5+randn(), 1.2+randn()], 
-        vel=@SVector[0.25, 0.0],
-        θ=randn()°, 
-        ω=0.1randn(),
-    )
-    ScenarioSetup(times, obs_frames, x0, manual_control(front_drive))
+train_setups, test_setups = let 
+    setups = map(1:n_runs+n_test_runs) do i
+        x0 = (
+            pos=@SVector[-6.5+randn(), 1.2+randn()], 
+            vel=@SVector[0.25, 0.0],
+            θ=randn()°, 
+            ω=0.1randn(),
+        )
+        ScenarioSetup(times, obs_frames, x0, manual_control(front_drive))
+    end
+    setups[1:n_runs], setups[n_runs+1:n_runs+n_test_runs]
 end
-train_setups = setups[1:n_runs]
-test_setups = setups[n_runs+1:n_runs+n_test_runs]
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
@@ -126,7 +127,7 @@ em_result = let
     )
     train_split = n_runs ÷ 2
     # true_post_trajs = test_posterior_sampling(
-    #     scenario, old_motion_model, sim_result, post_sampler).post_trajs
+    #     scenario, old_motion_model, "test_truth", sim_result, post_sampler).post_trajs
     # test_dynamics_fitting(
     #     scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
     #     algorithm, comps_σ, n_fit_trajs)
@@ -135,17 +136,6 @@ em_result = let
         post_sampler, n_fit_trajs)
 end
 nothing
-##-----------------------------------------------------------
-# save results
-using Serialization
-summary_dir=joinpath(save_dir, "summary") |> mkpath
-found_comps = em_result.dyn_est
-open(joinpath(summary_dir, "found_dynamics.txt"), "w") do io
-    show(io, "text/plain", found_comps)
-end
-open(joinpath(summary_dir, "found_dynamics.serial"), "w") do io
-    serialize(io, found_comps)
-end
 ##-----------------------------------------------------------
 # test found dynamics
 test_save_dir=datadir("sims/car2d/test")

@@ -45,17 +45,26 @@ function manual_control()
     end
 end
 
-n_runs = 6
+n_runs = 10
+n_test_runs = 10
 n_fit_trajs = 10
-setups = map(1:n_runs) do i 
-    x0 = (
-        pos=@SVector[0.5+randn(), 0.5+randn()], 
-        vel=@SVector[0.25+0.3randn(), 0.0+0.2randn()], 
-        θ=randn()°, 
-        ω=0.2randn(),
-    )
-    ScenarioSetup(times, obs_frames, x0, manual_control())
+train_split = 6
+
+train_setups, test_setups = let
+    setups = map(1:n_runs+n_test_runs) do i 
+        x0 = (
+            pos=@SVector[0.5+randn(), 0.5+randn()], 
+            vel=@SVector[0.25+0.3randn(), 0.0+0.2randn()], 
+            θ=randn()°, 
+            ω=0.2randn(),
+        )
+        ScenarioSetup(times, obs_frames, x0, manual_control())
+    end
+    setups[1:n_runs], setups[n_runs+1:n_runs+n_test_runs]
 end
+
+state_distance(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
+
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
@@ -79,7 +88,7 @@ new_motion_model = let
     end
     sindy_motion_model(sketch, core)
 end
-sim_result = simulate_scenario(scenario, new_motion_model, setups; save_dir)
+sim_result = simulate_scenario(scenario, new_motion_model, train_setups; save_dir)
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
@@ -90,59 +99,74 @@ algorithm = let
     components_scalar_arithmatic!(comp_env, can_grow=true)
 
     basis_expr = TAST[]
-    basis_weights = Float64[]
     for v1 in sketch.input_vars
         push!(basis_expr, v1)
-        push!(basis_weights, 25.0)
         for v2 in sketch.input_vars
             if v2.name <= v1.name
                 push!(basis_expr, v1*v2)
-                push!(basis_weights, 200.0)
             end
         end
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-    regressor = LassoRegression(1.0; fit_intercept=true)
-    # regressor = RidgeRegression(1.0; fit_intercept=true)
-    # regressor = LinearRegression(fit_intercept=true)
-    optimizer = SeqThresholdOptimizer(0.1, regressor)
-    SindySynthesis(comp_env, basis, sketch, optimizer)
+    lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 5
+    @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
+        regressor = LassoRegression(λ; fit_intercept=true)
+        GeneralizedLinearRegression()
+        # regressor = RidgeRegression(10.0; fit_intercept=false)
+        SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+    end
+    
+    SindySynthesis(comp_env, basis, sketch, optimizer_list, optimizer_descs)
 end
 
+post_sampler = ParticleFilterSampler(
+    n_particles=60_000,
+    n_trajs=100,
+)
+
 em_result = let
-    post_sampler = ParticleFilterSampler(
-        n_particles=60_000,
-        n_trajs=100,
-    )
     comps_σ = [0.1,0.1,0.1]
     comps_guess = OrderedDict(
         :loc_ax => GaussianComponent(_ -> 0.0, 0.1),
         :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
         :der_ω => GaussianComponent(_ -> 0.0, 0.1),
     )
-    # comps_guess = true_comps
-
-    test_scenario(scenario, sim_result, algorithm, comps_σ, post_sampler, n_fit_trajs)
+    true_post_trajs = test_posterior_sampling(
+        scenario, old_motion_model, "test_truth", 
+        sim_result, post_sampler, state_distance).post_trajs
+    test_dynamics_fitting(
+        scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
+        algorithm, comps_σ, n_fit_trajs)
     synthesize_scenario(
-        scenario, sim_result, algorithm, comps_guess; post_sampler, n_fit_trajs)
+        scenario, train_split, sim_result, algorithm, comps_guess; 
+        post_sampler, n_fit_trajs, max_iters=10)
 end
 nothing
 ##-----------------------------------------------------------
-# plot and save the results
-show_dyn_history(em_result.iter_result.dyn_history, table_width=50)
-summary_dir=joinpath(save_dir, "summary") |> mkdir
-open(joinpath(summary_dir, "iter_result.txt"), "w") do io
-    println(io, em_result)
+# test found dynamics
+test_save_dir=datadir("sims/car2d/test")
+trained_mm = let 
+    sketch = sindy_sketch(scenario)
+    sindy_motion_model(sketch, NamedTuple(em_result.dyn_est))
 end
-# let param_plt = plot_params(em_result)
-#     display(param_plt)
-#     savefig(param_plt, joinpath(summary_dir, "params.svg"))
-# end
-typeof(em_result.iter_result)
-let perf_plot = plot_performance(em_result, start_idx=10)
-    display(perf_plot)
-    savefig(perf_plot, joinpath(summary_dir, "performance.svg"))
-end
+
+test_sim_result = simulate_scenario(
+    scenario, old_motion_model, test_setups; save_dir=test_save_dir)
+metrics_trained = test_posterior_sampling(
+    scenario, trained_mm, "test_trained", 
+    test_sim_result, post_sampler, state_distance).metrics
+metrics_truth = test_posterior_sampling(
+    scenario, old_motion_model, "test_truth", 
+    test_sim_result, post_sampler, state_distance).metrics
+metrics_baseline = test_posterior_sampling(
+    scenario, simplified_motion_model(scenario, true_params), "test_baseline", 
+    test_sim_result, post_sampler, state_distance).metrics
+
+DataFrame([
+    (name="baseline", metrics_baseline...),
+    (name="trained", metrics_trained...),
+    (name="true model", metrics_truth...),
+])
 ##-----------------------------------------------------------
 

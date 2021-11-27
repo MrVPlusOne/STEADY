@@ -189,6 +189,39 @@ function dynamics_core(::HovercraftScenario)
     end
 end
 
+function sindy_core(
+    sce::HovercraftScenario, 
+    (; σ_v, σ_ω, mass, rot_mass, sep, drag_x, drag_y, rot_drag),
+)
+    (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
+    comp_env = ComponentEnv()
+    components_scalar_arithmatic!(comp_env)
+    cp = compile
+    (
+        loc_ax = GaussianComponent(cp(
+            LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
+                [ul, ur, loc_vx], loc_ax.ast.type)), 
+            σ_v),
+        loc_ay = GaussianComponent(cp(
+            LinearExpression(0.0, [-drag_y/mass], [loc_vy], loc_ay.ast.type)), 
+            σ_v),
+        der_ω = GaussianComponent(cp(
+            LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
+                [ur, ul, ω], der_ω.ast.type)), 
+            σ_ω),
+    )
+end
+
+function simplified_motion_model(
+    sce::HovercraftScenario, 
+    (; σ_v, σ_ω, mass, rot_mass, sep),
+)
+    sketch = sindy_sketch(sce)
+    comps = sindy_core(sce, (; σ_v, σ_ω, mass, rot_mass, sep, 
+        drag_x=0.0, drag_y=0.0, rot_drag=0.0))
+    sindy_motion_model(sketch, comps)
+end
+
 function plot_scenario!(sce::HovercraftScenario, states, obs_data, name; plt_args...)
     plot_2d_scenario!(states, obs_data, name; sce.landmark_info.landmarks, plt_args...)
 end
