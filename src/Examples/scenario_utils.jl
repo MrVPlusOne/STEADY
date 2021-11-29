@@ -236,25 +236,26 @@ function test_dynamics_fitting(
     train_split::Int,
     post_trajs::Matrix,
     obs_data_list,
-    algorithm::SynthesisAlgorithm,
+    algorithm::AbstractRegerssionAlgorithm,
+    sketch,
     comps_σ::AbstractVector{Float64},
     n_fit_trajs,
 )
     @smart_assert train_split < length(obs_data_list)
 
-    if algorithm isa SindySynthesis
+    if algorithm isa SindyRegression
         @info("Synthesizing from true posterior using SINDy...")
-        (; basis, sketch, optimizer_list) = algorithm
+        (; basis, optimizer_list) = algorithm
         output_types = [v.type for v in sketch.output_vars]
-        solutions = fit_dynamics_sindy_validated(
-            algorithm, post_trajs, obs_data_list, train_split, comps_σ;
-            output_types, n_fit_trajs)
-        sol = max_by(x -> x.valid_score)(solutions)
-        (; comps, stats, lexprs, valid_score) = sol
-        @smart_assert length(sketch.output_vars) == length(comps)
-        dyn_est = OrderedDict(zip([v.name for v in sketch.output_vars], lexprs))
-        @info "test_scenario" dyn_est
-        @info "test_scenario" stats
+        sol = fit_best_dynamics(
+            algorithm, sketch, post_trajs, obs_data_list, train_split, comps_σ;
+            n_fit_trajs)
+        (; dynamics, display_info) = sol
+        @smart_assert length(sketch.output_vars) == length(dynamics)
+        @info "test_scenario" dynamics
+        for (k, v) in pairs(display_info)
+            println("$k: $(repr("text/plain", v))")
+        end
     elseif algorithm isa EnumerativeSynthesis
         (; params_guess) = algorithm
         @info("Testing parameters fitting with the correct dynamics structure...")
@@ -287,7 +288,8 @@ function synthesize_scenario(
     scenario::Scenario,
     train_split::Int,
     (; ex_data_list, obs_data_list, save_dir),
-    syn_alg::SynthesisAlgorithm,
+    reg_alg::AbstractRegerssionAlgorithm,
+    sketch,
     comps_guess;
     n_fit_trajs=15,
     post_sampler = ParticleFilterSampler(
@@ -331,13 +333,13 @@ function synthesize_scenario(
     obs_model = observation_dist(scenario)
 
     syn_result = 
-        if syn_alg isa SindySynthesis
+        if reg_alg isa SindyRegression
             @info("Running EM with Sindy...")
-            @time em_sindy(train_split, obs_data_list, syn_alg, comps_guess; 
+            @time em_synthesis(reg_alg, sketch, obs_data_list, train_split, comps_guess; 
                 obs_model, sampler=post_sampler, n_fit_trajs, 
                 iteration_callback, logger, max_iters)
-        elseif syn_alg isa EnumerativeSynthesis
-            (; comp_env) = syn_alg
+        elseif reg_alg isa EnumerativeSynthesis
+            (; comp_env) = reg_alg
             @info("Enumerating programs...")
             pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
             shape_env = ℝenv()
@@ -377,7 +379,7 @@ function analyze_motion_model_performance(
     test_save_dir=joinpath(save_dir, "test")
     trained_mm = let 
         sketch = sindy_sketch(scenario)
-        sindy_motion_model(sketch, NamedTuple(dyn_est))
+        mk_motion_model(sketch, NamedTuple(dyn_est))
     end
 
     test_sim_result = simulate_scenario(

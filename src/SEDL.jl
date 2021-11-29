@@ -25,6 +25,7 @@ import ThreadPools
 using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups
+using TimerOutputs
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 import Metatheory

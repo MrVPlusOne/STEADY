@@ -13,7 +13,7 @@ struct DynamicsFittingSettings
 end)
 
 @kwdef(
-struct EnumerativeSynthesis <: SynthesisAlgorithm 
+struct EnumerativeSynthesis <: AbstractRegerssionAlgorithm 
     comp_env::ComponentEnv
     comps_guess::NamedTuple
     params_guess::NamedTuple

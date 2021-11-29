@@ -83,14 +83,14 @@ new_motion_model = let
     for f in core
         display(f.μ_f.julia)
     end
-    sindy_motion_model(sketch, core)
+    mk_motion_model(sketch, core)
 end
 sim_result = simulate_scenario(scenario, new_motion_model, train_setups; save_dir)
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
+sketch = sindy_sketch(scenario)
 algorithm = let
-    sketch = sindy_sketch(scenario)
     shape_env = ℝenv()
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env, can_grow=true)
@@ -117,7 +117,7 @@ algorithm = let
         SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
     end
     
-    SindySynthesis(comp_env, basis, sketch, optimizer_list, optimizer_descs)
+    SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
 end
 
 post_sampler = ParticleFilterSampler(
@@ -134,12 +134,12 @@ em_result = let
     )
     true_post_trajs = test_posterior_sampling(
         scenario, old_motion_model, "test_truth", 
-        sim_result, post_sampler, L2_in_SE2).post_trajs
+        sim_result, post_sampler; state_L2_loss=L2_in_SE2).post_trajs
     test_dynamics_fitting(
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
         algorithm, comps_σ, n_fit_trajs)
     synthesize_scenario(
-        scenario, train_split, sim_result, algorithm, comps_guess; 
+        scenario, train_split, sim_result, algorithm, sketch, comps_guess; 
         post_sampler, n_fit_trajs, max_iters=501)
 end
 nothing

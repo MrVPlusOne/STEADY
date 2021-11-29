@@ -103,7 +103,7 @@ function sindy_sketch(sce::HovercraftScenario)
     input_vars = [loc_vx, loc_vy, ω, θ, ul, ur]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    SindySketch(input_vars, output_vars, 
+    MotionModelSketch(input_vars, output_vars, 
         hover_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
 end
 
@@ -227,5 +227,5 @@ function get_simplified_motion_model(
     sketch = sindy_sketch(sce)
     comps = sindy_core(sce, (; σ_v, σ_ω, mass, rot_mass, sep, 
         drag_x=0.0, drag_y=0.0, rot_drag=0.0))
-    sindy_motion_model(sketch, comps)
+    mk_motion_model(sketch, comps)
 end

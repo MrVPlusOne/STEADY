@@ -82,7 +82,7 @@ function sindy_sketch(sce::Car2dScenario)
     input_vars = [loc_vx, loc_vy, ω, θ, v̂, steer]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    SindySketch(input_vars, output_vars, 
+    MotionModelSketch(input_vars, output_vars, 
         car2d_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
 end
 

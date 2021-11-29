@@ -7,7 +7,97 @@ const ObservationData =
 
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
 
-abstract type SynthesisAlgorithm end
+
+"""
+The sketch of a motion model that enables supervised learning from input-output data. 
+The output transformation therefore needs to be a bijection.
+
+Use [mk_motion_model](@ref) to construct the motion model from the sketch and components.
+"""
+@kwdef(
+struct MotionModelSketch{F1, F2, F3}
+    input_vars::Vector{Var}
+    output_vars::Vector{Var}
+    "genereate sketch inputs from state and control"
+    inputs_transform::F1
+    "transform (state, outputs, Δt) into next state"
+    outputs_transform::F2
+    "inversely compute sketch outputs from (state, next_state, Δt)"
+    outputs_inv_transform::F3
+end)
+
+function Base.show(io::IO, ::Type{<:MotionModelSketch})
+    print(io, "MotionModelSketch{...}")
+end
+
+function mk_motion_model(sketch::MotionModelSketch, comps::NamedTuple{names}) where names
+    (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
+        local inputs = sketch.inputs_transform(x, u)
+        local outputs_dist = DistrIterator(map(f -> f(inputs), values(comps)))
+        GenericSamplable(
+            rng -> begin
+                local out = NamedTuple{names}(rand(rng, outputs_dist))
+                sketch.outputs_transform(x, out, Δt)# |> assert_finite
+            end, 
+            x1 -> begin 
+                local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
+                logpdf(outputs_dist, values(out))
+            end
+        )
+    end
+end
+
+"""
+A regression algorith specifies how to synthesize the dynamics from a given set of 
+state transition data.
+
+Need to implement:
+ - [`fit_candidate_dynamics`](@ref)
+"""
+abstract type AbstractRegerssionAlgorithm end
+
+"""
+Fit multiple dynamics and return the best one according to the validation set.
+"""
+function fit_best_dynamics(
+    alg::AbstractRegerssionAlgorithm,
+    sketch::MotionModelSketch,
+    (inputs, outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    comps_σ_guess::Vector{Float64},
+)::NamedTuple{(:dynamics, :model_info, :optimizer_info, :display_info)}
+    error("Not implemented.")
+end
+
+"""
+Split the provided trajectories into training and validation set. 
+Fit multiple dynamics and return the best one according to the validation set.
+"""
+function fit_best_dynamics(
+    alg::AbstractRegerssionAlgorithm, 
+    sketch::MotionModelSketch, 
+    trajectories::Matrix{<:Vector},
+    obs_data_list::Vector{<:ObservationData},
+    train_split::Int,
+    comps_σ_guess::Vector{Float64};
+    n_fit_trajs::Int,
+    n_valid_trajs::Int=size(trajectories, 1),
+)
+    @smart_assert train_split < size(trajectories, 2)
+    @smart_assert n_fit_trajs <= size(trajectories, 1)
+    @smart_assert n_valid_trajs <= size(trajectories, 1)
+
+    train_data = trajectories[1:n_fit_trajs, 1:train_split]
+    valid_data = trajectories[1:n_valid_trajs, train_split+1:end]
+
+    inputs, outputs = construct_inputs_outputs(
+        train_data, obs_data_list[1:train_split], sketch)
+    valid_inputs, valid_outputs = construct_inputs_outputs(
+        valid_data, obs_data_list[train_split+1:end], sketch)
+
+    fit_best_dynamics(
+        alg, sketch, (inputs, outputs), (valid_inputs, valid_outputs), comps_σ_guess)
+end
 
 """
 A sketch for some missing dynamics. 
@@ -30,11 +120,6 @@ end)
 params_distribution(sketch::DynamicsSketch) = begin
     DistrIterator((;(v.name => dist for (v, dist) in sketch.params)...))
 end
-
-const dist_for_shape = Dict(
-    ℝ => SNormal(0.0, 1.0),
-    ℝ2 => SMvNormal([0.0, 0.0], 1.0),
-)
 
 inputs_distribution(sketch::DynamicsSketch) = begin
     DistrIterator((;(v.name => dist_for_shape[v.type.shape] for v in sketch.inputs)...))
@@ -72,17 +157,6 @@ function to_p_motion_model(
         local others = merge(x, u, params, prog_inputs)
         outputs_to_state_dist(outputs, others, Δt)::GDistr
     end
-end
-
-"""
-Sample random inputs for the missing dynamics. This can be useful for [`IOPruner`](@ref).
-"""
-function sample_rand_inputs(sketch::DynamicsSketch, n::Integer)
-    dist = DistrIterator(merge(
-        inputs_distribution(sketch).core,
-        params_distribution(sketch).core,
-    ));
-    [rand(dist) for _ in 1:n]
 end
 
 export VariableData
@@ -244,8 +318,12 @@ Base.show(io::IO, ::MIME"text/plain", r::MapSynthesisResult) = begin
     end
 end
 
-include("synthesis_utils.jl")
 include("deterministic_synthesis.jl")
 include("posterior_sampling.jl")
 include("probabilistic_synthesis.jl")
-include("SINDy_synthesis.jl")
+
+include("sparse_regression.jl")
+include("em_synthesis.jl")
+include("sindy_regression.jl")
+
+include("synthesis_utils.jl")

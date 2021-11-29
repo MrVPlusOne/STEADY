@@ -4,6 +4,8 @@ using StatsPlots
 using DrWatson
 import Random
 
+quick_test=true
+
 StatsPlots.default(dpi=300, legend=:outerbottom)
 
 # generate data
@@ -14,7 +16,7 @@ lInfo = LandmarkInfo(; landmarks, bearing_only=Val(false))
 front_drive=true
 scenario = Car2dScenario(lInfo, BicycleCarDyn(; front_drive))
 
-times = collect(0.0:0.1:15)
+times = quick_test ? collect(0.0:0.1:1.0) : collect(0.0:0.1:15)
 obs_frames = 1:5:length(times)
 
 true_params = (; 
@@ -79,7 +81,7 @@ end
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
-save_dir=datadir("sims/car2d")
+save_dir=datadir("sims", savename("car2d", (; quick_test)))
 old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)
@@ -91,8 +93,8 @@ sim_result = simulate_scenario(scenario, old_motion_model, train_setups; save_di
 nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
+sketch = sindy_sketch(scenario)
 algorithm = let
-    sketch = sindy_sketch(scenario)
     shape_env = ℝenv()
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env, can_grow=true)
@@ -101,11 +103,12 @@ algorithm = let
     for v1 in sketch.input_vars
         push!(basis_expr, v1)
         for v2 in sketch.input_vars
-            if v1.name < v2.name
+            if v1.name <= v2.name
                 push!(basis_expr, v1 * v2)
             end
         end
     end
+    @show length(basis_expr)
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
     lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
@@ -115,11 +118,11 @@ algorithm = let
         SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
     end
     
-    SindySynthesis(comp_env, basis, sketch, optimizer_list, optimizer_descs)
+    SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
 end
 
 post_sampler = ParticleFilterSampler(
-    n_particles=60_000,
+    n_particles=quick_test ? 2000 : 60_000,
     n_trajs=100,
 )
 
@@ -135,14 +138,17 @@ em_result = let
         sim_result, post_sampler, state_L2_loss=L2_in_SE2).post_trajs
     test_dynamics_fitting(
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
-        algorithm, comps_σ, n_fit_trajs)
+        algorithm, sketch, comps_σ, n_fit_trajs)
     synthesize_scenario(
-        scenario, train_split, sim_result, algorithm, comps_guess; 
+        scenario, train_split, sim_result, algorithm, sketch, comps_guess; 
         post_sampler, n_fit_trajs, max_iters=501)
 end
 nothing
 ##-----------------------------------------------------------
 # test found dynamics
+for (k, v) in em_result.dyn_est
+    println(k, ": ", repr("text/plain", v, context=(:compact=>true)), "\n")
+end
 analyze_motion_model_performance(
     scenario, em_result.dyn_est, old_motion_model, 
     get_simplified_motion_model(scenario, true_params), test_setups;
