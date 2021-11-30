@@ -41,5 +41,43 @@ function sample_posterior_parallel(
     end
     @unzip_named (log_obs, :log_obs), (trajectories_list, :trajectories) = results
     trajectories = reduce(hcat, trajectories_list)
-    (;trajectories, log_obs)
+    n_effective = sum(x -> x.n_effective, results)
+    (;trajectories, n_effective, log_obs)
+end
+
+@kwdef(
+struct ParticleGibbsSampler <: PosteriorSampler
+    n_particles::Int
+    n_jumps::Int
+    thining::Int
+    resample_threshold::Float64=0.5
+end)
+
+new_state(::ParticleGibbsSampler) = Dict{Symbol, Any}()
+
+function sample_posterior(
+    pf::ParticleGibbsSampler, system, obs_data, state::Dict; showprogress,
+)
+    if isempty(state)
+        showprogress && @info "Sampling initial trajectory using paritcle filter..."
+        (; trajectories) = filter_smoother(system, obs_data, use_auxiliary_proposal=false;
+            pf.n_particles, n_trajs=1, pf.resample_threshold, showprogress)
+        state[:trajs] = [trajectories[1]]
+    end
+
+    kernel = PGAS_kernel(system, obs_data; 
+        showprogress=false, pf.n_particles, pf.resample_threshold)
+
+    trajectories = state[:trajs]
+    new_traj = trajectories[end]
+
+    showprogress && (progress = Progress(pf.n_jumps, desc="sample_posterior", output=stdout))
+    for i in 1:pf.n_jumps
+        new_traj = kernel(new_traj)
+        if i % pf.thining == 0
+            push!(trajectories, new_traj)
+        end
+        showprogress && next!(progress)
+    end
+    (; trajectories, log_obs=0.0)
 end

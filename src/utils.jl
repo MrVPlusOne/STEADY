@@ -10,6 +10,17 @@ import LineSearches
 
 const Optional{X} = Union{X, Nothing}
 const AbsVec = AbstractVector
+const AbsMat = AbstractMatrix
+
+abstract type Either end
+
+struct Left{X} <: Either
+    value::X
+end
+
+struct Right{Y} <: Either
+    value::Y
+end
 
 specific_elems(xs::AbstractArray{T}) where T = 
     Base.isconcretetype(T) ? xs : identity.(xs)
@@ -20,6 +31,65 @@ get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
 get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
 """
+Like @assert, but try to print out additional information about the arguments.
+## Examples
+```julia
+julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+
+ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+Stacktrace:
+...
+```
+"""
+macro smart_assert(ex, msg=nothing)
+    if @capture(ex, op_(lhs_, rhs_))
+        ex_q = QuoteNode(ex)
+        lhs_q = QuoteNode(lhs)
+        rhs_q = QuoteNode(rhs)
+        has_msg = msg === nothing
+        quote
+            lv = $(esc(lhs))
+            rv = $(esc(rhs))
+            if ! $(esc(op))(lv, rv)
+                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+                if $has_msg
+                    msg_v = $(esc(msg))
+                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
+                else
+                    throw(AssertionError(reason_text))
+                end
+            end
+        end
+    else
+        :(@assert($ex, $msg))
+    end
+end
+
+function normalize_transform(xs::AbstractVector)
+    σ = std(xs)
+    μ = mean(xs)
+    if σ ≈ zero(σ)
+        transformed = xs
+        μ = zero(μ)
+        σ = one(σ)
+    else
+        transformed = (xs .- μ) ./ σ
+    end
+    (; transformed, μ, σ)
+end
+
+"""
+Concat columns horizontally.
+"""
+hcatreduce(xs::AbsVec) = reduce(hcat, xs)
+"""
+Concat rows vertically.
+"""
+vcatreduce(xs::AbsVec) = reduce(vcat, xs)
+
+"""
+    @unzip xs, [ys,...] = collection
+
 ## Example
 ```jldoctest
 julia> @unzip as, bs = [("a", "b", "c") for i in 1:3]
@@ -97,10 +167,23 @@ rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
 
 const ° = π / 180
 
-to_measurement(values) = begin
+to_measurement(values::AbsVec{<:Real}) = begin
+    @assert !isempty(values)
     μ = mean(values)
     σ = std(values)
     μ ± σ
+end
+
+to_measurement(values::AbsVec{<:AbstractDict}) = begin
+    @assert !isempty(values)
+    
+    keyset = Set(keys(values[1]))
+
+    for d in values
+        @smart_assert keyset == Set(keys(d))
+    end
+
+    (key => to_measurement(map(x -> x[key], values)) for key in keyset) |> Dict
 end
 
 """
@@ -137,14 +220,14 @@ Apply a tuple of functions to a NamedTuple of corresponding arguments. The resul
 NamedTuple.
 """
 @inline function zipmap(fs, xs::X)::X where {X<:NamedTuple}
-    @assert length(fs) == length(xs) "Need the same number of functions and values.\
+    @smart_assert length(fs) == length(xs) "Need the same number of functions and values.\
         \nfs = $fs\nxs = $xs."
     t = ntuple(i -> fs[i](xs[i]), length(xs))
     NamedTuple{keys(xs)}(t)
 end
 
 function zipmap(fs, xs::AbstractVector)
-    @assert length(fs) == length(xs) "Need the same number of functions and values"
+    @smart_assert length(fs) == length(xs) "Need the same number of functions and values"
     map((f, x) -> f(x), fs, xs)
 end
 
@@ -158,6 +241,11 @@ Warp the given angle into the range [0, 2π].
 warp_angle(angle::Real) = let
     x = angle % 2π
     x < 0 ? x + 2π : x
+end
+
+angular_distance(θ1, θ2) = begin
+    Δ = abs(θ1-θ2) % 2π
+    min(Δ, 2π-Δ)
 end
 
 """
@@ -233,6 +321,8 @@ end
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
 to_svec(vec::NTuple{n, X}) where {n, X} = SVector{n, X}(vec)
 
+to_static_array(array::AbsMat) = SMatrix{size(array)...}(array)
+to_static_array(array::AbsVec) = SVector{length(array)}(array)
 """
 Like `get!`, but can be used to directly access nested dictionaries.
 
@@ -288,6 +378,13 @@ using Statistics: norm
 Base.show(io::IO, d::ForwardDiff.Dual) = 
     print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
 
+function assert_finite(x::NamedTuple)
+    if !all(isfinite, x)
+        @error "some components are not finite" x
+        throw(ErrorException("assert_finite failed."))
+    end
+    x
+end
 
 """
 A helper macro to find functions by name.
@@ -344,30 +441,58 @@ function parallel_map(f, xs, ctx;
         length(workers()) > 1 || error("distributed enabled with less than 2 workers.")
         @everywhere SEDL._distributed_work_ctx[] = $ctx
         f_task = x -> let ctx = _distributed_work_ctx[]
-            f(ctx, x)
+            try
+                Right(f(ctx, x))
+            catch e
+                Left((e, stacktrace(catch_backtrace())))
+            end
         end
         try
-            eval_results = progress_pmap(f_task, xs; progress)
+            map_results = progress_pmap(f_task, xs; progress)
         finally
             @everywhere SEDL._distributed_work_ctx[] = nothing
         end
     else
-        eval_task(e) = let r = f(ctx, e)
-            next!(progress)
-            r
+        eval_task(e) = try
+            let r = f(ctx, e)
+                next!(progress)
+                Right(r)
+            end
+        catch e
+            Left((e, stacktrace(catch_backtrace())))
         end
         if n_threads <= 1
-            eval_results = map(eval_task, xs)
+            map_results = map(eval_task, xs)
         else
             pool = ThreadPools.QueuePool(2, n_threads)
             try
-                eval_results = ThreadPools.tmap(eval_task, pool, xs)
+                map_results = ThreadPools.tmap(eval_task, pool, xs)
             finally
                 close(pool)
             end
         end
     end
+    eval_results = 
+        if all(x -> x isa Right, map_results)
+            map(x -> x.value, map_results)
+        else
+            for x in map_results
+                if x isa Left
+                    (e, trace) = x.value
+                    @error "Exception in parallel_map: " expection=e
+                    @error "Caused by: $(repr("text/plain", trace))"
+                    error("parallel_map failed.")
+                end
+            end
+        end
     eval_results
 end
 
 sigmoid(x::Real) = one(x) / (one(x) + exp(-x))
+
+"""
+Combine a named tuple of functions into a function that returns a named tuple.
+"""
+function combine_functions(functions::NamedTuple{names}) where names
+    x -> NamedTuple{names}(map(f -> f(x), values(functions)))
+end

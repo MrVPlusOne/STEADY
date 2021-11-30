@@ -27,7 +27,7 @@ function structure_to_vec!(arr, v::Union{AbstractVector, Tuple, NamedTuple})
         nothing
     end
     rec(v)
-    @assert i[] == length(arr)
+    @smart_assert i[] == length(arr)
     arr
 end
 
@@ -97,4 +97,78 @@ function _compute_bounds(prior_dist)
     end
     rec(prior_dist)
     lower, upper
+end
+
+"""
+A very crude estimation by counting the number of unique particles.
+"""
+function n_effective_trajectoreis(trajectories::Matrix)
+    T = length(trajectories[1])
+    n_unique = 0
+    for t in 1:T
+        n_unique += length(Set(tr[t] for tr in trajectories))
+    end
+    n_unique / T
+end
+
+"""
+- inputs shape: n_transition of NamedTuple
+- outputs shape: (n_transition, n_outputs) of Float64
+"""
+function construct_inputs_outputs(
+    trajectories::Matrix{<:Vector}, 
+    obs_data_list::Vector,
+    sketch::MotionModelSketch,
+)
+    @smart_assert length(obs_data_list) == size(trajectories, 2)
+    (; inputs_transform, outputs_inv_transform) = sketch
+    inputs = []
+    outputs = []
+    for j in 1:length(obs_data_list)
+        (; times, controls) = obs_data_list[j]
+        for i in 1:size(trajectories, 1)
+            tr = trajectories[i, j]
+            for t in 1:length(tr)-1
+                push!(inputs, inputs_transform(tr[t], controls[t]))
+                s = tr[t]
+                s1 = tr[t+1]
+                Δt = times[t+1] - times[t]
+                o = outputs_inv_transform(s, s1, Δt)
+                push!(outputs, transpose(collect(o)))
+            end
+        end
+    end
+    inputs = specific_elems(inputs)
+    outputs = vcatreduce(outputs)
+    (; inputs, outputs)
+end
+
+"""
+Returns the average log probability of the outputs.
+"""
+function data_likelihood(
+    dynamics::GaussianGenerator{names},
+    inputs::AbsVec{<:NamedTuple},
+    outputs::AbstractMatrix{Float64};
+    output_type=Float64,
+) where names
+    @smart_assert length(names) == size(outputs, 2)
+    @smart_assert length(inputs) == size(outputs, 1)
+
+    ll::output_type = 0
+    for t in 1:length(inputs)
+        ll += logpdf(dynamics(inputs[t]), NamedTuple{names}(outputs[t, :]))
+    end
+    ll / length(inputs)
+end
+
+"""
+Sample random inputs for the missing dynamics. This can be useful for [`IOPruner`](@ref).
+"""
+function sample_rand_inputs(sketch::DynamicsSketch, n::Integer)
+    dist = DistrIterator(merge(
+        inputs_distribution(sketch).core,
+        params_distribution(sketch).core,
+    ));
+    [rand(dist) for _ in 1:n]
 end

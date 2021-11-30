@@ -133,6 +133,20 @@ Typed AST for numerical expressions.
 abstract type TAST end
 
 @auto_hash_equals(
+struct Const <: TAST
+    value::Any
+    type::PType
+end)
+
+Base.show(io::IO, v::Const) = begin
+    print(io, v.value)
+end
+
+Base.show(io::IO, ::MIME"text/plain", v::Const) = begin
+    print(io, v.value, "::", v.type)
+end
+
+@auto_hash_equals(
 struct Var <: TAST
     name::Symbol
     type::PType
@@ -164,6 +178,7 @@ Base.show(io::IO, v::Call) = begin
 end
 
 julia_expr(v::Var) = v.name
+julia_expr(c::Const) = c.value
 julia_expr(c::Call) = begin 
     Expr(:call, c.f, julia_expr.(c.args)...)
 end
@@ -223,12 +238,12 @@ derivative(v::Var, t::PUnit = PUnits.Time) =
 ##-----------------------------------------------------------
 # AST construction helpers
 Base.:+(e1::TAST, e2::TAST) = begin
-    @assert e1.type == e2.type
+    @smart_assert e1.type == e2.type
     Call(:+, (e1, e2), e1.type)
 end
 
 Base.:-(e1::TAST, e2::TAST) = begin
-    @assert e1.type == e2.type
+    @smart_assert e1.type == e2.type
     Call(:-, (e1, e2), e1.type)
 end
 
@@ -237,11 +252,11 @@ Base.:-(e1::TAST) = begin
 end
 
 Base.:*(e1::TAST, e2::TAST) = begin
-    @assert e1.type.shape == e2.type.shape
+    @smart_assert e1.type.shape == e2.type.shape
     Call(:*, (e1, e2), PType(e1.type.shape, e1.type.unit * e2.type.unit))
 end
 
 Base.:/(e1::TAST, e2::TAST) = begin
-    @assert e1.type.shape == e2.type.shape
+    @smart_assert e1.type.shape == e2.type.shape
     Call(:/, (e1, e2), PType(e1.type.shape, e1.type.unit / e2.type.unit))
 end

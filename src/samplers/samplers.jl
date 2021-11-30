@@ -10,6 +10,8 @@ struct MarkovSystem{X, X0_Dist, Motion, ObsM}
     obs_model::ObsM
 end
 
+Base.show(io::IO, ::Type{<:MarkovSystem}) = print(io, "MarkovSystem{...}")
+
 MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A<:GDistr,B,C} = begin
     X = typeof(rand(x0_dist))
     MarkovSystem{X, A, B, C}(x0_dist, motion_model, obs_model)

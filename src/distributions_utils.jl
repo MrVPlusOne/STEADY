@@ -148,7 +148,7 @@ function log_score(diter::DistrIterator, xs, ::Type{T})::T where T
         @assert keys(diter.core) == keys(xs) "keys do not match:\n\
             distributions: $(diter.core)\nvalues:$xs"
     end
-    @assert length(diter.core) == length(xs)
+    @smart_assert length(diter.core) == length(xs)
 
     if xs isa Union{Tuple, NamedTuple, StaticArray}
         log_score_static(diter.core, xs, Val{T}(), Val{length(xs)}())
@@ -271,6 +271,16 @@ end
 
 """
 Like a normal distribution, but always warp values to [0, 2π). 
+
+## Examples
+```julia
+using Plots
+let cd = CircularNormal(0.5, 0.5)
+    histogram(rand(cd, 10000), normalize=true, bins=100, label="sample")
+    plot!(0:0.01:2π, pdf(cd, 0:0.01:2π), label="analytical")
+end
+...
+```
 """
 struct CircularNormal{T1, T2} <: ContinuousUnivariateDistribution
     μ::T1
@@ -285,13 +295,11 @@ extrema(::CircularNormal) = (0.0, 2π)
 rand(rng::AbstractRNG, d::CircularNormal) = 
     warp_angle(rand(rng, truncated(Normal(0.0, d.σ), -π, π)) + d.μ)
 logpdf(d::CircularNormal, x) = let
-    dis = warp_angle(x - d.μ)
-    dis = min(dis, 2π-dis)
+    dis = angular_distance(x, d.μ)
     logpdf(truncated(Normal(0.0, d.σ), -π, π), dis)
 end
 function log_score(d::CircularNormal, x, ::Type{T})::T where T
-    dis = warp_angle(x - d.μ)
-    dis = min(dis, 2π-dis)
+    dis = angular_distance(x, d.μ)
     log_score(Normal(0.0, d.σ), dis, T)
 end
 
@@ -327,6 +335,13 @@ struct OptionalDistr{R<:Real, Core<:GDistr} <: ExtDistr
     end
 end
 
+Base.print(io::IO, d::OptionalDistr) = 
+    print(io, "OptionalDistr(p=$(d.p), core=$(d.core))")
+
+Base.show(io::IO, d::OptionalDistr) = print(io, d)
+
+Base.show(io::IO, ::Type{<:OptionalDistr}) = print(io, "OptionalDistr{...}")
+
 function rand(rng::AbstractRNG, d::OptionalDistr)
     b = rand(rng, Bernoulli(d.p))::Bool
     if b
@@ -352,12 +367,20 @@ function log_score(d::OptionalDistr, x)
     end
 end
 
+struct GenericSamplable{F, G}
+    rand_f::F
+    log_pdf::G
+end
+
+rand(rng::Random.AbstractRNG, s::GenericSamplable) = s.rand_f(rng)
+logpdf(s::GenericSamplable, x) = s.log_pdf(x)
+
 """
 Perform a bijective transformation to a distribution to obtain a new one.
 Should implement the following
-- `forward_transform(::DistrMap, x) -> y`: performs the forward transformation to a sample.
-- `inverse_transform(::DistrMap, y) -> x`: performs the inverse transformation to a sample.
-- `DistrMap.core::GDistr`: get the underlying distribution being transformed.
+- `forward_transform(::DistrTransform, x) -> y`: performs the forward transformation to a sample.
+- `inverse_transform(::DistrTransform, y) -> x`: performs the inverse transformation to a sample.
+- `DistrTransform.core::GDistr`: get the underlying distribution being transformed.
 """
 abstract type DistrTransform <: ExtDistr end
 
@@ -370,6 +393,19 @@ logpdf(d::DistrTransform, x) = logpdf(d.core, inverse_transform(d, x))
 
 log_score(d::DistrTransform, x, ::Type{T}) where T = 
     log_score(d.core, inverse_transform(d, x), T)::T
+
+struct GenericDistrTransform{C<:GDistr, F<:Function, B<:Function} <: DistrTransform
+    core::C
+    transform::F
+    inv_transform::B
+end
+
+Base.show(io::IO, ::Type{<:GenericDistrTransform}) = 
+    print(io, "GenericDistrTransform{...}")
+
+forward_transform(d::GenericDistrTransform, x) = d.transform(x)
+inverse_transform(d::GenericDistrTransform, x) = d.inv_transform(x)
+
 
 """
 Rotate a 2D-distribution counter-clockwise by `θ`.

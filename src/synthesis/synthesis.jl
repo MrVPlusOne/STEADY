@@ -6,6 +6,151 @@ const ObservationData =
     NamedTuple{(:times, :obs_frames, :observations, :controls, :x0_dist)}
 
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
+
+
+struct GaussianGenerator{names, D, F} <: Function
+    μ_f::F
+    σs::NamedTuple{names, NTuple{D, Float64}}
+    meta::NamedTuple
+end
+
+Base.length(gg::GaussianGenerator) = length(gg.σs)
+
+function (gg::GaussianGenerator{names})(in) where names
+    (; μ_f, σs) = gg
+    μ = μ_f(in)::NamedTuple{names}
+    map(values(μ), values(σs)) do m, s
+        Normal(m, s)
+    end |> NamedTuple{names} |> DistrIterator
+end
+
+function Base.print(io::IO, expr::GaussianGenerator)
+    compact = get(io, :compact, false)
+    !compact && print(io, "GaussianGenerator") 
+    print(io, "(σs = ", expr.σs)
+    print(io, ", meta = ", expr.meta, ")")
+end
+
+function Base.show(io::IO, ::Type{<:GaussianGenerator})
+    print(io, "GaussianGenerator{...}")
+end
+
+Base.show(io::IO, comp::GaussianGenerator) = print(io, comp)
+function Base.show(io::IO, ::MIME"text/plain", expr::GaussianGenerator)
+    io = IOIndent(IOContext(io, :compact => true))
+    println(io, "GaussianGenerator:", Indent()) 
+    for (k, v) in pairs(expr.σs)
+        println(io, k, ".σ: ", v)
+    end
+    println(io, "-------------------")
+
+    for (k, v) in pairs(expr.meta)
+        println(io, k, ": ", v)
+    end
+end
+
+"""
+The sketch of a motion model that enables supervised learning from input-output data. 
+The output transformation therefore needs to be a bijection.
+
+Use [mk_motion_model](@ref) to construct the motion model from the sketch and components.
+"""
+@kwdef(
+struct MotionModelSketch{F1, F2, F3}
+    input_vars::Vector{Var}
+    output_vars::Vector{Var}
+    "genereate sketch inputs from state and control"
+    inputs_transform::F1
+    "transform (state, outputs, Δt) into next state"
+    outputs_transform::F2
+    "inversely compute sketch outputs from (state, next_state, Δt)"
+    outputs_inv_transform::F3
+end)
+
+function Base.show(io::IO, ::Type{<:MotionModelSketch})
+    print(io, "MotionModelSketch{...}")
+end
+
+
+struct GaussianMotionModel{
+        Core <: GaussianGenerator,
+        SK <: MotionModelSketch, 
+    } <: Function 
+    sketch:: SK
+    core:: Core
+end
+
+function (motion_model::GaussianMotionModel{<:GaussianGenerator{names}})(
+    x::NamedTuple, u::NamedTuple, Δt::Real
+) where names
+    sketch, core = motion_model.sketch, motion_model.core
+    inputs = sketch.inputs_transform(x, u)
+    outputs_dist = core(inputs)
+    GenericSamplable(
+        rng -> begin
+            local out = NamedTuple{names}(rand(rng, outputs_dist))
+            sketch.outputs_transform(x, out, Δt)# |> assert_finite
+        end, 
+        x1 -> begin 
+            local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
+            logpdf(outputs_dist, values(out))
+        end
+    )
+end
+
+
+"""
+A regression algorith specifies how to synthesize the dynamics from a given set of 
+state transition data.
+
+Need to implement:
+ - [`fit_candidate_dynamics`](@ref)
+"""
+abstract type AbstractRegerssionAlgorithm end
+
+"""
+Fit multiple dynamics and return the best one according to the validation set.
+"""
+function fit_best_dynamics(
+    alg::AbstractRegerssionAlgorithm,
+    sketch::MotionModelSketch,
+    (inputs, outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    comps_σ_guess::Vector{Float64},
+)::NamedTuple{(:dynamics, :model_info, :optimizer_info, :display_info)}
+    error("Not implemented.")
+end
+
+"""
+Split the provided trajectories into training and validation set. 
+Fit multiple dynamics and return the best one according to the validation set.
+"""
+function fit_best_dynamics(
+    alg::AbstractRegerssionAlgorithm, 
+    sketch::MotionModelSketch, 
+    trajectories::Matrix{<:Vector},
+    obs_data_list::Vector{<:ObservationData},
+    train_split::Int,
+    comps_σ_guess::Vector{Float64};
+    n_fit_trajs::Int,
+    n_valid_trajs::Int=size(trajectories, 1),
+)
+    @smart_assert train_split < size(trajectories, 2)
+    @smart_assert n_fit_trajs <= size(trajectories, 1)
+    @smart_assert n_valid_trajs <= size(trajectories, 1)
+
+    train_data = trajectories[1:n_fit_trajs, 1:train_split]
+    valid_data = trajectories[1:n_valid_trajs, train_split+1:end]
+
+    inputs, outputs = construct_inputs_outputs(
+        train_data, obs_data_list[1:train_split], sketch)
+    valid_inputs, valid_outputs = construct_inputs_outputs(
+        valid_data, obs_data_list[train_split+1:end], sketch)
+
+    fit_best_dynamics(
+        alg, sketch, (inputs, outputs), (valid_inputs, valid_outputs), comps_σ_guess)
+end
+
 """
 A sketch for some missing dynamics. 
 
@@ -27,11 +172,6 @@ end)
 params_distribution(sketch::DynamicsSketch) = begin
     DistrIterator((;(v.name => dist for (v, dist) in sketch.params)...))
 end
-
-const dist_for_shape = Dict(
-    ℝ => SNormal(0.0, 1.0),
-    ℝ2 => SMvNormal([0.0, 0.0], 1.0),
-)
 
 inputs_distribution(sketch::DynamicsSketch) = begin
     DistrIterator((;(v.name => dist_for_shape[v.type.shape] for v in sketch.inputs)...))
@@ -71,17 +211,6 @@ function to_p_motion_model(
     end
 end
 
-"""
-Sample random inputs for the missing dynamics. This can be useful for [`IOPruner`](@ref).
-"""
-function sample_rand_inputs(sketch::DynamicsSketch, n::Integer)
-    dist = DistrIterator(merge(
-        inputs_distribution(sketch).core,
-        params_distribution(sketch).core,
-    ));
-    [rand(dist) for _ in 1:n]
-end
-
 export VariableData
 
 struct VariableData
@@ -112,7 +241,7 @@ end
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
     check_type(var, value) = begin
         t = shape_env[var.type]
-        @assert value isa t "Prior distribution for \
+        @smart_assert value isa t "Prior distribution for \
             $var produced value $value, expected type: $t"
     end
 
@@ -241,7 +370,13 @@ Base.show(io::IO, ::MIME"text/plain", r::MapSynthesisResult) = begin
     end
 end
 
-include("synthesis_utils.jl")
 include("deterministic_synthesis.jl")
 include("posterior_sampling.jl")
 include("probabilistic_synthesis.jl")
+
+include("sparse_regression.jl")
+include("em_synthesis.jl")
+include("sindy_regression.jl")
+include("neural_regression.jl")
+
+include("synthesis_utils.jl")

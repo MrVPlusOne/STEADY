@@ -3,7 +3,7 @@
 """
 struct CompiledFunc{return_type, F} <: Function
     f::F
-    ast::TAST
+    ast::Any
     julia::Expr
 end
 
@@ -15,12 +15,22 @@ end
     convert(R, cf.f(args))::R
 end
 
-function Base.show(io::IO, @nospecialize cf::CompiledFunc) 
+Base.show(io::IO, ::Type{<:CompiledFunc}) = print(io, "CompiledFunc{...}")
+
+Base.show(io::IO, @nospecialize cf::CompiledFunc) = print(io, cf)
+function Base.print(io::IO, @nospecialize cf::CompiledFunc) 
     (; ast, julia) = cf
-    print(io, "CompiledFunction(ast=:($ast), julia=:($julia))")
+    compact = get(io, :compact, false)
+    !compact && print(io, "CompiledFunc(")
+    print(io, "`", ast, "`")
+    !compact && print(io, ")")
 end
 
-function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFunc) 
+function Base.show(
+    io::IO, mime::MIME"text/plain",
+    @nospecialize cf::CompiledFunc{return_type}
+) where return_type
+    (; ast, julia) = cf 
     io = IOIndents.IOIndent(io)
     (; ast, julia) = cf
     println(io, "--- CompiledFunction ---")
@@ -28,6 +38,7 @@ function Base.show(io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFun
     println(io, ast, Dedent())
     println(io, "Julia Code:", Indent())
     println(io, repr(mime, julia), Dedent())
+    println(io, "Return type: ", return_type)
     println(io, "--- End ---")
 end
 
@@ -37,6 +48,22 @@ when synthesis is run multiple times.
 """
 const compile_cache = Dict{Expr, RuntimeGeneratedFunction}()
 const compile_cache_lock = ReentrantLock()
+
+"""
+Compile a Julia code expression into a runtime generated function and cache it.
+"""
+function compile_julia_expr(f_ex)
+    rgf = @lock compile_cache_lock get(compile_cache, f_ex, nothing)
+
+    if rgf === nothing
+        rgf = @RuntimeGeneratedFunction(f_ex)
+        @lock compile_cache_lock begin
+            compile_cache[f_ex] = rgf
+        end
+    end
+    rgf
+end
+
 
 macro with_type(e, ty)
     quote  
@@ -66,6 +93,11 @@ function compile(
         rtype = shape_env.type_annots[v.type.shape]
         :($e::$rtype)
     end
+    function compile_body(c::Const)
+        e = c.value
+        rtype = shape_env.type_annots[c.type.shape]
+        :($e::$rtype)
+    end
     function compile_body(call::Call)
         local f = comp_env.impl_dict[call.f]
         local args = compile_body.(call.args)
@@ -76,14 +108,7 @@ function compile(
 
     body_ex = compile_body(prog)::Expr
     f_ex = :(args -> $body_ex)
-    rgf = @lock compile_cache_lock get(compile_cache, f_ex, nothing)
-
-    if rgf === nothing
-        rgf = @RuntimeGeneratedFunction(f_ex)
-        @lock compile_cache_lock begin
-            compile_cache[f_ex] = rgf
-        end
-    end
+    rgf = compile_julia_expr(f_ex)
     
     rtype = shape_env.return_type[prog.type.shape]
     ftype = hide_type ? Function : typeof(rgf)
@@ -91,6 +116,8 @@ function compile(
         rgf, prog, body_ex,
     )
 end
+
+compile(prog::TAST) = compile(prog, ℝenv(), ComponentEnv())
 
 """
 Hide the type of the wrapped function. Useful for avoiding expensive compilation 
