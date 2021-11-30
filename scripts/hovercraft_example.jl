@@ -73,16 +73,11 @@ old_motion_model = let
     to_p_motion_model(core, sketch)(true_params)
 end
 println("Ground truth motion model:")
-true_comps = OrderedDict(pairs(sindy_core(scenario, true_params)))
-display(true_comps)
+display(sindy_core(scenario, true_params))
 
 new_motion_model = let
     sketch = sindy_sketch(scenario)
     core = sindy_core(scenario, true_params)
-    println("Compiled sindy model:") 
-    for f in core
-        display(f.μ_f.julia)
-    end
     mk_motion_model(sketch, core)
 end
 sim_result = simulate_scenario(scenario, new_motion_model, train_setups; save_dir)
@@ -98,14 +93,11 @@ algorithm = let
     basis_expr = TAST[]
     for v1 in sketch.input_vars
         push!(basis_expr, v1)
-        for v in sketch.input_vars
-            push!(basis_expr, v*v)
+        for v2 in sketch.input_vars
+            if v2.name <= v1.name
+                push!(basis_expr, v1*v2)
+            end
         end
-        # for v2 in sketch.input_vars
-        #     if v2.name <= v1.name
-        #         push!(basis_expr, v1*v2)
-        #     end
-        # end
     end
     @show basis_expr
     basis = [compile(e, shape_env, comp_env) for e in basis_expr]
@@ -127,17 +119,17 @@ post_sampler = ParticleFilterSampler(
 
 em_result = let
     comps_σ = [0.1,0.1,0.1]
-    comps_guess = OrderedDict(
-        :loc_ax => GaussianComponent(_ -> 0.0, 0.1),
-        :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
-        :der_ω => GaussianComponent(_ -> 0.0, 0.1),
+    comps_guess = GaussianGenerator(
+        _ -> (loc_ax=0.0, loc_ay=0.0, der_ω=0.0),
+        (loc_ax=0.1, loc_ay=0.1, der_ω=0.1),
+        (μ_f="all_zeros",),
     )
     true_post_trajs = test_posterior_sampling(
         scenario, old_motion_model, "test_truth", 
         sim_result, post_sampler; state_L2_loss=L2_in_SE2).post_trajs
     test_dynamics_fitting(
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
-        algorithm, comps_σ, n_fit_trajs)
+        algorithm, sketch, comps_σ, n_fit_trajs)
     synthesize_scenario(
         scenario, train_split, sim_result, algorithm, sketch, comps_guess; 
         post_sampler, n_fit_trajs, max_iters=501)
@@ -151,4 +143,3 @@ analyze_motion_model_performance(
     save_dir, post_sampler, state_L2_loss=L2_in_SE2,
 )
 ##-----------------------------------------------------------
-

@@ -5,6 +5,7 @@ using DrWatson
 import Random
 
 quick_test=true
+regressor=:neural  # either :neural or :sindy
 
 StatsPlots.default(dpi=300, legend=:outerbottom)
 
@@ -16,7 +17,7 @@ lInfo = LandmarkInfo(; landmarks, bearing_only=Val(false))
 front_drive=true
 scenario = Car2dScenario(lInfo, BicycleCarDyn(; front_drive))
 
-times = quick_test ? collect(0.0:0.1:1.0) : collect(0.0:0.1:15)
+times = quick_test ? collect(0.0:0.1:2.0) : collect(0.0:0.1:15)
 obs_frames = 1:5:length(times)
 
 true_params = (; 
@@ -81,7 +82,7 @@ end
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
-save_dir=datadir("sims", savename("car2d", (; quick_test)))
+save_dir=datadir("sims", savename("car2d", (; regressor, quick_test)))
 old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)
@@ -94,31 +95,45 @@ nothing
 ##-----------------------------------------------------------
 # test fitting the trajectories
 sketch = sindy_sketch(scenario)
-algorithm = let
-    shape_env = ℝenv()
-    comp_env = ComponentEnv()
-    components_scalar_arithmatic!(comp_env, can_grow=true)
+algorithm = if regressor === :sindy 
+    let
+        shape_env = ℝenv()
+        comp_env = ComponentEnv()
+        components_scalar_arithmatic!(comp_env, can_grow=true)
 
-    basis_expr = TAST[]
-    for v1 in sketch.input_vars
-        push!(basis_expr, v1)
-        for v2 in sketch.input_vars
-            if v1.name <= v2.name
-                push!(basis_expr, v1 * v2)
+        basis_expr = TAST[]
+        for v1 in sketch.input_vars
+            push!(basis_expr, v1)
+            for v2 in sketch.input_vars
+                if v1.name <= v2.name
+                    push!(basis_expr, v1 * v2)
+                end
             end
         end
+        @show length(basis_expr)
+        @show basis_expr
+        basis = [compile(e, shape_env, comp_env) for e in basis_expr]
+        lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
+        @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
+            regressor = LassoRegression(λ; fit_intercept=true)
+            # regressor = RidgeRegression(10.0; fit_intercept=false)
+            SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+        end
+        
+        SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
     end
-    @show length(basis_expr)
-    @show basis_expr
-    basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-    lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
-    @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
-        regressor = LassoRegression(λ; fit_intercept=true)
-        # regressor = RidgeRegression(10.0; fit_intercept=false)
-        SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+elseif regressor === :neural
+    using Flux: Dense, Chain, Dropout, relu, ADAM
+    let
+        network = Chain(
+            Dense(length(sketch.input_vars), 32, relu),
+            Dropout(0.5),
+            Dense(32, length(sketch.output_vars)))
+        optimizer = ADAM(2e-4)
+        NeuralRegression(; network, optimizer)
     end
-    
-    SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
+else
+    error("Unknown regressor name: $regressor")
 end
 
 post_sampler = ParticleFilterSampler(
@@ -127,11 +142,11 @@ post_sampler = ParticleFilterSampler(
 )
 
 em_result = let
-    comps_σ = [0.1,0.1,0.1]
-    comps_guess = OrderedDict(
-        :loc_ax => GaussianComponent(_ -> 0.0, 0.1),
-        :loc_ay => GaussianComponent(_ -> 0.0, 0.1),
-        :der_ω => GaussianComponent(_ -> 0.0, 0.1),
+    comps_σ = [0.5,0.5,0.5]
+    dyn_guess = GaussianGenerator(
+        _ -> (loc_ax=0.0, loc_ay=0.0, der_ω=0.0),
+        (loc_ax=0.1, loc_ay=0.1, der_ω=0.1),
+        (μ_f = "all zeros",),
     )
     true_post_trajs = test_posterior_sampling(
         scenario, old_motion_model, "test_truth", 
@@ -140,15 +155,13 @@ em_result = let
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
         algorithm, sketch, comps_σ, n_fit_trajs)
     synthesize_scenario(
-        scenario, train_split, sim_result, algorithm, sketch, comps_guess; 
-        post_sampler, n_fit_trajs, max_iters=501)
+        scenario, train_split, sim_result, algorithm, sketch, dyn_guess; 
+        post_sampler, n_fit_trajs, max_iters=quick_test ? 5 : 501)
 end
 nothing
 ##-----------------------------------------------------------
 # test found dynamics
-for (k, v) in em_result.dyn_est
-    println(k, ": ", repr("text/plain", v, context=(:compact=>true)), "\n")
-end
+display(em_result.dyn_est)
 analyze_motion_model_performance(
     scenario, em_result.dyn_est, old_motion_model, 
     get_simplified_motion_model(scenario, true_params), test_setups;

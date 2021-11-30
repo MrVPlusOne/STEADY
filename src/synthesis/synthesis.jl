@@ -8,6 +8,47 @@ const ObservationData =
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
 
 
+struct GaussianGenerator{names, D, F} <: Function
+    μ_f::F
+    σs::NamedTuple{names, NTuple{D, Float64}}
+    meta::NamedTuple
+end
+
+Base.length(gg::GaussianGenerator) = length(gg.σs)
+
+function (gp::GaussianGenerator{names})(in) where names
+    (; μ_f, σs) = gp
+    μ = μ_f(in)::NamedTuple{names}
+    map(values(μ), values(σs)) do m, s
+        Normal(m, s)
+    end |> NamedTuple{names} |> DistrIterator
+end
+
+function Base.print(io::IO, expr::GaussianGenerator)
+    compact = get(io, :compact, false)
+    !compact && print(io, "GaussianGenerator") 
+    print(io, "(σs = ", expr.σs)
+    print(io, ", meta = ", expr.meta, ")")
+end
+
+function Base.show(io::IO, ::Type{<:GaussianGenerator})
+    print(io, "GaussianGenerator{...}")
+end
+
+Base.show(io::IO, comp::GaussianGenerator) = print(io, comp)
+function Base.show(io::IO, ::MIME"text/plain", expr::GaussianGenerator)
+    io = IOIndent(IOContext(io, :compact => true))
+    println(io, "GaussianGenerator:", Indent()) 
+    for (k, v) in pairs(expr.σs)
+        println(io, k, ": ", v)
+    end
+    println(io, "-------------------")
+
+    for (k, v) in pairs(expr.meta)
+        println(io, k, ": ", v)
+    end
+end
+
 """
 The sketch of a motion model that enables supervised learning from input-output data. 
 The output transformation therefore needs to be a bijection.
@@ -30,10 +71,36 @@ function Base.show(io::IO, ::Type{<:MotionModelSketch})
     print(io, "MotionModelSketch{...}")
 end
 
-function mk_motion_model(sketch::MotionModelSketch, comps::NamedTuple{names}) where names
+
+struct GaussianMotionModel{
+        SK <: MotionModelSketch, 
+        Core <: GaussianGenerator} <: Function 
+    sketch:: SK
+    core:: Core
+end
+
+function (motion_model::GaussianMotionModel)(x::NamedTuple, u::NamedTuple, Δt::Real)
+    sketch, core = motion_model.sketch, motion_model.core
+    local inputs = sketch.inputs_transform(x, u)
+    local outputs_dist = core(inputs)
+    GenericSamplable(
+        rng -> begin
+            local out = NamedTuple{names}(rand(rng, outputs_dist))
+            sketch.outputs_transform(x, out, Δt)# |> assert_finite
+        end, 
+        x1 -> begin 
+            local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
+            logpdf(outputs_dist, values(out))
+        end
+    )
+end
+
+function mk_motion_model(
+    sketch::MotionModelSketch, core::GaussianGenerator{names},
+) where names
     (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
         local inputs = sketch.inputs_transform(x, u)
-        local outputs_dist = DistrIterator(map(f -> f(inputs), values(comps)))
+        local outputs_dist = core(inputs)
         GenericSamplable(
             rng -> begin
                 local out = NamedTuple{names}(rand(rng, outputs_dist))
@@ -325,5 +392,6 @@ include("probabilistic_synthesis.jl")
 include("sparse_regression.jl")
 include("em_synthesis.jl")
 include("sindy_regression.jl")
+include("neural_regression.jl")
 
 include("synthesis_utils.jl")

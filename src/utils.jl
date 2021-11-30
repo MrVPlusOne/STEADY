@@ -81,11 +81,11 @@ end
 """
 Concat columns horizontally.
 """
-hcatreduce(xs) = reduce(hcat, xs)
+hcatreduce(xs::AbsVec) = reduce(hcat, xs)
 """
 Concat rows vertically.
 """
-vcatreduce(xs) = reduce(vcat, xs)
+vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 
 """
     @unzip xs, [ys,...] = collection
@@ -474,7 +474,7 @@ function parallel_map(f, xs, ctx;
             for x in map_results
                 if x isa Left
                     (e, trace) = x.value
-                    @error "Exception in parallel_map: $(repr("text/plain", e))"
+                    @error "Exception in parallel_map: " expection=e
                     @error "Caused by: $(repr("text/plain", trace))"
                     error("parallel_map failed.")
                 end
@@ -484,3 +484,10 @@ function parallel_map(f, xs, ctx;
 end
 
 sigmoid(x::Real) = one(x) / (one(x) + exp(-x))
+
+"""
+Combine a named tuple of functions into a function that returns a named tuple.
+"""
+function combine_functions(functions::NamedTuple{names}) where names
+    x -> NamedTuple{names}(map(f -> f(x), values(functions)))
+end

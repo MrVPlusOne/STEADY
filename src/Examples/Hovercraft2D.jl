@@ -107,29 +107,6 @@ function sindy_sketch(sce::HovercraftScenario)
         hover_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
 end
 
-function sindy_core(
-    sce::HovercraftScenario, 
-    (; σ_v, σ_ω, mass, rot_mass, sep, drag_x, drag_y, rot_drag),
-)
-    (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
-    comp_env = ComponentEnv()
-    components_scalar_arithmatic!(comp_env)
-    cp = compile
-    (
-        loc_ax = GaussianComponent(cp(
-            LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
-                [ul, ur, loc_vx], loc_ax.ast.type)), 
-            σ_v),
-        loc_ay = GaussianComponent(cp(
-            LinearExpression(0.0, [-drag_y/mass], [loc_vy], loc_ay.ast.type)), 
-            σ_v),
-        der_ω = GaussianComponent(cp(
-            LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
-                [ur, ul, ω], der_ω.ast.type)), 
-            σ_ω),
-    )
-end
-
 function dynamics_sketch(sce::HovercraftScenario)
     vars = variables(sce)
     inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.ul, vars.ur]
@@ -196,20 +173,17 @@ function sindy_core(
     (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env)
-    cp = compile
-    (
-        loc_ax = GaussianComponent(cp(
-            LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
-                [ul, ur, loc_vx], loc_ax.ast.type)), 
-            σ_v),
-        loc_ay = GaussianComponent(cp(
-            LinearExpression(0.0, [-drag_y/mass], [loc_vy], loc_ay.ast.type)), 
-            σ_v),
-        der_ω = GaussianComponent(cp(
-            LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
-                [ur, ul, ω], der_ω.ast.type)), 
-            σ_ω),
-    )
+
+    comps = (
+        loc_ax = LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
+            [ul, ur, loc_vx], loc_ax.ast.type) |> compile,
+        loc_ay = LinearExpression(0.0, [-drag_y/mass], 
+            [loc_vy], loc_ay.ast.type) |> compile,
+        der_ω = LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
+            [ur, ul, ω], der_ω.ast.type) |> compile)
+    
+    μ_f = combine_functions(comps)
+    GaussianGenerator(μ_f, (loc_ax=σ_v, loc_ay=σ_v, der_ω=σ_ω), comps)
 end
 
 function plot_scenario!(sce::HovercraftScenario, states, obs_data, name; plt_args...)

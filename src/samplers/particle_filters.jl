@@ -121,9 +121,8 @@ function forward_filter(
                 log_weights .-= @views aux_log_weights[aux_indices]
             end
 
-            @inbounds for i in 1:N
-                particles[i, t+1] = rand(motion_model(particles[i, t], u, Δt))
-            end
+            @views sample_particles_batch!(
+                particles[:, t+1], particles[:, t], motion_model, u, Δt)
         end
         next!(progress)
     end
@@ -132,6 +131,12 @@ function forward_filter(
     (; particles, weights, log_weights, ancestors, log_obs)
 end
 
+function sample_particles_batch!(output, input, motion_model, u, Δt)
+    N = size(input, 1)
+    @inbounds for i in 1:N
+        output[i] = rand(motion_model(input[i], u, Δt))
+    end
+end
 
 """
 Sample smooting trajecotries by tracking the ancestors of a particle filter.

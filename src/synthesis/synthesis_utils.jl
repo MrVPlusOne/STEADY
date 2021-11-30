@@ -111,6 +111,10 @@ function n_effective_trajectoreis(trajectories::Matrix)
     n_unique / T
 end
 
+"""
+- inputs shape: n_transition of NamedTuple
+- outputs shape: (n_transition, n_outputs) of Float64
+"""
 function construct_inputs_outputs(
     trajectories::Matrix{<:Vector}, 
     obs_data_list::Vector,
@@ -143,18 +147,17 @@ end
 Returns the average log probability of the outputs.
 """
 function data_likelihood(
-    comps::AbsVec{<:GaussianComponent},
+    dynamics::GaussianGenerator{names},
     inputs::AbsVec{<:NamedTuple},
     outputs::AbstractMatrix{Float64};
     output_type=Float64,
-)   
-    @smart_assert length(comps) == size(outputs, 2)
+) where names
+    @smart_assert length(names) == size(outputs, 2)
     @smart_assert length(inputs) == size(outputs, 1)
 
     ll::output_type = 0
-    for c in 1:length(comps)
-        comp = comps[c]
-        ll += logpdf.(comp.(inputs), outputs[:, c]) |> sum
+    for t in 1:length(inputs)
+        ll += logpdf(dynamics(inputs[t]), NamedTuple{names}(outputs[t, :]))
     end
     ll / length(inputs)
 end

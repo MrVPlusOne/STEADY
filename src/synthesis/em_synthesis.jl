@@ -6,7 +6,7 @@ function em_synthesis(
     sketch::MotionModelSketch,
     obs_data_list::Vector{<:ObservationData},
     train_split::Int, # the number of training trajectories
-    comps_guess::OrderedDict{Symbol, <:GaussianComponent};
+    dyn_guess::GaussianGenerator;
     obs_model::Function,
     sampler::PosteriorSampler,
     n_fit_trajs::Int, # the number of trajectories to use for fitting the dynamics
@@ -31,13 +31,12 @@ function em_synthesis(
         sample_posterior_parallel(sampler, systems, obs_data_list, sampler_states)
     end
     
-    dyn_history = OrderedDict{Symbol, <:GaussianComponent}[]
+    dyn_history = GaussianGenerator[]
     logp_history = Vector{Float64}[]
-    dyn_est = comps_guess
+    dyn_est = dyn_guess
 
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
-        comps_compiled = map(compile_component, NamedTuple(dyn_est))
-        motion_model = mk_motion_model(sketch, comps_compiled)
+        motion_model = mk_motion_model(sketch, dyn_est)
         (; trajectories, log_obs) = @timeit timer "sample_data" sample_data(motion_model)
         trajectories::Matrix{<:Vector}
 
@@ -50,9 +49,9 @@ function em_synthesis(
 
         (iter == max_iters+1) && break
 
-        comps_σ = [comp.σ for comp in values(comps_guess)]
-
+        comps_σ = collect(dyn_est.σs)
         n_fit_trajs = min(n_fit_trajs, size(trajectories, 1))
+
         sol = @timeit timer "fit_dynamics_sindy_validated" begin 
             fit_best_dynamics(
                 regression_alg, sketch, trajectories, obs_data_list, train_split, comps_σ;

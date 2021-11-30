@@ -98,35 +98,3 @@ function compile(lexpr::LinearExpression, shape_env=ℝenv())
 
     CompiledFunc{rtype, typeof(param_f)}(param_f, lexpr, body_ex)
 end
-
-struct GaussianComponent{F<:Function, R<:Real} <: Function
-    μ_f::F
-    σ::R
-end
-
-(gp::GaussianComponent)(in) = begin
-    (; μ_f, σ) = gp
-    Normal(μ_f(in), σ)
-end
-
-function compile_component(comp::GaussianComponent)
-    if comp.μ_f isa LinearExpression
-        GaussianComponent(compile(comp.μ_f), comp.σ)
-    else
-        comp
-    end
-end
-
-function Base.print(io::IO, expr::GaussianComponent)
-    compact = get(io, :compact, false)
-    (; μ_f, σ) = expr
-    !compact && print(io, "GaussianComponent") 
-    print(io, "(σ = ", σ)
-    print(io, ", μ = ", μ_f, ")")
-end
-
-function Base.show(io::IO, ::Type{<:GaussianComponent})
-    print(io, "GaussianComponent{...}")
-end
-
-Base.show(io::IO, comp::GaussianComponent) = print(io, comp)

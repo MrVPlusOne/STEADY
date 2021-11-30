@@ -7,13 +7,6 @@ struct SindyRegression <: AbstractRegerssionAlgorithm
 end
 
 
-"""
-Split the provided trajectories into training and validation set. 
-Fit multiple dynamics using the provided optimizer list and evaluate their performance 
-on both the traiand validation set.
-
-Returns a list of `(; comps, stats, lexprs, train_score, valid_score)`.
-"""
 function fit_best_dynamics(
     alg::SindyRegression,
     sketch::MotionModelSketch,
@@ -22,18 +15,16 @@ function fit_best_dynamics(
     comps_σ_guess::Vector{Float64},
 )
     (; optimizer_list) = alg
-    output_names = [v.name for v in sketch.output_vars]
-    output_types = [v.type for v in sketch.output_vars]
 
     solutions = parallel_map(eachindex(optimizer_list), alg) do alg, i
         optimizer, optimizer_params = alg.optimizer_list[i], alg.optimizer_param_list[i]
         optimizer::SeqThresholdOptimizer
 
-        (; comps, stats, lexprs) = fit_dynamics_sindy(
-            alg.basis, inputs, outputs, output_types, comps_σ_guess, optimizer)
-        train_score = data_likelihood(comps, inputs, outputs)
-        valid_score = data_likelihood(comps, valid_inputs, valid_outputs)
-        (; comps, stats, lexprs, train_score, valid_score, optimizer_params)
+        (; dynamics, stats, lexprs) = fit_dynamics_sindy(
+            alg.basis, inputs, outputs, sketch, comps_σ_guess, optimizer)
+        train_score = data_likelihood(dynamics, inputs, outputs)
+        valid_score = data_likelihood(dynamics, valid_inputs, valid_outputs)
+        (; dynamics, stats, lexprs, train_score, valid_score, optimizer_params)
     end
     println("Pareto analysis: ")
     ordering = sortperm(solutions, rev=true, by=x -> x.valid_score)
@@ -43,20 +34,18 @@ function fit_best_dynamics(
     display(DataFrame(rows))
 
     sol = solutions |> max_by(x -> x.valid_score)
-    (; comps, stats, lexprs, train_score, valid_score, optimizer_params) = sol
+    (; dynamics, stats, lexprs, train_score, valid_score, optimizer_params) = sol
 
-    dynamics = OrderedDict(zip(output_names, comps))
-    σ_list = [Symbol(name, ".σ") => comp.σ for (name, comp) in dynamics]
+    σ_list = [Symbol(name, ".σ") => σ for (name, σ) in pairs(dynamics.σs)]
     model_info = (num_terms=sum(num_terms, lexprs), σ_list..., 
         dynamics=repr("text/plain", dynamics))
     optimizer_info = (; optimizer_params..., train_score, valid_score)
-    display_info = (; num_terms=sum(num_terms, lexprs), dynamics, stats)
+    display_info = (; num_terms=sum(num_terms, lexprs), dynamics.σs, 
+        lexprs=OrderedDict(zip(keys(dynamics.σs), lexprs)), stats)
     
     (; dynamics, model_info, optimizer_info, display_info)
 end
 
-d1 = OrderedDict(zip(["a", "b"], [1,2]))
-l1 = [Symbol(name, ".σ") => 2v for (name, v) in d1]
 
 """
 Fit the dynamics from trajectory data using the SINDy algorithm.
@@ -65,7 +54,7 @@ function fit_dynamics_sindy(
     basis::Vector{<:CompiledFunc},
     inputs::AbsVec{<:NamedTuple},
     outputs::AbstractMatrix{Float64},
-    output_types::AbsVec{PType},
+    sketch::MotionModelSketch,
     comps_σ::AbsVec{Float64},
     optimizer::SparseOptimizer;
 )
@@ -82,25 +71,30 @@ function fit_dynamics_sindy(
     basis_data = hcatreduce(features)
     all(isfinite, basis_data) || @error "Basis data contains NaN or Inf: $basis_data."
 
-    @unzip comps, stats, lexprs = map(1:size(outputs, 2)) do c
+    output_types = [v.type for v in sketch.output_vars]
+    output_names = Tuple((v.name for v in sketch.output_vars))
+    @unzip lexprs, σs, stats = map(1:size(outputs, 2)) do c
         target = outputs[:, c]
         opt_scaled = optimizer * comps_σ[c]
         (; coeffs, intercept, active_ids, iterations) = regression(opt_scaled, target, basis_data)
         
         comp = if isempty(active_ids) 
             lexpr = LinearExpression(intercept, [], [], output_types[c])
-            σ_f = std(target)
+            σ_f = std(target, mean=0.0)
         else
             fs = basis[active_ids]
-            σ_f = @views std(basis_data[:, active_ids] * coeffs .+ intercept - target)
+            σ_f = @views std(
+                basis_data[:, active_ids] * coeffs .+ intercept - target, mean=0.0)
             coeffs1 = coeffs ./ scales[active_ids]
             lexpr = LinearExpression(intercept, coeffs1, fs, output_types[c])
         end
-        comp = GaussianComponent(compile(lexpr), σ_f)
         stat = (; term_weights = coeffs ./ comps_σ[c], iterations)
-        (comp, stat, lexpr)
+        (lexpr, σ_f, stat)
     end
-    comps::Vector{<:GaussianComponent}
-    (; comps, stats, lexprs)
-end
 
+    core = combine_functions(NamedTuple{output_names}(compile.(lexprs)))
+    
+    dynamics = GaussianGenerator(core, NamedTuple{output_names}(σs), 
+        NamedTuple{output_names}(lexprs))
+    (; dynamics, stats, lexprs)
+end
