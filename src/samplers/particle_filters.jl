@@ -122,7 +122,7 @@ function forward_filter(
             end
 
             @views sample_particles_batch!(
-                particles[:, t+1], particles[:, t], motion_model, u, Δt)
+                particles[:, t+1], particles[:, t], motion_model, u, Δt; cache)
         end
         next!(progress)
     end
@@ -131,7 +131,7 @@ function forward_filter(
     (; particles, weights, log_weights, ancestors, log_obs)
 end
 
-function sample_particles_batch!(output, input, motion_model, u, Δt)
+function sample_particles_batch!(output, input, motion_model, u, Δt; cache)
     N = size(input, 1)
     @inbounds for i in 1:N
         output[i] = rand(motion_model(input[i], u, Δt))

@@ -4,7 +4,7 @@ using StatsPlots
 using DrWatson
 import Random
 
-quick_test=true
+quick_test=false
 regressor=:neural  # either :neural or :sindy
 
 StatsPlots.default(dpi=300, legend=:outerbottom)
@@ -25,8 +25,8 @@ true_params = (;
     sep=0.48, len=0.42, fraction_max=1.5, σ_v=0.04, σ_ω=0.03,)
 params_guess = nothing
 
-function manual_control(front_drive)
-    pert(x) = x + 0.1randn()
+function manual_control(front_drive, noise)
+    pert(x) = x + noise * randn()
     @unzip times, v̂_seq, steer_seq = if front_drive
         [
             (t=0.0, v̂=0.0, steer=0.0),
@@ -67,17 +67,24 @@ n_test_runs = 10
 n_fit_trajs = 10
 train_split = 6
 
-train_setups, test_setups = let 
-    setups = map(1:n_runs+n_test_runs) do i
-        x0 = (
-            pos=@SVector[-6.5+randn(), 1.2+randn()], 
-            vel=@SVector[0.25, 0.0],
-            θ=randn()°, 
-            ω=0.1randn(),
-        )
-        ScenarioSetup(times, obs_frames, x0, manual_control(front_drive))
-    end
-    setups[1:n_runs], setups[n_runs+1:n_runs+n_test_runs]
+train_setups = map(1:n_runs) do i
+    x0 = (
+        pos=@SVector[-6.5+randn(), 1.2+randn()], 
+        vel=@SVector[0.25, 0.0],
+        θ=randn()°, 
+        ω=0.1randn(),
+    )
+    ScenarioSetup(times, obs_frames, x0, manual_control(front_drive, 0.2))
+end
+
+test_setups = map(1:n_test_runs) do i
+    x0 = (
+        pos=@SVector[-2.5+2randn(), 2randn()], 
+        vel=@SVector[0.25randn(), 0.0],
+        θ=randn()°, 
+        ω=0.3randn(),
+    )
+    ScenarioSetup(times, obs_frames, x0, manual_control(front_drive, 0.6))
 end
 nothing
 ##-----------------------------------------------------------
@@ -127,17 +134,17 @@ elseif regressor === :neural
     let
         network = Chain(
             Dense(length(sketch.input_vars), 32, relu),
-            Dropout(0.5),
+            # Dropout(0.5),
             Dense(32, length(sketch.output_vars)))
         optimizer = ADAM(2e-4)
-        NeuralRegression(; network, optimizer)
+        NeuralRegression(; network, optimizer, max_epochs=500, patience=10)
     end
 else
     error("Unknown regressor name: $regressor")
 end
 
 post_sampler = ParticleFilterSampler(
-    n_particles=quick_test ? 2000 : 60_000,
+    n_particles=quick_test ? 2000 : 50_000,
     n_trajs=100,
 )
 
@@ -151,9 +158,10 @@ em_result = let
     true_post_trajs = test_posterior_sampling(
         scenario, old_motion_model, "test_truth", 
         sim_result, post_sampler, state_L2_loss=L2_in_SE2).post_trajs
-    test_dynamics_fitting(
+    dyn_est = test_dynamics_fitting(
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
         algorithm, sketch, comps_σ, n_fit_trajs)
+    (; dyn_est)
     synthesize_scenario(
         scenario, train_split, sim_result, algorithm, sketch, dyn_guess; 
         post_sampler, n_fit_trajs, max_iters=quick_test ? 5 : 501)
@@ -165,6 +173,6 @@ display(em_result.dyn_est)
 analyze_motion_model_performance(
     scenario, em_result.dyn_est, old_motion_model, 
     get_simplified_motion_model(scenario, true_params), test_setups;
-    save_dir, post_sampler, state_L2_loss=L2_in_SE2, n_repeat=4,
+    save_dir, post_sampler, state_L2_loss=L2_in_SE2, n_repeat=5,
 )
 ##-----------------------------------------------------------

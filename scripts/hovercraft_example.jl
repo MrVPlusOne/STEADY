@@ -78,7 +78,7 @@ display(sindy_core(scenario, true_params))
 new_motion_model = let
     sketch = sindy_sketch(scenario)
     core = sindy_core(scenario, true_params)
-    mk_motion_model(sketch, core)
+    GaussianMotionModel(sketch, core)
 end
 sim_result = simulate_scenario(scenario, new_motion_model, train_setups; save_dir)
 nothing

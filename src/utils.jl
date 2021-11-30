@@ -321,6 +321,8 @@ end
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
 to_svec(vec::NTuple{n, X}) where {n, X} = SVector{n, X}(vec)
 
+to_static_array(array::AbsMat) = SMatrix{size(array)...}(array)
+to_static_array(array::AbsVec) = SVector{length(array)}(array)
 """
 Like `get!`, but can be used to directly access nested dictionaries.
 
@@ -463,8 +465,11 @@ function parallel_map(f, xs, ctx;
             map_results = map(eval_task, xs)
         else
             pool = ThreadPools.QueuePool(2, n_threads)
-            map_results = ThreadPools.tmap(eval_task, pool, xs)
-            close(pool)
+            try
+                map_results = ThreadPools.tmap(eval_task, pool, xs)
+            finally
+                close(pool)
+            end
         end
     end
     eval_results = 

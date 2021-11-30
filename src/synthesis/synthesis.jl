@@ -16,8 +16,8 @@ end
 
 Base.length(gg::GaussianGenerator) = length(gg.σs)
 
-function (gp::GaussianGenerator{names})(in) where names
-    (; μ_f, σs) = gp
+function (gg::GaussianGenerator{names})(in) where names
+    (; μ_f, σs) = gg
     μ = μ_f(in)::NamedTuple{names}
     map(values(μ), values(σs)) do m, s
         Normal(m, s)
@@ -40,7 +40,7 @@ function Base.show(io::IO, ::MIME"text/plain", expr::GaussianGenerator)
     io = IOIndent(IOContext(io, :compact => true))
     println(io, "GaussianGenerator:", Indent()) 
     for (k, v) in pairs(expr.σs)
-        println(io, k, ": ", v)
+        println(io, k, ".σ: ", v)
     end
     println(io, "-------------------")
 
@@ -73,16 +73,19 @@ end
 
 
 struct GaussianMotionModel{
+        Core <: GaussianGenerator,
         SK <: MotionModelSketch, 
-        Core <: GaussianGenerator} <: Function 
+    } <: Function 
     sketch:: SK
     core:: Core
 end
 
-function (motion_model::GaussianMotionModel)(x::NamedTuple, u::NamedTuple, Δt::Real)
+function (motion_model::GaussianMotionModel{<:GaussianGenerator{names}})(
+    x::NamedTuple, u::NamedTuple, Δt::Real
+) where names
     sketch, core = motion_model.sketch, motion_model.core
-    local inputs = sketch.inputs_transform(x, u)
-    local outputs_dist = core(inputs)
+    inputs = sketch.inputs_transform(x, u)
+    outputs_dist = core(inputs)
     GenericSamplable(
         rng -> begin
             local out = NamedTuple{names}(rand(rng, outputs_dist))
@@ -95,24 +98,6 @@ function (motion_model::GaussianMotionModel)(x::NamedTuple, u::NamedTuple, Δt::
     )
 end
 
-function mk_motion_model(
-    sketch::MotionModelSketch, core::GaussianGenerator{names},
-) where names
-    (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
-        local inputs = sketch.inputs_transform(x, u)
-        local outputs_dist = core(inputs)
-        GenericSamplable(
-            rng -> begin
-                local out = NamedTuple{names}(rand(rng, outputs_dist))
-                sketch.outputs_transform(x, out, Δt)# |> assert_finite
-            end, 
-            x1 -> begin 
-                local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
-                logpdf(outputs_dist, values(out))
-            end
-        )
-    end
-end
 
 """
 A regression algorith specifies how to synthesize the dynamics from a given set of 

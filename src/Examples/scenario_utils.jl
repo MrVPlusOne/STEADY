@@ -280,7 +280,7 @@ function test_dynamics_fitting(
         )
         display(fit_r)
     end
-    nothing
+    dynamics
 end
 
 function synthesize_scenario(
@@ -378,7 +378,7 @@ function analyze_motion_model_performance(
     test_save_dir=joinpath(save_dir, "test")
     trained_mm = let 
         sketch = sindy_sketch(scenario)
-        mk_motion_model(sketch, dyn_est)
+        GaussianMotionModel(sketch, dyn_est)
     end
 
     test_sim_result = simulate_scenario(

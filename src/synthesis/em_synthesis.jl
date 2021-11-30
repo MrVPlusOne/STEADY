@@ -36,7 +36,7 @@ function em_synthesis(
     dyn_est = dyn_guess
 
     try @progress "fit_dynamics_iterative" for iter in 1:max_iters+1
-        motion_model = mk_motion_model(sketch, dyn_est)
+        motion_model = GaussianMotionModel(sketch, dyn_est)
         (; trajectories, log_obs) = @timeit timer "sample_data" sample_data(motion_model)
         trajectories::Matrix{<:Vector}
 
@@ -52,7 +52,7 @@ function em_synthesis(
         comps_σ = collect(dyn_est.σs)
         n_fit_trajs = min(n_fit_trajs, size(trajectories, 1))
 
-        sol = @timeit timer "fit_dynamics_sindy_validated" begin 
+        sol = @timeit timer "fit_best_dynamics" begin 
             fit_best_dynamics(
                 regression_alg, sketch, trajectories, obs_data_list, train_split, comps_σ;
                 n_fit_trajs)

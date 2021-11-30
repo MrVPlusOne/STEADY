@@ -201,5 +201,5 @@ function get_simplified_motion_model(
     sketch = sindy_sketch(sce)
     comps = sindy_core(sce, (; σ_v, σ_ω, mass, rot_mass, sep, 
         drag_x=0.0, drag_y=0.0, rot_drag=0.0))
-    mk_motion_model(sketch, comps)
+    GaussianMotionModel(sketch, comps)
 end
