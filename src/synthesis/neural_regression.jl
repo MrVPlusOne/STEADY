@@ -56,7 +56,6 @@ function fit_best_dynamics(
 
     progress = Progress(max_epochs * length(train_loader), desc="fit_best_dynamics",
         output=stdout, enabled=true)
-    Flux.trainmode!(network, true)
     for epoch in 1:max_epochs
         for (x, y) in train_loader
             loss_f = () -> mean(((network(x) .- y) ./ σs) .^ 2) + l2_λ * sum(sqnorm, params)
@@ -65,7 +64,6 @@ function fit_best_dynamics(
             next!(progress)
         end
 
-        Flux.trainmode!(network, false)
         (new_σs, train_loss) = fit_model_σ(train_loader, network)
         (_, valid_loss) = fit_model_σ(valid_loader, network)
 
@@ -84,7 +82,6 @@ function fit_best_dynamics(
 
     output_names = [v.name for v in sketch.output_vars]
     σs_nt = NamedTuple(zip(output_names, σs))
-    Flux.trainmode!(network, true) # to enable dropout during sampling
     dynamics = network_to_gaussian(network, σs_nt)
     σ_list = [Symbol(name, ".σ") => σ for (name, σ) in zip(output_names, σs)]
 
@@ -101,6 +98,7 @@ sqnorm(x) = sum(abs2, x)
 
 function network_to_gaussian(network, σs::NamedTuple)
     net = network |> compile_neural_nets |> NeuralNetWrapper
+    Flux.trainmode!(net, true) # to enable dropout during sampling
     GaussianGenerator(net, σs, (; network))
 end
 
@@ -158,6 +156,21 @@ function compile_neural_nets(layer::Dense)
     Dense(to_static_array(weight), to_static_array(bias), σ)
 end
 
+struct StaticDropout
+    p::Float64
+end
+
+function StaticDropout(p)
+    @assert 0 ≤ p ≤ 1
+    StaticDropout(p)
+end
+
+(d::StaticDropout)(xs) = begin
+    map(xs) do x
+        rand() < d.p ? zero(x) : x
+    end
+end
+
 function compile_neural_nets(layer::Dropout)
-    layer
+    StaticDropout(layer.p)
 end

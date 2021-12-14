@@ -64,7 +64,7 @@ end
 
 n_runs = 10
 n_test_runs = 10
-n_fit_trajs = 10
+n_fit_trajs = method === :regressor ? 100 : 10
 train_split = 6
 
 train_setups = map(1:n_runs) do i
@@ -137,7 +137,7 @@ elseif regressor === :neural
             # Dropout(0.5),
             Dense(32, length(sketch.output_vars)))
         optimizer = ADAM(2e-4)
-        NeuralRegression(; network, optimizer, max_epochs=500, patience=10)
+        NeuralRegression(; network, optimizer, max_epochs=100, patience=5)
     end
 else
     error("Unknown regressor name: $regressor")
@@ -162,9 +162,9 @@ em_result = let
         scenario, train_split, true_post_trajs, sim_result.obs_data_list, 
         algorithm, sketch, comps_σ, n_fit_trajs)
     (; dyn_est)
-    synthesize_scenario(
-        scenario, train_split, sim_result, algorithm, sketch, dyn_guess; 
-        post_sampler, n_fit_trajs, max_iters=quick_test ? 5 : 501)
+    # synthesize_scenario(
+    #     scenario, train_split, sim_result, algorithm, sketch, dyn_guess; 
+    #     post_sampler, n_fit_trajs, max_iters=quick_test ? 5 : 501)
 end
 nothing
 ##-----------------------------------------------------------
