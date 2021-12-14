@@ -31,6 +31,8 @@ times = 0:Δt:8 |> collect
 sim_data = simulate_trajectory(times, [1.0, 0.0], system, controller)
 
 plot(times, hcatreduce(sim_data.states)', label = ["x (truth)" "v (truth)"]) |> display
+plot(times, hcatreduce(sim_data.controls)', label = ["control"]) |> display
+plot(times, hcatreduce(sim_data.observations)', label = ["obs"]) |> display
 ##-----------------------------------------------------------
 function plot_trajectories!(
     comp_names::AbsVec{String}, trajectories::AbsVec{<:AbsVec};
@@ -48,7 +50,7 @@ function plot_trajectories!(
     plot!(concat_times, ys; label = permutedims(comp_names), linealpha)
 end
 
-obs_frames = [1, 50]
+obs_frames = 1:5:length(times)
 obs_data = (; times, sim_data.observations, sim_data.controls, obs_frames, x0_dist)
 
 post_sampler = ParticleFilterSampler(
@@ -62,7 +64,7 @@ plot(times, hcatreduce(sim_data.states)', label = ["x (truth)" "v (truth)"])
 plot_trajectories!(["x (post)", "v (post)"], sampling_result.trajectories) |> display
 ##-----------------------------------------------------------
 using CUDA
-use_gpu = false
+use_gpu = true
 
 x_dim = 2
 rnn_dim = 64
@@ -78,7 +80,7 @@ y_dim = length(observation_vec[1])
 guide = mk_guide(x_dim, y_dim, rnn_dim) |> to_device(use_gpu)
 vi_smoother = VISmoother(; guide, on_gpu = use_gpu)
 
-init_trajs = [vi_smoother(observation_vec, Δt).trajectory for i in 1:100]
+init_trajs = vi_smoother(observation_vec, Δt, 100).trajectories
 plot(times, hcatreduce(sim_data.states)', label = ["x (truth)" "v (truth)"])
 plot_trajectories!(["x (init)", "v (init)"], init_trajs) |> display
 ##-----------------------------------------------------------
@@ -92,27 +94,26 @@ end
 
 elbo_history = []
 adam=ADAM(1e-4)
-let n_steps=200, prog = Progress(n_steps)
+let n_steps=201, prog = Progress(n_steps)
     @time train_guide!(vi_smoother, log_joint, observation_vec, Δt; 
         optimizer=adam,
         n_steps,
         callback=r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
-                sampled_trajs = [vi_smoother(observation_vec, Δt).trajectory for i in 1:100]
+                sampled_trajs = vi_smoother(observation_vec, Δt, 100).trajectories
                 plot(times, hcatreduce(sim_data.states)', 
                     label = ["x (truth)" "v (truth)"], title="iteration $(r.step)")
                 plot_trajectories!(["x (trained)", "v (trained)"], sampled_trajs) |> display
             end
             next!(prog, showvalues = [(:elbo, r.elbo)])
         end,
-        n_samples = 16,
+        n_samples = 1024,
     )
 end
 
 plot(elbo_history, label="ELBO") |> display
 ##-----------------------------------------------------------
-# plot trained posterior trajectories
-g1 = ones(10) |> Flux.gpu
-randn!(zero(g1))
+
+
 ##-----------------------------------------------------------
