@@ -1,3 +1,5 @@
+configs/
+
 JuliaSysimage.dylib
 checkpoints
 .vscode

@@ -4,7 +4,7 @@ using StatsPlots
 using DrWatson
 import Random
 
-quick_test=false
+quick_test=true
 regressor=:neural  # either :neural or :sindy
 
 StatsPlots.default(dpi=300, legend=:outerbottom)
@@ -89,7 +89,7 @@ end
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
-save_dir=datadir("sims", savename("car2d", (; regressor, quick_test)))
+save_dir=data_dir("sims", savename("car2d", (; regressor, quick_test)))
 old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)
@@ -122,9 +122,9 @@ algorithm = if regressor === :sindy
         basis = [compile(e, shape_env, comp_env) for e in basis_expr]
         lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
         @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
-            regressor = LassoRegression(λ; fit_intercept=true)
-            # regressor = RidgeRegression(10.0; fit_intercept=false)
-            SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+            let reg = LassoRegression(λ; fit_intercept=true)
+                SeqThresholdOptimizer(0.1, regressor), (λ=λ,)
+            end
         end
         
         SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)

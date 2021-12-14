@@ -149,9 +149,9 @@ function simulate_scenario(
             error("Aborted.")
         end
     end
-    mkdir(save_dir)
+    mkpath(save_dir)
 
-    truth_path = mkdir(joinpath(save_dir, "ground_truth"))
+    truth_path = mkpath(joinpath(save_dir, "ground_truth"))
     obs_dist = observation_dist(scenario)
 
     @info("Generating simulation data...")

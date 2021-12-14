@@ -62,6 +62,18 @@ function states_log_score(
     p
 end
 
+function states_logp(
+    motion_model::Function, (;times, controls, x0_dist), states,
+)
+    p = logpdf(x0_dist, states[1])
+    for i in 1:length(states)-1
+        Δt = times[i+1]-times[i]
+        state_distr = motion_model(states[i], controls[i], Δt)
+        p += logpdf(state_distr, states[i+1])
+    end
+    p
+end
+
 function data_log_score(
     obs_model::Function, (; times, obs_frames, observations), states, ::Type{T}
 )::T where T
@@ -120,3 +132,4 @@ end
 
 include("particle_filters.jl")
 include("MCMC_samplers.jl")
+include("vi_smoother.jl")

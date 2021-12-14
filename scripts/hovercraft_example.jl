@@ -65,7 +65,7 @@ end
 nothing
 ##-----------------------------------------------------------
 # simulate the scenario
-save_dir=datadir("sims/hovercraft")
+save_dir=data_dir("sims/hovercraft")
 old_motion_model = let 
     sketch=dynamics_sketch(scenario) 
     core=dynamics_core(scenario)

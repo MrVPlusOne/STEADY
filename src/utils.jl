@@ -42,11 +42,11 @@ Stacktrace:
 ```
 """
 macro smart_assert(ex, msg=nothing)
+    has_msg = msg !== nothing
     if @capture(ex, op_(lhs_, rhs_))
         ex_q = QuoteNode(ex)
         lhs_q = QuoteNode(lhs)
         rhs_q = QuoteNode(rhs)
-        has_msg = msg === nothing
         quote
             lv = $(esc(lhs))
             rv = $(esc(rhs))
@@ -61,7 +61,11 @@ macro smart_assert(ex, msg=nothing)
             end
         end
     else
-        :(@assert($ex, $msg))
+        if has_msg
+            :(@assert($ex, $msg))
+        else
+            :(@assert($ex))
+        end
     end
 end
 
@@ -495,4 +499,9 @@ Combine a named tuple of functions into a function that returns a named tuple.
 """
 function combine_functions(functions::NamedTuple{names}) where names
     x -> NamedTuple{names}(map(f -> f(x), values(functions)))
+end
+
+function data_dir(segs...)
+    path = read(projectdir("configs/datadir.txt"), String) |> strip
+    joinpath(path, segs...)
 end
