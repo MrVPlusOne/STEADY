@@ -8,16 +8,16 @@ end
 
 
 function fit_best_dynamics(
-    alg::SindyRegression,
+    algorithm::SindyRegression,
     sketch::MotionModelSketch,
     (inputs, outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
     (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )
-    (; optimizer_list) = alg
+    (; optimizer_list) = algorithm
 
-    solutions = parallel_map(eachindex(optimizer_list), alg) do alg, i
-        optimizer, optimizer_params = alg.optimizer_list[i], alg.optimizer_param_list[i]
+    solutions = parallel_map(1:length(optimizer_list), algorithm) do alg, i
+        local optimizer, optimizer_params = alg.optimizer_list[i], alg.optimizer_param_list[i]
         optimizer::SeqThresholdOptimizer
 
         (; dynamics, stats, lexprs) = fit_dynamics_sindy(
@@ -28,7 +28,7 @@ function fit_best_dynamics(
     end
     println("Pareto analysis: ")
     ordering = sortperm(solutions, rev=true, by=x -> x.valid_score)
-    local rows = map(solutions, ordering) do sol, rank
+    rows = map(solutions, ordering) do sol, rank
         (; sol.optimizer_params..., sol.train_score, sol.valid_score, rank)
     end
     display(DataFrame(rows))

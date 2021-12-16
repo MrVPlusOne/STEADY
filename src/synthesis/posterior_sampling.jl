@@ -28,16 +28,19 @@ function sample_posterior(
 end
 
 function sample_posterior_parallel(
-    sampler::PosteriorSampler, systems::Vector, obs_data_list::Vector, 
+    sampler::PosteriorSampler, systems::Vector, obs_data_list::Vector,
     states::Vector=[new_state(sampler) for _ in systems];
-    n_threads=min(Threads.nthreads()-1, length(systems)),
+    n_threads=min(Threads.nthreads()-1, length(systems), 10),
 )
     n_runs = length(systems)
     @assert n_runs == length(systems) == length(obs_data_list)
 
+    progress = Progress(length(systems), desc="sample_posterior_parallel")
     results = parallel_map(1:n_runs, nothing; n_threads) do _, i
-        sample_posterior(sampler, systems[i], obs_data_list[i], states[i], 
-            showprogress=i==1)
+        r = sample_posterior(sampler, systems[i], obs_data_list[i], states[i], 
+            showprogress=false)
+        next!(progress)
+        r
     end
     @unzip_named (log_obs, :log_obs), (trajectories_list, :trajectories) = results
     trajectories = reduce(hcat, trajectories_list)

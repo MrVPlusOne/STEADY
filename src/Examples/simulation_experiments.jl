@@ -66,14 +66,15 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
         GaussianGenerator(_ -> init_μ, init_σ, (μ_f="all zeros",))
     end
 
-    n_fit_trajs = method === :neural ? 100 : 20
     # learning from the true posterior
+    n_fit_trajs = method === :neural ? 100 : 20
+    regressor = mk_regressor(regress_alg, sketch)
     dyn_from_posterior = test_dynamics_fitting(
         sce,
         train_split,
         true_post_trajs,
         train_sim.obs_data_list,
-        mk_regressor(regress_alg, sketch),
+        regressor,
         sketch,
         comps_σ,
         n_fit_trajs,
@@ -88,7 +89,6 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
         save_dir=joinpath(save_dir, "test"),
         post_sampler,
         state_L2_loss=L2_in_SE2,
-        n_repeat=5,
     )
 end
 

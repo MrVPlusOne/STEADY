@@ -199,8 +199,8 @@ function test_posterior_sampling(
         MarkovSystem(x0_dist, motion_model, obs_dist)
     end
     result_dir = joinpath(save_dir, test_name) |> mkpath
-    @info("[$test_name] Sampling posterior using the provided motion model...")
-    @time sampler_result = sample_posterior_parallel(
+    # @info("[$test_name] Sampling posterior using the provided motion model...")
+    sampler_result = sample_posterior_parallel(
         post_sampler, systems, obs_data_list)
     @info test_posterior_sampling sampler_result.n_effective
     post_trajs = sampler_result.trajectories
@@ -381,7 +381,6 @@ function analyze_motion_model_performance(
     save_dir,
     post_sampler,
     state_L2_loss,
-    n_repeat::Int=5,
 )
     trained_mm = let 
         sketch = sindy_sketch(scenario)
@@ -394,15 +393,11 @@ function analyze_motion_model_performance(
     prog_step = 0
     rows = @withprogress name="analyze_motion_model_performance" begin
         map(motion_models) do (name, mm)
-            row = map(1:n_repeat) do i
-                @logprogress prog_step/(length(motion_models) * n_repeat)
-                prog_step+=1
-                test_posterior_sampling(
-                    scenario, mm, name, 
-                    test_sim_result, post_sampler; 
-                    state_L2_loss, generate_plots=i==1
-                ).metrics
-            end |> to_measurement
+            row = test_posterior_sampling(
+                scenario, mm, name, 
+                test_sim_result, post_sampler; 
+                state_L2_loss, generate_plots=true
+            ).metrics
             (; name, row...)
         end
     end
