@@ -6,6 +6,10 @@ import JSON
 using TensorBoardLogger: TBLogger
 using Serialization
 using ProgressLogging: @withprogress, @logprogress
+using StatsPlots
+StatsPlots.default(dpi=300, legend=:outerbottom)
+using Flux: Dense, Chain, Dropout, relu, ADAM
+import CSV
 
 abstract type Scenario end
 
@@ -121,7 +125,7 @@ function plot_2d_trajectories!(
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha)
 end
 
-struct ScenarioSetup{
+@kwdef struct ScenarioSetup{
     A<:AbsVec{Float64}, B<:AbsVec{Int}, 
     X<:NamedTuple, Ctrl<:Function,
 }
@@ -137,6 +141,7 @@ function simulate_scenario(
     true_motion_model::Function,
     setups::Vector{<:ScenarioSetup};
     save_dir,
+    max_plots_to_show=8,
 )
     if isdir(save_dir) 
         @warn("The save_dir '$save_dir' already exists.")
@@ -162,17 +167,19 @@ function simulate_scenario(
         ex_data = simulate_trajectory(times, x0, true_system, controller)
         obs_data = 
             (; times, obs_frames, ex_data.observations, ex_data.controls, x0_dist)
-        traj_p = let 
-            plot(legend=:outerbottom, aspect_ratio=1.0, title="Run $i")
-            plot_scenario!(scenario, ex_data.states, obs_data, "truth";
-                state_color=1, landmark_color=3)
+        if i <= max_plots_to_show
+            traj_p = let 
+                plot(legend=:outerbottom, aspect_ratio=1.0, title="Run $i")
+                plot_scenario!(scenario, ex_data.states, obs_data, "truth";
+                    state_color=1, landmark_color=3)
+            end
+            fig_path=joinpath(truth_path, "run_$i.svg")
+            savefig(traj_p, fig_path)
+            display(traj_p)
         end
-        fig_path=joinpath(truth_path, "run_$i.svg")
-        savefig(traj_p, fig_path)
-        display(traj_p)
-        (true_system, ex_data, obs_data, traj_p)
+        (true_system, ex_data, obs_data)
     end
-    @unzip true_systems, ex_data_list, obs_data_list, traj_plts = data_list
+    @unzip true_systems, ex_data_list, obs_data_list = data_list
     (; true_systems, ex_data_list, obs_data_list, setups, save_dir)
 end
 
@@ -184,6 +191,7 @@ function test_posterior_sampling(
     post_sampler::PosteriorSampler;
     state_L2_loss::Function, # (x, y) -> Float64
     generate_plots::Bool=true,
+    max_plots_to_show=8,
 )    
     systems = map(setups) do setup
         x0_dist = initial_state_dist(scenario, setup.x0)
@@ -202,7 +210,7 @@ function test_posterior_sampling(
         x0_dist = systems[i].x0_dist
         run_trajs = post_trajs[:, i]
 
-        if generate_plots
+        if generate_plots && i <= max_plots_to_show
             plt = plot(aspect_ratio=1.0, title="Run $i")
             plot_trajectories!(scenario, run_trajs, "true posterior", linecolor=2)
             plot_scenario!(scenario, true_states, obs_data_list[i], "truth"; 
@@ -265,8 +273,7 @@ function test_dynamics_fitting(
 
         let
             x0_dist = obs_data_list[1].x0_dist
-            x0 = setups[1].x0
-            check_params_logp(x0, x0_dist, true_params, params_dist)
+            x0 = post_trajs[1,1]
             check_params_logp(x0, x0_dist, params_guess, params_dist)
         end
 
@@ -338,10 +345,11 @@ function synthesize_scenario(
                 obs_model, sampler=post_sampler, n_fit_trajs, 
                 iteration_callback, logger, max_iters)
         else
-            (; comp_env) = reg_alg
+            (; comp_env, max_ast_size, optim_options, comps_guess, params_guess) = reg_alg
             @info("Enumerating programs...")
             pruner = IOPruner(; inputs=sample_rand_inputs(sketch, 100), comp_env)
             shape_env = ℝenv()
+            vdata = variable_data(scenario)
             senum = @time synthesis_enumeration(vdata, sketch, shape_env, comp_env, max_ast_size; pruner)
             display(senum)
 
@@ -369,20 +377,16 @@ function analyze_motion_model_performance(
     dyn_est::GaussianGenerator,
     true_mm::Function,
     baseline_mm::Function,
-    test_setups::AbsVec{<:ScenarioSetup};
+    test_sim_result;
     save_dir,
     post_sampler,
     state_L2_loss,
     n_repeat::Int=5,
 )
-    test_save_dir=joinpath(save_dir, "test")
     trained_mm = let 
         sketch = sindy_sketch(scenario)
         GaussianMotionModel(sketch, dyn_est)
     end
-
-    test_sim_result = simulate_scenario(
-        scenario, true_mm, test_setups; save_dir=test_save_dir)
 
     motion_models = [
         ("baseline", baseline_mm), ("trained", trained_mm), ("true_model", true_mm)]
@@ -403,8 +407,8 @@ function analyze_motion_model_performance(
         end
     end
     metric_table = DataFrame(rows)
-    write(joinpath(test_save_dir, "metrics.txt"), repr(metric_table))
-    @tagsave(joinpath(test_save_dir, "metrics.jld2"), @strdict(metric_table))
+    CSV.write(joinpath(save_dir, "metrics.csv"), metric_table)
+    @tagsave(joinpath(save_dir, "metrics.jld2"), @strdict(metric_table))
 
     metric_table
 end
@@ -416,5 +420,47 @@ function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
         inputs = state_to_inputs(x, u)
         prog_inputs = merge(inputs, true_params)
         f(prog_inputs)
+    end
+end
+
+function mk_regressor(alg_name::Symbol, sketch)
+    if alg_name === :sindy 
+        let
+            shape_env = ℝenv()
+            comp_env = ComponentEnv()
+            components_scalar_arithmatic!(comp_env, can_grow=true)
+    
+            basis_expr = TAST[]
+            for v1 in sketch.input_vars
+                push!(basis_expr, v1)
+                for v2 in sketch.input_vars
+                    if v1.name <= v2.name
+                        push!(basis_expr, v1 * v2)
+                    end
+                end
+            end
+            @show length(basis_expr)
+            @show basis_expr
+            basis = [compile(e, shape_env, comp_env) for e in basis_expr]
+            lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
+            @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
+                let reg = LassoRegression(λ; fit_intercept=true)
+                    SeqThresholdOptimizer(0.1, reg), (λ=λ,)
+                end
+            end
+            
+            SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
+        end
+    elseif alg_name === :neural
+        let
+            network = Chain(
+                Dense(length(sketch.input_vars), 32, relu),
+                # Dropout(0.5),
+                Dense(32, length(sketch.output_vars)))
+            optimizer = ADAM(2e-4)
+            NeuralRegression(; network, optimizer, max_epochs=100, patience=5)
+        end
+    else
+        error("Unknown regressor name: $alg_name")
     end
 end

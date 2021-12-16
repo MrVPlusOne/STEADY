@@ -146,11 +146,10 @@ Base.show(io::IO, ::MIME"text/plain", v::Const) = begin
     print(io, v.value, "::", v.type)
 end
 
-@auto_hash_equals(
 struct Var <: TAST
     name::Symbol
     type::PType
-end)
+end
 
 Var(name::Symbol, shape::PShape, unit::Pair...) = Var(name, shape, PUnit(unit...))
 Var(name::Symbol, shape::PShape, unit::PUnit) = Var(name, PType(shape, unit))

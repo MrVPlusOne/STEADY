@@ -74,15 +74,18 @@ function hover_inputs_transform((; pos, vel, θ, ω), (; ul, ur))
     (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, ul, ur)
 end
 
-function hover_outputs_transform(state, outputs, Δt)
+function hover_outputs_transform(state, outputs, Δt; clamp_threshold=1e8)
     local (; pos, vel, θ, ω) = state
     local (; loc_ax, loc_ay, der_ω) = outputs
     local acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
+
+    restrict(x) = clamp.(x, -clamp_threshold, clamp_threshold)
+
     (
-        pos = pos + vel * Δt,
-        vel = vel + acc * Δt,
-        θ = θ + ω * Δt,
-        ω = ω + der_ω * Δt,
+        pos = restrict(pos + vel * Δt),
+        vel = restrict(vel + acc * Δt),
+        θ = restrict(θ + ω * Δt),
+        ω = restrict(ω + der_ω * Δt),
     )
 end
 
@@ -203,3 +206,5 @@ function get_simplified_motion_model(
         drag_x=0.0, drag_y=0.0, rot_drag=0.0))
     GaussianMotionModel(sketch, comps)
 end
+
+state_L2_loss(::HovercraftScenario) = L2_in_SE2

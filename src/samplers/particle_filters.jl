@@ -44,7 +44,7 @@ function forward_filter(
     cache::Dict=Dict(),
     check_finite::Bool=false,
 ) where X
-    @smart_assert (eltype(obs_frames) <: Integer)
+    @smart_assert eltype(obs_frames) <: Integer
     T, N = length(times), n_particles
     (; x0_dist, motion_model, obs_model) = system
     

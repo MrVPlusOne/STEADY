@@ -158,11 +158,10 @@ end
 
 struct StaticDropout
     p::Float64
-end
-
-function StaticDropout(p)
-    @assert 0 ≤ p ≤ 1
-    StaticDropout(p)
+    function StaticDropout(p)
+        @assert 0 ≤ p ≤ 1
+        new(p)
+    end
 end
 
 (d::StaticDropout)(xs) = begin

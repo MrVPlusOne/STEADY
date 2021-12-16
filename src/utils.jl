@@ -62,9 +62,9 @@ macro smart_assert(ex, msg=nothing)
         end
     else
         if has_msg
-            :(@assert($ex, $msg))
+            esc(:(@assert($ex, $msg)))
         else
-            :(@assert($ex))
+            esc(:(@assert($ex)))
         end
     end
 end

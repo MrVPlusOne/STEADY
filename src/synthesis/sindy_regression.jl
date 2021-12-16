@@ -58,6 +58,7 @@ function fit_dynamics_sindy(
     comps_σ::AbsVec{Float64},
     optimizer::SparseOptimizer;
 )
+    @smart_assert length(comps_σ) == size(outputs, 2)
     foreach(basis) do f
         f isa CompiledFunc && @smart_assert f.ast.type.shape == ℝ "basis $f is not a scalar."
     end
