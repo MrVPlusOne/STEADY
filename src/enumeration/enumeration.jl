@@ -12,8 +12,10 @@ optionally performing type-driven and other forms of pruning.
 with which AST size. Default to `nothing`, which means no type-driven pruning.
 """
 function enumerate_terms(
-    env::ComponentEnv, vars::Set{Var}, max_size; 
-    types_needed::Union{Set{Tuple{Int, PType}}, Nothing}=nothing, 
+    env::ComponentEnv,
+    vars::Set{Var},
+    max_size;
+    types_needed::Union{Set{Tuple{Int,PType}},Nothing}=nothing,
     pruner::AbstractPruner=NoPruner(),
 )::EnumerationResult
     function types_with_size(size)::Set{PType}
@@ -28,7 +30,7 @@ function enumerate_terms(
     start_time = time()
 
     # stores all found programs, indexed by: shape -> ast_size -> unit
-    found = Dict{PShape, Dict{Int, Dict{PUnit, Set{TAST}}}}()
+    found = Dict{PShape,Dict{Int,Dict{PUnit,Set{TAST}}}}()
     result = EnumerationResult(found, [], 0, 0, 0, 0)
     reset!(pruner)
 
@@ -45,7 +47,7 @@ function enumerate_terms(
         result.pruning_time += @elapsed begin
             types_to_prune = types_with_size(size)
             for x in prune_iteration!(pruner, result, types_to_prune, size; is_last)
-                prune!(result, x) 
+                prune!(result, x)
             end
         end
     end
@@ -57,14 +59,14 @@ function enumerate_terms(
     end
 
     # construct larger programs from smaller ones
-    @showprogress desc="bottom_up_enum" for size in 1:max_size 
+    @showprogress desc = "bottom_up_enum" for size in 1:max_size
         for f in env.names
             sig = env.signatures[f]
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
             sizes_for_arg = [keys(found[s]) for s in arg_shapes]
             # iterate over all possible size combinations s.t. the sum = size-1
-            for arg_sizes in size_combinations(length(arg_shapes), sizes_for_arg, size-1)
+            for arg_sizes in size_combinations(length(arg_shapes), sizes_for_arg, size - 1)
                 arg_dicts = [found[arg_shapes[i]][s] for (i, s) in enumerate(arg_sizes)]
                 # iterate over all unit combinations
                 for arg_units in Iterators.product((keys(d) for d in arg_dicts)...)
@@ -84,18 +86,18 @@ function enumerate_terms(
                 end
             end
         end
-        prune_batch(size, is_last=false)
+        prune_batch(size; is_last=false)
     end
 
-    prune_batch(size, is_last=true)
+    prune_batch(size; is_last=true)
     result.total_time += time() - start_time
     result
 end
 
 function enumerate_types(
-    env::ComponentEnv, inputs::Set{PType}, outputs::Set{PType}, max_size,
-)::@NamedTuple{types_needed::Set{Tuple{Int, PType}}, n_created::Int}
-    found = Dict{PShape, Dict{Int, Set{PUnit}}}()
+    env::ComponentEnv, inputs::Set{PType}, outputs::Set{PType}, max_size
+)::@NamedTuple {types_needed::Set{Tuple{Int,PType}}, n_created::Int}
+    found = Dict{PShape,Dict{Int,Set{PUnit}}}()
     enum = _TypeEnumeration(found, Dict(), 0)
 
     foreach(inputs) do ty
@@ -103,22 +105,21 @@ function enumerate_types(
     end
 
     # first, enumerate all types under the size constraint
-    @showprogress desc="enumerate_all_types" for size in 2:max_size 
+    @showprogress desc = "enumerate_all_types" for size in 2:max_size
         for name in env.names
             sig = env.signatures[name]
             arg_shapes = sig.arg_shapes
             any(!haskey(found, s) for s in arg_shapes) && continue # skip unrealizable
             sizes_for_arg = [keys(found[s]) for s in arg_shapes]
             # iterate over all possible size combinations s.t. the sum = size-1
-            for arg_sizes in size_combinations(length(arg_shapes), sizes_for_arg, size-1)
+            for arg_sizes in size_combinations(length(arg_shapes), sizes_for_arg, size - 1)
                 arg_dicts = [found[arg_shapes[i]][s] for (i, s) in enumerate(arg_sizes)]
                 # iterate over all unit combinations
                 for arg_units in Iterators.product((d for d in arg_dicts)...)
                     runit = sig.result_unit(arg_units...)
                     (runit === nothing) && continue
                     parent_types = Set{PType}(
-                        PType(shape, unit) 
-                        for (shape, unit) in zip(arg_shapes, arg_units)
+                        PType(shape, unit) for (shape, unit) in zip(arg_shapes, arg_units)
                     )
                     rtype = PType(sig.result_shape, runit::PUnit)
                     insert!(enum, rtype, size, parent_types)
@@ -129,15 +130,16 @@ function enumerate_types(
 
     # then, remove all the types not needed for `outputs`
     # entry (s, t) means type t is needed at ast size s
-    types_needed = Set{Tuple{Int, PType}}()
+    types_needed = Set{Tuple{Int,PType}}()
     for size in max_size:-1:1
         for (shape, dict) in enum.types
             for unit in get(() -> Set{PUnit}(), dict, size)
                 type = PType(shape, unit)
-                needed = (type ∈ outputs) || let 
-                    children = get(() -> Set{PType}(), enum.children_dict, (type, size))
-                    any(c -> (size+1, c) ∈ types_needed, children)
-                end
+                needed =
+                    (type ∈ outputs) || let
+                        children = get(() -> Set{PType}(), enum.children_dict, (type, size))
+                        any(c -> (size + 1, c) ∈ types_needed, children)
+                    end
                 if needed
                     push!(types_needed, (size, type))
                 end
@@ -148,12 +150,12 @@ function enumerate_types(
 end
 
 mutable struct _TypeEnumeration
-    types::Dict{PShape, Dict{Int, Set{PUnit}}}
-    children_dict::Dict{Tuple{PType, Int}, Set{PType}}
+    types::Dict{PShape,Dict{Int,Set{PUnit}}}
+    children_dict::Dict{Tuple{PType,Int},Set{PType}}
     n_created::Int
 end
 
-Base.getindex(r::_TypeEnumeration, (;shape, size)) = begin
+Base.getindex(r::_TypeEnumeration, (; shape, size)) = begin
     nested_get!(r.types, shape => size) do
         Set{PUnit}()
     end
@@ -161,11 +163,11 @@ end
 
 Base.insert!(r::_TypeEnumeration, type::PType, size::Int, parents::Set{PType}) = begin
     (; shape, unit) = type
-    push!(r[(;shape, size)], unit)
+    push!(r[(; shape, size)], unit)
     r.n_created += 1
 
     foreach(parents) do p
-        children = get!(r.children_dict, (p, size-1)) do
+        children = get!(r.children_dict, (p, size - 1)) do
             Set{PType}()
         end
         push!(children, type)
@@ -198,11 +200,11 @@ function size_combinations(n_args, sizes_for_arg, total_size)
             (size_left in sizes_for_arg[i]) ? [[size_left]] : Vector{Int}[]
         else
             # the maximal possible size for argument i
-            si_max = size_left-(n_args-i)
+            si_max = size_left - (n_args - i)
             si_sizes = filter(s -> s <= si_max, sizes_for_arg[i])
             Iterators.flatten(
-                (push!(sizes, s1) for sizes in rec(i + 1, size_left - s1))
-                for s1 in si_sizes
+                (push!(sizes, s1) for sizes in rec(i + 1, size_left - s1)) for
+                s1 in si_sizes
             )
         end
     end

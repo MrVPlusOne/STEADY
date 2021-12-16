@@ -5,7 +5,7 @@ function generate_data(
     f_x′′::Function,
     params::NamedTuple,
     others::NamedTuple,
-    times::TimeSeries; 
+    times::TimeSeries;
     observe, # observe(s, s_prev, others; noise_scale) -> obs
     controller, # controller(s, obs) -> action
     noise_scale,
@@ -19,13 +19,14 @@ function generate_data(
     states = NamedTuple[]
     observations = NamedTuple[]
     actions = NamedTuple[]
-    
+
     should_stop() = i_ref[] > length(times)
-    
+
     next_time_action!() = begin
         i = i_ref[]
         i_ref[] += 1
-        act = allow_state_access ? controller(s_ref[], obs_ref[]) : controller(obs_ref[])
+        act =
+            allow_state_access ? controller(s_ref[], obs_ref[]) : controller(obs_ref[])
         push!(actions, act)
         times[i], act
     end
@@ -39,7 +40,7 @@ function generate_data(
     end
 
     SEDL.simulate(x₀, x′₀, f_x′′, params, should_stop, next_time_action!, record_state!)
-    (;params, others, states, observations, actions, times)
+    (; params, others, states, observations, actions, times)
 end
 
 include("scenario_utils.jl")

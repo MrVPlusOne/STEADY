@@ -28,9 +28,8 @@ julia> PUnit(:L=>2, :M=>1//2) / PUnit(:L=>2, :M=>1//2)
 unitless
 ```
 """
-@auto_hash_equals(
-struct PUnit
-    impl::Dict{Symbol, Rational{Int}}
+@auto_hash_equals(struct PUnit
+    impl::Dict{Symbol,Rational{Int}}
 
     PUnit(dict::Dict) = begin
         for (k, v) in dict
@@ -55,13 +54,10 @@ print_pretty_rational(io::IO, x::Rational) = begin
 end
 
 Base.show(io::IO, v::PUnit) = begin
-    if isunitless(v) 
+    if isunitless(v)
         print(io, "unitless")
-    else 
-        join(io, 
-            ("$k^$(sprint(print_pretty_rational, v))" for (k, v) in v.impl),
-            " ",
-        )
+    else
+        join(io, ("$k^$(sprint(print_pretty_rational, v))" for (k, v) in v.impl), " ")
     end
 end
 
@@ -88,36 +84,34 @@ function Base.:^(u1::PUnit, n::Rational)
     end
     PUnit(r)
 end
-Base.:^(u1::PUnit, n::Integer)=u1^Rational(n, 1)
+Base.:^(u1::PUnit, n::Integer) = u1^Rational(n, 1)
 
 export PUnits
 module PUnits
-    using ..SEDL: PUnit, unitless
-    
-    const Length = PUnit(:L => 1)
-    const Time = PUnit(:T => 1)
-    const Mass = PUnit(:M => 1)
+using ..SEDL: PUnit, unitless
 
-    const Speed = Length / Time
-    const Acceleration = Length / Time^2
-    const Force = Mass * Acceleration
-    const Torque = Force * Length
+const Length = PUnit(:L => 1)
+const Time = PUnit(:T => 1)
+const Mass = PUnit(:M => 1)
 
-    const Angle = unitless
-    const AngularSpeed = Angle / Time
-    const AngularAcceleration = AngularSpeed / Time
+const Speed = Length / Time
+const Acceleration = Length / Time^2
+const Force = Mass * Acceleration
+const Torque = Force * Length
+
+const Angle = unitless
+const AngularSpeed = Angle / Time
+const AngularAcceleration = AngularSpeed / Time
 end
 
 export PType
 """
 A physical type with both a name and a unit.
 """
-@auto_hash_equals(
-struct PType
+@auto_hash_equals(struct PType
     shape::PShape
     unit::PUnit
-end
-)
+end)
 
 (s::PShape)(unit::PUnit) = PType(s, unit)
 
@@ -132,8 +126,7 @@ Typed AST for numerical expressions.
 """
 abstract type TAST end
 
-@auto_hash_equals(
-struct Const <: TAST
+@auto_hash_equals(struct Const <: TAST
     value::Any
     type::PType
 end)
@@ -165,8 +158,7 @@ Base.show(io::IO, ::MIME"text/plain", v::Var) = begin
     print(io, v.name, "::", v.type)
 end
 
-@auto_hash_equals(
-struct Call <: TAST
+@auto_hash_equals(struct Call <: TAST
     f::Symbol
     args::Tuple{Vararg{TAST}}
     type::PType
@@ -178,7 +170,7 @@ end
 
 julia_expr(v::Var) = v.name
 julia_expr(c::Const) = c.value
-julia_expr(c::Call) = begin 
+julia_expr(c::Call) = begin
     Expr(:call, c.f, julia_expr.(c.args)...)
 end
 
@@ -193,7 +185,9 @@ function traverse end
 traverse(f, v::Var) = f(v)
 function traverse(f, c::Call)
     f(c)
-    foreach(c.args) do a; traverse(f, a) end
+    foreach(c.args) do a
+        traverse(f, a)
+    end
 end
 
 function ast_size(e::TAST)
@@ -204,8 +198,8 @@ end
 
 export ShapeEnv
 struct ShapeEnv
-    type_annots::Dict{PShape, Type}
-    return_type::Dict{PShape, Function}
+    type_annots::Dict{PShape,Type}
+    return_type::Dict{PShape,Function}
 end
 
 export ℝ, ℝ2, ℝenv, derivative
@@ -214,24 +208,16 @@ const Void = PShape(:Void)
 const ℝ = PShape(:ℝ)
 const ℝ2 = PShape(:ℝ²)
 
-ℝenv() = begin 
+ℝenv() = begin
     ShapeEnv(
-        Dict(
-            Void => Tuple{},
-            ℝ => Real,
-            ℝ2 => SVector{2, <:Real},
-        ),
-        Dict(
-            Void => return_type_void,
-            ℝ => return_type_R,
-            ℝ2 => return_type_R2,
-        )
+        Dict(Void => Tuple{}, ℝ => Real, ℝ2 => SVector{2,<:Real}),
+        Dict(Void => return_type_void, ℝ => return_type_R, ℝ2 => return_type_R2),
     )
 end
 
 
-derivative(v:: Symbol) = Symbol(v, "′")
-derivative(v::Var, t::PUnit = PUnits.Time) = 
+derivative(v::Symbol) = Symbol(v, "′")
+derivative(v::Var, t::PUnit=PUnits.Time) =
     Var(derivative(v.name), PType(v.type.shape, v.type.unit / t))
 
 ##-----------------------------------------------------------

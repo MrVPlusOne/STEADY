@@ -1,7 +1,7 @@
 using StatsFuns: softmax!, logsumexp, softmax
 using StatsBase: countmap
 
-struct MarkovSystem{X, X0_Dist, Motion, ObsM}
+struct MarkovSystem{X,X0_Dist,Motion,ObsM}
     x0_dist::X0_Dist
     "motion_model(x, control, Δt) -> distribution_of_x′"
     motion_model::Motion
@@ -14,7 +14,7 @@ Base.show(io::IO, ::Type{<:MarkovSystem}) = print(io, "MarkovSystem{...}")
 
 MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A<:GDistr,B,C} = begin
     X = typeof(rand(x0_dist))
-    MarkovSystem{X, A, B, C}(x0_dist, motion_model, obs_model)
+    MarkovSystem{X,A,B,C}(x0_dist, motion_model, obs_model)
 end
 
 Base.show(io::IO, sys::MarkovSystem) = begin
@@ -40,43 +40,43 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
         push!(controls, u)
 
         if t < T
-            Δt = times[t+1] - times[t]
+            Δt = times[t + 1] - times[t]
             state = rand(motion_model(state, u, Δt))
         end
     end
 
-    (states=specific_elems(states), 
-        observations=specific_elems(observations), 
-        controls=specific_elems(controls))
+    (
+        states=specific_elems(states),
+        observations=specific_elems(observations),
+        controls=specific_elems(controls),
+    )
 end
 
 function states_log_score(
-    motion_model::Function, (;times, controls, x0_dist), states, ::Type{T},
-)::T where T
+    motion_model::Function, (; times, controls, x0_dist), states, ::Type{T}
+)::T where {T}
     p::T = log_score(x0_dist, states[1], T)
-    for i in 1:length(states)-1
-        Δt = times[i+1]-times[i]
+    for i in 1:(length(states) - 1)
+        Δt = times[i + 1] - times[i]
         state_distr = motion_model(states[i], controls[i], Δt)
-        p += log_score(state_distr, states[i+1], T)
+        p += log_score(state_distr, states[i + 1], T)
     end
     p
 end
 
-function states_logp(
-    motion_model::Function, (;times, controls, x0_dist), states,
-)
+function states_logp(motion_model::Function, (; times, controls, x0_dist), states)
     p = logpdf(x0_dist, states[1])
-    for i in 1:length(states)-1
-        Δt = times[i+1]-times[i]
+    for i in 1:(length(states) - 1)
+        Δt = times[i + 1] - times[i]
         state_distr = motion_model(states[i], controls[i], Δt)
-        p += logpdf(state_distr, states[i+1])
+        p += logpdf(state_distr, states[i + 1])
     end
     p
 end
 
 function data_log_score(
     obs_model::Function, (; times, obs_frames, observations), states, ::Type{T}
-)::T where T
+)::T where {T}
     p::T = 0.0
     for t in obs_frames
         t::Integer
@@ -85,15 +85,13 @@ function data_log_score(
     p
 end
 
-function data_logp(
-    (; obs_model), (; times, obs_frames, observations), states,
-)
+function data_logp((; obs_model), (; times, obs_frames, observations), states)
     sum(logpdf(obs_model(states[t]), observations[t]) for t in obs_frames)
 end
 
-function total_log_score(system, obs_data, states, ::Type{T}) where T
-    states_log_score(system.motion_model, obs_data, states, T) + 
-        data_log_score(system.obs_model, obs_data, states, T)
+function total_log_score(system, obs_data, states, ::Type{T}) where {T}
+    states_log_score(system.motion_model, obs_data, states, T) +
+    data_log_score(system.obs_model, obs_data, states, T)
 end
 
 function log_softmax(x::AbstractArray{<:Real})
@@ -108,13 +106,14 @@ function map_trajectory(
     system::MarkovSystem{X},
     obs_data,
     traj_guess::Vector{X};
-    optim_options::Optim.Options=Optim.Options(f_abstol=1e-4),
-) where X
+    optim_options::Optim.Options=Optim.Options(; f_abstol=1e-4),
+) where {X}
     (; times, obs_frames, controls, observations) = obs_data
-    
-    function loss(vec::AbstractVector{T})::T where T
+
+    function loss(vec::AbstractVector{T})::T where {T}
         local traj = structure_from_vec(traj_guess, vec)
-        local total_score = states_log_score(system.motion_model, obs_data, traj, T) + 
+        local total_score =
+            states_log_score(system.motion_model, obs_data, traj, T) +
             data_log_score(system.obs_model, obs_data, traj, T)
         -total_score
     end

@@ -1,13 +1,13 @@
 """
     return_type(num_type::Type) -> Type
 """
-struct CompiledFunc{return_type, F} <: Function
+struct CompiledFunc{return_type,F} <: Function
     f::F
     ast::Any
     julia::Expr
 end
 
-(cf::CompiledFunc{return_type})(args::NamedTuple) where return_type = begin
+(cf::CompiledFunc{return_type})(args::NamedTuple) where {return_type} = begin
     num_type = promote_numbers_type(args)
     @assert isconcretetype(num_type) "could not infer a concrete number type for \
             the arguments $args"
@@ -18,7 +18,7 @@ end
 Base.show(io::IO, ::Type{<:CompiledFunc}) = print(io, "CompiledFunc{...}")
 
 Base.show(io::IO, @nospecialize cf::CompiledFunc) = print(io, cf)
-function Base.print(io::IO, @nospecialize cf::CompiledFunc) 
+function Base.print(io::IO, @nospecialize cf::CompiledFunc)
     (; ast, julia) = cf
     compact = get(io, :compact, false)
     !compact && print(io, "CompiledFunc(")
@@ -27,10 +27,9 @@ function Base.print(io::IO, @nospecialize cf::CompiledFunc)
 end
 
 function Base.show(
-    io::IO, mime::MIME"text/plain",
-    @nospecialize cf::CompiledFunc{return_type}
-) where return_type
-    (; ast, julia) = cf 
+    io::IO, mime::MIME"text/plain", @nospecialize cf::CompiledFunc{return_type}
+) where {return_type}
+    (; ast, julia) = cf
     io = IOIndents.IOIndent(io)
     (; ast, julia) = cf
     println(io, "--- CompiledFunction ---")
@@ -46,7 +45,7 @@ end
 Used to cache the compilation result to speed up synthesis and avoid memory leak 
 when synthesis is run multiple times.
 """
-const compile_cache = Dict{Expr, RuntimeGeneratedFunction}()
+const compile_cache = Dict{Expr,RuntimeGeneratedFunction}()
 const compile_cache_lock = ReentrantLock()
 
 """
@@ -66,7 +65,7 @@ end
 
 
 macro with_type(e, ty)
-    quote  
+    quote
         tv = $(esc(ty))
         v = $(esc(e))
         @assert(v isa tv, "$e returns value $v, which is not of type $tv.")
@@ -109,12 +108,10 @@ function compile(
     body_ex = compile_body(prog)::Expr
     f_ex = :(args -> $body_ex)
     rgf = compile_julia_expr(f_ex)
-    
+
     rtype = shape_env.return_type[prog.type.shape]
     ftype = hide_type ? Function : typeof(rgf)
-    CompiledFunc{rtype, ftype}(
-        rgf, prog, body_ex,
-    )
+    CompiledFunc{rtype,ftype}(rgf, prog, body_ex)
 end
 
 compile(prog::TAST) = compile(prog, ℝenv(), ComponentEnv())
@@ -141,7 +138,7 @@ struct TypedFunc{return_type} <: Function
     core::Function
 end
 
-(cf::TypedFunc{return_type})(args::NamedTuple) where return_type = begin
+(cf::TypedFunc{return_type})(args::NamedTuple) where {return_type} = begin
     num_type = promote_numbers_type(args)
     @assert isconcretetype(num_type) "could not infer a concrete number type for \
             the arguments $args"
@@ -149,7 +146,7 @@ end
     convert(R, cf.core(args))::R
 end
 
-return_type_R2(num) = SVector{2, num}
+return_type_R2(num) = SVector{2,num}
 return_type_R(num) = num
 return_type_void(num) = Tuple{}
 
@@ -160,8 +157,7 @@ efficiently executed.
 Implemented using `RuntimeGeneratedFunctions.jl`.
 """
 function compile_cached!(
-    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv, 
-    cache::Dict{TAST, CompiledFunc},
+    prog::TAST, shape_env::ShapeEnv, comp_env::ComponentEnv, cache::Dict{TAST,CompiledFunc}
 )::CompiledFunc
     function compile_body(v::Var)
         e = Expr(:(.), :args, QuoteNode(v.name))

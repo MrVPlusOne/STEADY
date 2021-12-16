@@ -9,9 +9,9 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
     (; n_train_setups, n_test_setups, regress_alg, is_test_run) = configs
 
     dyn_params = simulation_params(sce)
-    true_motion_model = let 
-        sketch=dynamics_sketch(sce) 
-        core=dynamics_core(sce)
+    true_motion_model = let
+        sketch = dynamics_sketch(sce)
+        core = dynamics_core(sce)
         to_p_motion_model(core, sketch)(dyn_params)
     end
 
@@ -21,9 +21,9 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
         times = collect(is_test_run ? (0.0:0.1:2.0) : (0.0:0.1:10))
         ScenarioSetup(;
             times,
-            obs_frames = 1:length(times),
-            x0 = simulation_x0(sce),
-            controller = simulation_controller(sce),
+            obs_frames=1:length(times),
+            x0=simulation_x0(sce),
+            controller=simulation_controller(sce),
         )
     end
     train_sim = simulate_scenario(
@@ -34,9 +34,9 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
         times = collect(is_test_run ? (0.0:0.1:3.0) : (0.0:0.1:15))
         ScenarioSetup(;
             times,
-            obs_frames = 1:5:length(times),
-            x0 = simulation_x0(sce),
-            controller = simulation_controller(sce),
+            obs_frames=1:5:length(times),
+            x0=simulation_x0(sce),
+            controller=simulation_controller(sce),
         )
     end
     test_sim = simulate_scenario(

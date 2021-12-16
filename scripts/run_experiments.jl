@@ -2,7 +2,7 @@
 
 using Revise
 using StatsPlots
-StatsPlots.default(dpi=300, legend=:outerbottom)
+StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 using SEDL
 

@@ -1,16 +1,14 @@
 """
 The 2D hovercraft scenario.
 """
-@kwdef(
-struct HovercraftScenario{LI<:LandmarkInfo} <: Scenario
+@kwdef(struct HovercraftScenario{LI<:LandmarkInfo} <: Scenario
     landmark_info::LI
 end)
 
-dummy_state(::HovercraftScenario) = 
+dummy_state(::HovercraftScenario) =
     (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())
 
-dummy_control(::HovercraftScenario) = 
-    (ul=randn(), ur=randn())
+dummy_control(::HovercraftScenario) = (ul=randn(), ur=randn())
 
 variables(::HovercraftScenario) = variable_tuple(
     # state
@@ -21,17 +19,17 @@ variables(::HovercraftScenario) = variable_tuple(
     # control
     :ul => ℝ(PUnits.Force),
     :ur => ℝ(PUnits.Force),
-    
+
     # sketch
     :loc_vx => ℝ(PUnits.Speed),
     :loc_vy => ℝ(PUnits.Speed),
     :loc_ax => ℝ(PUnits.Acceleration),
     :loc_ay => ℝ(PUnits.Acceleration),
-    :der_ω => ℝ(PUnits.AngularSpeed/PUnits.Time),
+    :der_ω => ℝ(PUnits.AngularSpeed / PUnits.Time),
     :f_x => ℝ(PUnits.Force),
     :f_y => ℝ(PUnits.Force),
     :f_θ => ℝ(PUnits.Force * PUnits.Length),
-    
+
     # params
     :mass => ℝ(PUnits.Mass),
     :drag_x => ℝ(PUnits.Force / PUnits.Speed),
@@ -43,19 +41,16 @@ variables(::HovercraftScenario) = variable_tuple(
     :σ_ω => ℝ(PUnits.AngularSpeed),
 )
 
-function variable_data(scenario::HovercraftScenario) 
-    (; pos, vel, θ, ω) = variables(scenario) 
-    (; ul, ur) = variables(scenario) 
-    VariableData(
-        [pos, vel, θ, ω],
-        [ul, ur],
-    )
+function variable_data(scenario::HovercraftScenario)
+    (; pos, vel, θ, ω) = variables(scenario)
+    (; ul, ur) = variables(scenario)
+    VariableData([pos, vel, θ, ω], [ul, ur])
 end
 
 function initial_state_dist(::HovercraftScenario, x0)
     DistrIterator((
-        pos=SMvNormal(x0.pos, 0.2), 
-        vel=SMvNormal(x0.vel, 0.2), 
+        pos=SMvNormal(x0.pos, 0.2),
+        vel=SMvNormal(x0.vel, 0.2),
         θ=CircularNormal(x0.θ, 8°),
         ω=Normal(x0.ω, 0.1),
     ))
@@ -64,8 +59,8 @@ end
 
 function observation_dist(sce::HovercraftScenario)
     state -> begin
-        lmr=landmark_readings(state, sce.landmark_info)
-        DistrIterator((landmarks = lmr,))
+        lmr = landmark_readings(state, sce.landmark_info)
+        DistrIterator((landmarks=lmr,))
     end
 end
 
@@ -77,15 +72,15 @@ end
 function hover_outputs_transform(state, outputs, Δt; clamp_threshold=1e8)
     local (; pos, vel, θ, ω) = state
     local (; loc_ax, loc_ay, der_ω) = outputs
-    local acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
+    local acc = rotate2d(θ, @SVector [loc_ax, loc_ay])
 
     restrict(x) = clamp.(x, -clamp_threshold, clamp_threshold)
 
     (
-        pos = restrict(pos + vel * Δt),
-        vel = restrict(vel + acc * Δt),
-        θ = restrict(θ + ω * Δt),
-        ω = restrict(ω + der_ω * Δt),
+        pos=restrict(pos + vel * Δt),
+        vel=restrict(vel + acc * Δt),
+        θ=restrict(θ + ω * Δt),
+        ω=restrict(ω + der_ω * Δt),
     )
 end
 
@@ -94,11 +89,7 @@ function hover_outputs_inv_transform(state, state1, Δt)
     local acc = (state1.vel - state.vel) / Δt
     local loc_acc = rotate2d(-θ, acc)
     local der_ω = (state1.ω - state.ω) / Δt
-    (
-        loc_ax = loc_acc[1],
-        loc_ay = loc_acc[2],
-        der_ω = der_ω,
-    )
+    (loc_ax=loc_acc[1], loc_ay=loc_acc[2], der_ω=der_ω)
 end
 
 function sindy_sketch(sce::HovercraftScenario)
@@ -106,8 +97,13 @@ function sindy_sketch(sce::HovercraftScenario)
     input_vars = [loc_vx, loc_vy, ω, θ, ul, ur]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    MotionModelSketch(input_vars, output_vars, 
-        hover_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
+    MotionModelSketch(
+        input_vars,
+        output_vars,
+        hover_inputs_transform,
+        hover_outputs_transform,
+        hover_outputs_inv_transform,
+    )
 end
 
 function dynamics_sketch(sce::HovercraftScenario)
@@ -115,7 +111,7 @@ function dynamics_sketch(sce::HovercraftScenario)
     inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.ul, vars.ur]
     outputs = [vars.loc_ax, vars.loc_ay, vars.der_ω]
 
-    params = OrderedDict{Var, GDistr}(
+    params = OrderedDict{Var,GDistr}(
         vars.mass => PertBeta(1.0, 1.45, 1.9),
         vars.drag_x => Uniform(0.0, 0.15),
         vars.drag_y => Uniform(0.0, 0.15),
@@ -141,22 +137,16 @@ function dynamics_sketch(sce::HovercraftScenario)
         loc_ax = (ul + ur + f_x) / mass
         loc_ay = f_y / mass
         der_ω = ((ur - ul) * sep + f_θ) / rot_mass
-        acc = rotate2d(θ, @SVector[loc_ax, loc_ay])
+        acc = rotate2d(θ, @SVector [loc_ax, loc_ay])
         DistrIterator((
-            pos = Dirac(pos + vel * Δt),
-            vel = SMvNormal(vel + acc * Δt, σ_v * Δt),
-            θ = Dirac(θ + ω * Δt),
-            ω = Normal(ω + der_ω * Δt, σ_ω * Δt),
+            pos=Dirac(pos + vel * Δt),
+            vel=SMvNormal(vel + acc * Δt, σ_v * Δt),
+            θ=Dirac(θ + ω * Δt),
+            ω=Normal(ω + der_ω * Δt, σ_ω * Δt),
         ))
     end
 
-    DynamicsSketch(;
-        inputs, 
-        outputs,
-        params,
-        state_to_inputs,
-        outputs_to_state_dist,
-    )
+    DynamicsSketch(; inputs, outputs, params, state_to_inputs, outputs_to_state_dist)
 end
 
 function dynamics_core(::HovercraftScenario)
@@ -170,21 +160,23 @@ function dynamics_core(::HovercraftScenario)
 end
 
 function sindy_core(
-    sce::HovercraftScenario, 
-    (; σ_v, σ_ω, mass, rot_mass, sep, drag_x, drag_y, rot_drag),
+    sce::HovercraftScenario, (; σ_v, σ_ω, mass, rot_mass, sep, drag_x, drag_y, rot_drag)
 )
     (; loc_vx, loc_vy, ω, θ, ul, ur, loc_ax, loc_ay, der_ω) = map(compile, variables(sce))
     comp_env = ComponentEnv()
     components_scalar_arithmatic!(comp_env)
 
     comps = (
-        loc_ax = LinearExpression(0.0, [1/mass, 1/mass, -drag_x/mass], 
-            [ul, ur, loc_vx], loc_ax.ast.type) |> compile,
-        loc_ay = LinearExpression(0.0, [-drag_y/mass], 
-            [loc_vy], loc_ay.ast.type) |> compile,
-        der_ω = LinearExpression(0.0, [sep/rot_mass, -sep/rot_mass, -rot_drag], 
-            [ur, ul, ω], der_ω.ast.type) |> compile)
-    
+        loc_ax=LinearExpression(
+            0.0, [1 / mass, 1 / mass, -drag_x / mass], [ul, ur, loc_vx], loc_ax.ast.type
+        ) |> compile,
+        loc_ay=LinearExpression(0.0, [-drag_y / mass], [loc_vy], loc_ay.ast.type) |>
+               compile,
+        der_ω=LinearExpression(
+            0.0, [sep / rot_mass, -sep / rot_mass, -rot_drag], [ur, ul, ω], der_ω.ast.type
+        ) |> compile,
+    )
+
     μ_f = combine_functions(comps)
     GaussianGenerator(μ_f, (loc_ax=σ_v, loc_ay=σ_v, der_ω=σ_ω), comps)
 end
@@ -198,12 +190,12 @@ function plot_trajectories!(::HovercraftScenario, trajectories, name; plt_args..
 end
 
 function get_simplified_motion_model(
-    sce::HovercraftScenario, 
-    (; σ_v, σ_ω, mass, rot_mass, sep),
+    sce::HovercraftScenario, (; σ_v, σ_ω, mass, rot_mass, sep)
 )
     sketch = sindy_sketch(sce)
-    comps = sindy_core(sce, (; σ_v, σ_ω, mass, rot_mass, sep, 
-        drag_x=0.0, drag_y=0.0, rot_drag=0.0))
+    comps = sindy_core(
+        sce, (; σ_v, σ_ω, mass, rot_mass, sep, drag_x=0.0, drag_y=0.0, rot_drag=0.0)
+    )
     GaussianMotionModel(sketch, comps)
 end
 

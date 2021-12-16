@@ -2,21 +2,22 @@ using ProgressMeter: Progress, next!, @showprogress, progress_pmap
 using Distributed
 
 const TimeSeries{T} = Vector{T}
-const ObservationData = 
-    NamedTuple{(:times, :obs_frames, :observations, :controls, :x0_dist)}
+const ObservationData = NamedTuple{(
+    :times, :obs_frames, :observations, :controls, :x0_dist
+)}
 
 export DynamicsSketch, params_distribution, compile_motion_model, to_p_motion_model
 
 
-struct GaussianGenerator{names, D, F} <: Function
+struct GaussianGenerator{names,D,F} <: Function
     μ_f::F
-    σs::NamedTuple{names, NTuple{D, Float64}}
+    σs::NamedTuple{names,NTuple{D,Float64}}
     meta::NamedTuple
 end
 
 Base.length(gg::GaussianGenerator) = length(gg.σs)
 
-function (gg::GaussianGenerator{names})(in) where names
+function (gg::GaussianGenerator{names})(in) where {names}
     (; μ_f, σs) = gg
     μ = μ_f(in)::NamedTuple{names}
     map(values(μ), values(σs)) do m, s
@@ -26,7 +27,7 @@ end
 
 function Base.print(io::IO, expr::GaussianGenerator)
     compact = get(io, :compact, false)
-    !compact && print(io, "GaussianGenerator") 
+    !compact && print(io, "GaussianGenerator")
     print(io, "(σs = ", expr.σs)
     print(io, ", meta = ", expr.meta, ")")
 end
@@ -38,7 +39,7 @@ end
 Base.show(io::IO, comp::GaussianGenerator) = print(io, comp)
 function Base.show(io::IO, ::MIME"text/plain", expr::GaussianGenerator)
     io = IOIndent(IOContext(io, :compact => true))
-    println(io, "GaussianGenerator:", Indent()) 
+    println(io, "GaussianGenerator:", Indent())
     for (k, v) in pairs(expr.σs)
         println(io, k, ".σ: ", v)
     end
@@ -55,8 +56,7 @@ The output transformation therefore needs to be a bijection.
 
 Use [mk_motion_model](@ref) to construct the motion model from the sketch and components.
 """
-@kwdef(
-struct MotionModelSketch{F1, F2, F3}
+@kwdef(struct MotionModelSketch{F1,F2,F3}
     input_vars::Vector{Var}
     output_vars::Vector{Var}
     "genereate sketch inputs from state and control"
@@ -72,17 +72,14 @@ function Base.show(io::IO, ::Type{<:MotionModelSketch})
 end
 
 
-struct GaussianMotionModel{
-        Core <: GaussianGenerator,
-        SK <: MotionModelSketch, 
-    } <: Function 
-    sketch:: SK
-    core:: Core
+struct GaussianMotionModel{Core<:GaussianGenerator,SK<:MotionModelSketch} <: Function
+    sketch::SK
+    core::Core
 end
 
 function (motion_model::GaussianMotionModel{<:GaussianGenerator{names}})(
     x::NamedTuple, u::NamedTuple, Δt::Real
-) where names
+) where {names}
     sketch, core = motion_model.sketch, motion_model.core
     inputs = sketch.inputs_transform(x, u)
     outputs_dist = core(inputs)
@@ -90,11 +87,11 @@ function (motion_model::GaussianMotionModel{<:GaussianGenerator{names}})(
         rng -> begin
             local out = NamedTuple{names}(rand(rng, outputs_dist))
             sketch.outputs_transform(x, out, Δt)# |> assert_finite
-        end, 
-        x1 -> begin 
+        end,
+        x1 -> begin
             local out = sketch.outputs_inv_transform(x, x1, Δt)# |> assert_finite
             logpdf(outputs_dist, values(out))
-        end
+        end,
     )
 end
 
@@ -114,8 +111,8 @@ Fit multiple dynamics and return the best one according to the validation set.
 function fit_best_dynamics(
     alg::AbstractRegerssionAlgorithm,
     sketch::MotionModelSketch,
-    (inputs, outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
-    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    (inputs, outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
+    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )::NamedTuple{(:dynamics, :model_info, :optimizer_info, :display_info)}
     error("Not implemented.")
@@ -126,8 +123,8 @@ Split the provided trajectories into training and validation set.
 Fit multiple dynamics and return the best one according to the validation set.
 """
 function fit_best_dynamics(
-    alg::AbstractRegerssionAlgorithm, 
-    sketch::MotionModelSketch, 
+    alg::AbstractRegerssionAlgorithm,
+    sketch::MotionModelSketch,
     trajectories::Matrix{<:Vector},
     obs_data_list::Vector{<:ObservationData},
     train_split::Int,
@@ -140,15 +137,18 @@ function fit_best_dynamics(
     @smart_assert n_valid_trajs <= size(trajectories, 1)
 
     train_data = trajectories[1:n_fit_trajs, 1:train_split]
-    valid_data = trajectories[1:n_valid_trajs, train_split+1:end]
+    valid_data = trajectories[1:n_valid_trajs, (train_split + 1):end]
 
     inputs, outputs = construct_inputs_outputs(
-        train_data, obs_data_list[1:train_split], sketch)
+        train_data, obs_data_list[1:train_split], sketch
+    )
     valid_inputs, valid_outputs = construct_inputs_outputs(
-        valid_data, obs_data_list[train_split+1:end], sketch)
+        valid_data, obs_data_list[(train_split + 1):end], sketch
+    )
 
     fit_best_dynamics(
-        alg, sketch, (inputs, outputs), (valid_inputs, valid_outputs), comps_σ_guess)
+        alg, sketch, (inputs, outputs), (valid_inputs, valid_outputs), comps_σ_guess
+    )
 end
 
 """
@@ -159,22 +159,23 @@ compiled into a parameterized dynamics of the form
 `params -> (state, control, Δt) -> distribution_of_state`.
 """
 @kwdef(
-struct DynamicsSketch{F, G}
-    inputs::Vector{Var}
-    outputs::Vector{Var}
-    params::OrderedDict{Var, GDistr}
-    "state_to_inputs(state::NamedTuple, control::NamedTuple) -> inputs"
-    state_to_inputs::F
-    "outputs_to_state_dist(outputs, (; state..., control..., inputs...), Δt) -> distribution_of_state"
-    outputs_to_state_dist::G
-end)
+    struct DynamicsSketch{F,G}
+        inputs::Vector{Var}
+        outputs::Vector{Var}
+        params::OrderedDict{Var,GDistr}
+        "state_to_inputs(state::NamedTuple, control::NamedTuple) -> inputs"
+        state_to_inputs::F
+        "outputs_to_state_dist(outputs, (; state..., control..., inputs...), Δt) -> distribution_of_state"
+        outputs_to_state_dist::G
+    end
+)
 
 params_distribution(sketch::DynamicsSketch) = begin
-    DistrIterator((;(v.name => dist for (v, dist) in sketch.params)...))
+    DistrIterator((; (v.name => dist for (v, dist) in sketch.params)...))
 end
 
 inputs_distribution(sketch::DynamicsSketch) = begin
-    DistrIterator((;(v.name => dist_for_shape[v.type.shape] for v in sketch.inputs)...))
+    DistrIterator((; (v.name => dist_for_shape[v.type.shape] for v in sketch.inputs)...))
 end
 
 function check_params_logp(x0, x0_dist, params, params_dist)
@@ -182,12 +183,12 @@ function check_params_logp(x0, x0_dist, params, params_dist)
     isfinite(x0_logp) || error("x0_logp = $x0_logp, some value may be out of its support.\n
         x0=$x0,\nx0_dist=$x0_dist")
     params_logp = logpdf(params_dist, params)
-    isfinite(params_logp) || error("params_logp = $params_logp, some value may be out of its support.")
+    isfinite(params_logp) ||
+        error("params_logp = $params_logp, some value may be out of its support.")
 end
 
 function compile_motion_model(
-    comps::NamedTuple,
-    (; shape_env, comp_env, sketch, hide_type);
+    comps::NamedTuple, (; shape_env, comp_env, sketch, hide_type);
 )
     funcs = map(comp -> compile(comp, shape_env, comp_env; hide_type), comps)
     sketch_core = _build_sketch_core(funcs)
@@ -196,19 +197,20 @@ function compile_motion_model(
 end
 
 function _build_sketch_core(funcs)
-    x -> map(f->f(x), funcs)
+    x -> map(f -> f(x), funcs)
 end
 
 function to_p_motion_model(
-    sketch_core::Function, (; state_to_inputs, outputs_to_state_dist),
+    sketch_core::Function, (; state_to_inputs, outputs_to_state_dist)
 )
-    (params::NamedTuple) -> (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
-        local inputs = state_to_inputs(x, u)
-        local prog_inputs = merge(inputs, params)
-        local outputs = sketch_core(prog_inputs)
-        local others = merge(x, u, params, prog_inputs)
-        outputs_to_state_dist(outputs, others, Δt)::GDistr
-    end
+    (params::NamedTuple) ->
+        (x::NamedTuple, u::NamedTuple, Δt::Real) -> begin
+            local inputs = state_to_inputs(x, u)
+            local prog_inputs = merge(inputs, params)
+            local outputs = sketch_core(prog_inputs)
+            local others = merge(x, u, params, prog_inputs)
+            outputs_to_state_dist(outputs, others, Δt)::GDistr
+        end
 end
 
 export VariableData
@@ -221,21 +223,18 @@ end
 #TODO: fix this
 function VariableData(
     ::Val{order};
-    states::OrderedDict{Var, <:NTuple{order, GDistr}},
+    states::OrderedDict{Var,<:NTuple{order,GDistr}},
     action_vars::Vector{Var},
     t_unit::PUnit=PUnits.Time,
-) where order
+) where {order}
     s_vars = keys(states) |> collect
-    new_states = Tuple{Var, GDistr}[]
+    new_states = Tuple{Var,GDistr}[]
     for i in 1:order
         dists = [d[i] for (_, d) in states]
         append!(new_states, zip(s_vars, dists))
         s_vars = derivative.(s_vars, Ref(t_unit))
     end
-    VariableData{order}(; 
-        states = OrderedDict(new_states),
-        action_vars,
-    )
+    VariableData{order}(; states=OrderedDict(new_states), action_vars)
 end
 
 _check_variable_types(vdata::VariableData, shape_env::ShapeEnv) = begin
@@ -256,8 +255,7 @@ export SynthesisEnumerationResult, synthesis_enumeration
 """
 Group the enumeration data needed for `map_synthesis`. Can be created by `bottom_up_enum`.
 """
-@kwdef(
-struct SynthesisEnumerationResult{Combine}
+@kwdef(struct SynthesisEnumerationResult{Combine}
     vdata::VariableData
     sketch::DynamicsSketch{Combine}
     shape_env::ShapeEnv
@@ -299,31 +297,29 @@ end
 Enuemrate all programs with the correct return types up to some max AST size.
 """
 function synthesis_enumeration(
-    vdata::VariableData, sketch::DynamicsSketch,
-    shape_env::ShapeEnv, comp_env::ComponentEnv, max_size; 
-    pruner=NoPruner(), type_pruning=true,
+    vdata::VariableData,
+    sketch::DynamicsSketch,
+    shape_env::ShapeEnv,
+    comp_env::ComponentEnv,
+    max_size;
+    pruner=NoPruner(),
+    type_pruning=true,
 )
     param_vars = sketch.params |> keys |> collect
     dyn_vars = [sketch.inputs; param_vars]
     if type_pruning
         types_needed, _ = enumerate_types(
-            comp_env, 
-            Set(v.type for v in dyn_vars), 
-            Set(v.type for v in sketch.outputs), 
+            comp_env,
+            Set(v.type for v in dyn_vars),
+            Set(v.type for v in sketch.outputs),
             max_size,
         )
-    else 
+    else
         types_needed = nothing
     end
     dyn_varset = Set(v for v in dyn_vars)
     enum_result = enumerate_terms(comp_env, dyn_varset, max_size; types_needed, pruner)
-    SynthesisEnumerationResult(;
-        vdata,
-        sketch,
-        shape_env,
-        comp_env,
-        enum_result,
-    )
+    SynthesisEnumerationResult(; vdata, sketch, shape_env, comp_env, enum_result)
 end
 
 export MapSynthesisResult
@@ -336,7 +332,7 @@ end
 
 get_top_results(r::MapSynthesisResult, top_k::Int) = begin
     rows = map(Iterators.take(r.sorted_results, top_k)) do (; score, comps, params)
-        (; score, comps , params)
+        (; score, comps, params)
     end
     rows
 end

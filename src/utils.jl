@@ -6,9 +6,9 @@ export Optional, map_optional
 using MacroTools: @capture
 using ForwardDiff: Dual
 # import ReverseDiff
-import LineSearches
+using LineSearches: LineSearches
 
-const Optional{X} = Union{X, Nothing}
+const Optional{X} = Union{X,Nothing}
 const AbsVec = AbstractVector
 const AbsMat = AbstractMatrix
 
@@ -22,8 +22,7 @@ struct Right{Y} <: Either
     value::Y
 end
 
-specific_elems(xs::AbstractArray{T}) where T = 
-    Base.isconcretetype(T) ? xs : identity.(xs)
+specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
 
 count_len(iters) = count(_ -> true, iters)
 
@@ -50,7 +49,7 @@ macro smart_assert(ex, msg=nothing)
         quote
             lv = $(esc(lhs))
             rv = $(esc(rhs))
-            if ! $(esc(op))(lv, rv)
+            if !$(esc(op))(lv, rv)
                 reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
                 if $has_msg
                     msg_v = $(esc(msg))
@@ -162,10 +161,10 @@ macro unzip_named(assign)
 end
 
 
-@inline rotation2D(θ) = @SArray(
-    [cos(θ) -sin(θ)
-     sin(θ)  cos(θ)]
-)
+@inline rotation2D(θ) = @SArray([
+    cos(θ) -sin(θ)
+    sin(θ) cos(θ)
+])
 
 rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
 
@@ -180,7 +179,7 @@ end
 
 to_measurement(values::AbsVec{<:AbstractDict}) = begin
     @assert !isempty(values)
-    
+
     keyset = Set(keys(values[1]))
 
     for d in values
@@ -204,7 +203,7 @@ to_measurement(values::AbstractVector{<:NamedTuple}) = begin
     structure_from_vec(template, μ .± σ)
 end
 
-pretty_number(v) = (v isa Number ? format(v, commas=true) : string(v))
+pretty_number(v) = (v isa Number ? format(v; commas=true) : string(v))
 pretty_number(v::Measurement) = string(v)
 
 """
@@ -242,14 +241,15 @@ end
 """
 Warp the given angle into the range [0, 2π].
 """
-warp_angle(angle::Real) = let
-    x = angle % 2π
-    x < 0 ? x + 2π : x
-end
+warp_angle(angle::Real) =
+    let
+        x = angle % 2π
+        x < 0 ? x + 2π : x
+    end
 
 angular_distance(θ1, θ2) = begin
-    Δ = abs(θ1-θ2) % 2π
-    min(Δ, 2π-Δ)
+    Δ = abs(θ1 - θ2) % 2π
+    min(Δ, 2π - Δ)
 end
 
 """
@@ -259,7 +259,7 @@ macro ltimed(ex)
     quote
         t0 = time()
         v = $(esc(ex))
-        (time=time()-t0, value=v)
+        (time=time() - t0, value=v)
     end
 end
 
@@ -267,7 +267,7 @@ end
 Drop the gradient type tag to reduce JIT compilation time and avoid tag checking.
 """
 function optimize_no_tag(loss, x₀, optim_options)
-    cfg = ForwardDiff.GradientConfig(nothing, x₀) 
+    cfg = ForwardDiff.GradientConfig(nothing, x₀)
     function fg!(F, G, x)
         (G === nothing) && return loss(x)
 
@@ -277,7 +277,7 @@ function optimize_no_tag(loss, x₀, optim_options)
             return gr.value
         end
     end
-    algorithm = Optim.LBFGS(linesearch=LineSearches.BackTracking(order=3))
+    algorithm = Optim.LBFGS(; linesearch=LineSearches.BackTracking(; order=3))
     Optim.optimize(Optim.only_fg!(fg!), x₀, algorithm, optim_options)
 end
 
@@ -304,7 +304,7 @@ end
 
 function optimize_bounded(loss, x₀, (lower, upper), optim_options)
     # drop tag to reduce JIT compilation time and avoid tag checking
-    cfg = ForwardDiff.GradientConfig(nothing, x₀) 
+    cfg = ForwardDiff.GradientConfig(nothing, x₀)
     function fg!(F, G, x)
         (G === nothing) && return loss(x)
 
@@ -323,7 +323,7 @@ end
 # end
 
 to_svec(vec::AbstractVector) = SVector{length(vec)}(vec)
-to_svec(vec::NTuple{n, X}) where {n, X} = SVector{n, X}(vec)
+to_svec(vec::NTuple{n,X}) where {n,X} = SVector{n,X}(vec)
 
 to_static_array(array::AbsMat) = SMatrix{size(array)...}(array)
 to_static_array(array::AbsVec) = SVector{length(array)}(array)
@@ -344,14 +344,14 @@ Dict{Int64, Dict{Symbol, String}} with 1 entry:
   5 => Dict(:a=>"default")
 ```
 """
-function nested_get!(f, d::Dict{K, D}, k_pair::Pair{K, Rest}) where {K, D<:Dict, Rest}
+function nested_get!(f, d::Dict{K,D}, k_pair::Pair{K,Rest}) where {K,D<:Dict,Rest}
     inner_dict = get!(d, k_pair[1]) do
         D()
     end
     nested_get!(f, inner_dict, k_pair[2])
 end
 
-function nested_get!(f, d::Dict{K, V}, k::K) where {K, V}
+function nested_get!(f, d::Dict{K,V}, k::K) where {K,V}
     get!(f, d, k)
 end
 
@@ -364,22 +364,23 @@ is_bad_dual(v::Real) = false
 """
 Convert any `NaN` partial derivatives to zeros. 
 """
-fix_nan_dual(v::Dual{Tag}) where {Tag} = let
-    if is_bad_dual(v) 
-        new_partials = ForwardDiff.Partials(nan_to_zero.(v.partials.values))
-        Dual{Tag}(v.value, new_partials)
-    else 
-        v
+fix_nan_dual(v::Dual{Tag}) where {Tag} =
+    let
+        if is_bad_dual(v)
+            new_partials = ForwardDiff.Partials(nan_to_zero.(v.partials.values))
+            Dual{Tag}(v.value, new_partials)
+        else
+            v
+        end
     end
-end
 fix_nan_dual(v::Real) = v
 
-function nan_to_zero(v::R)::R where {R <: Real}
+function nan_to_zero(v::R)::R where {R<:Real}
     isnan(v) ? zero(v) : v
 end
 
 using Statistics: norm
-Base.show(io::IO, d::ForwardDiff.Dual) = 
+Base.show(io::IO, d::ForwardDiff.Dual) =
     print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
 
 function assert_finite(x::NamedTuple)
@@ -401,11 +402,11 @@ end
 Numerical integration based on the leap-frog step.
 `a_f(x, x′) -> a` is the acceleration function.
 """
-function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where X
-    v_half = @. v + (Δt/2) * a 
+function leap_frog_step((x, v, a)::Tuple{X,X,X}, a_f, Δt) where {X}
+    v_half = @. v + (Δt / 2) * a
     x1 = @.(x + Δt * v_half)::X
-    a1 = a_f(x1, @.(v_half + (Δt/2) * a))::X
-    v1 = @.(v + (Δt/2) * (a + a1))::X
+    a1 = a_f(x1, @.(v_half + (Δt / 2) * a))::X
+    v1 = @.(v + (Δt / 2) * (a + a1))::X
     (x1, v1, a1)
 end
 
@@ -419,7 +420,7 @@ max_by(f::Function) = xs -> begin
     xs[i]
 end
 
-sort_by(f::Function) = xs -> sort(xs, by=f)
+sort_by(f::Function) = xs -> sort(xs; by=f)
 
 """
     map_optional(f, x) = x === nothing ? nothing : f(x)
@@ -436,9 +437,12 @@ const _distributed_work_ctx = Ref{Any}(nothing)
 # Arguments
 - `f(ctx, x)`: the context-dependent task to be performed.
 """
-function parallel_map(f, xs, ctx;
-    progress::Progress=Progress(1, enabled=false),
-    n_threads::Integer=Threads.nthreads(), 
+function parallel_map(
+    f,
+    xs,
+    ctx;
+    progress::Progress=Progress(1; enabled=false),
+    n_threads::Integer=Threads.nthreads(),
     use_distributed::Bool=false,
 )
     if use_distributed
@@ -457,14 +461,15 @@ function parallel_map(f, xs, ctx;
             @everywhere SEDL._distributed_work_ctx[] = nothing
         end
     else
-        eval_task(e) = try
-            let r = f(ctx, e)
-                next!(progress)
-                Right(r)
+        eval_task(e) =
+            try
+                let r = f(ctx, e)
+                    next!(progress)
+                    Right(r)
+                end
+            catch e
+                Left((e, stacktrace(catch_backtrace())))
             end
-        catch e
-            Left((e, stacktrace(catch_backtrace())))
-        end
         if n_threads <= 1
             map_results = map(eval_task, xs)
         else
@@ -476,19 +481,18 @@ function parallel_map(f, xs, ctx;
             end
         end
     end
-    eval_results = 
-        if all(x -> x isa Right, map_results)
-            map(x -> x.value, map_results)
-        else
-            for x in map_results
-                if x isa Left
-                    (e, trace) = x.value
-                    @error "Exception in parallel_map: " expection=e
-                    @error "Caused by: $(repr("text/plain", trace))"
-                    error("parallel_map failed.")
-                end
+    eval_results = if all(x -> x isa Right, map_results)
+        map(x -> x.value, map_results)
+    else
+        for x in map_results
+            if x isa Left
+                (e, trace) = x.value
+                @error "Exception in parallel_map: " expection = e
+                @error "Caused by: $(repr("text/plain", trace))"
+                error("parallel_map failed.")
             end
         end
+    end
     eval_results
 end
 
@@ -497,7 +501,7 @@ sigmoid(x::Real) = one(x) / (one(x) + exp(-x))
 """
 Combine a named tuple of functions into a function that returns a named tuple.
 """
-function combine_functions(functions::NamedTuple{names}) where names
+function combine_functions(functions::NamedTuple{names}) where {names}
     x -> NamedTuple{names}(map(f -> f(x), values(functions)))
 end
 

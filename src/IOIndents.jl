@@ -1,8 +1,19 @@
 # coppied from https://github.com/KristofferC/IOIndents.jl/blob/master/src/IOIndents.jl
 module IOIndents
 
-import Base: convert, show, pipe_reader, pipe_writer, lock, unlock, write,
-             getindex, in, haskey, get, print
+import Base:
+    convert,
+    show,
+    pipe_reader,
+    pipe_writer,
+    lock,
+    unlock,
+    write,
+    getindex,
+    in,
+    haskey,
+    get,
+    print
 
 export IOIndent, Indent, Dedent, Align, Dealign, indent_string!, alignment_char!
 
@@ -12,9 +23,9 @@ struct Dedent end
 struct Align end
 struct Dealign end
 
-Base.show(io::IO, ::Union{Indent, Dedent, Align, Dealign}) = nothing
+Base.show(io::IO, ::Union{Indent,Dedent,Align,Dealign}) = nothing
 
-mutable struct IOIndent{IO_t <: IO} <: Base.AbstractPipe
+mutable struct IOIndent{IO_t<:IO} <: Base.AbstractPipe
     io::IO_t
     indent_level::Int
     aligns::Vector{Int}
@@ -23,9 +34,15 @@ mutable struct IOIndent{IO_t <: IO} <: Base.AbstractPipe
     indent_str::String
     align_char::Char
 
-    function IOIndent{IO_t}(io::IO_t, indent_level::Int, aligns::Vector{Int},
-                            offset::Int, indented_line::Bool, indent_str::String,
-                            align_char::Char) where IO_t <: IO
+    function IOIndent{IO_t}(
+        io::IO_t,
+        indent_level::Int,
+        aligns::Vector{Int},
+        offset::Int,
+        indented_line::Bool,
+        indent_str::String,
+        align_char::Char,
+    ) where {IO_t<:IO}
         @assert(!(IO_t <: IOIndent))
         return new(io, indent_level, aligns, offset, indented_line, indent_str, align_char)
     end
@@ -47,7 +64,8 @@ get(io::IOIndent, key, default) = get(io.io, key, default)
 function show(_io::IO, io::IOIndent)
     ioi = IOIndent(_io)
     print(ioi, "IOIndent:", Indent())
-    print(ioi, "\nIO: "); show(ioi, io.io)
+    print(ioi, "\nIO: ")
+    show(ioi, io.io)
     print(ioi, "\nIndent string: \"", io.indent_str, "\"")
     print(ioi, "\nAlign char: \"", io.align_char, "\"")
     print(ioi, "\nIndent: ", io.indent_level)

@@ -9,7 +9,7 @@ struct FuncSignature{F}
     result_unit::F # TODO: replace this with a constraint graph to improve efficiency
 end
 
-FuncSignature(shape_sig::Pair{Vector{<:PShape}, PShape}, unit_sig::Function) =
+FuncSignature(shape_sig::Pair{Vector{<:PShape},PShape}, unit_sig::Function) =
     FuncSignature(shape_sig[1], shape_sig[2], unit_sig)
 
 Base.show(io::IO, env::FuncSignature) = begin
@@ -36,8 +36,8 @@ Note that components added earlier are preferred during the synthesis.
 struct ComponentEnv
     names::Vector{Symbol}
     "Julia functions that implement the corresponding components."
-    impl_dict::Dict{Symbol, Function}
-    signatures::Dict{Symbol, FuncSignature}
+    impl_dict::Dict{Symbol,Function}
+    signatures::Dict{Symbol,FuncSignature}
     rules::Vector{AbstractRule}
 end
 
@@ -46,7 +46,7 @@ Base.show(io::IO, env::ComponentEnv) = begin
     print(io, "ComponentEnv(components=$(keys(env.impl_dict)))")
 end
 
-Base.show(io::IO ,::MIME"text/plain", env::ComponentEnv) = begin
+Base.show(io::IO, ::MIME"text/plain", env::ComponentEnv) = begin
     n = length(env.impl_dict)
     println(io, "ComponentEnv with $n components:")
     for name in env.names
@@ -60,7 +60,7 @@ Base.insert!(d::Dict, k, v) = d[k] = v
 struct ComponentFunc
     name::Symbol
     impl::Function
-    shape_sig::Pair{Vector{<:PShape}, PShape}
+    shape_sig::Pair{Vector{<:PShape},PShape}
     unit_sig::Function
 end
 
@@ -76,10 +76,7 @@ get_component(env::ComponentEnv, name::Symbol) = begin
     ComponentFunc(name, env.impl_dict[name], shape_sig, sig.result_unit)
 end
 
-function add_component!(
-    env::ComponentEnv, 
-    comp::ComponentFunc
-)::ComponentEnv
+function add_component!(env::ComponentEnv, comp::ComponentFunc)::ComponentEnv
     (; name, impl, shape_sig, unit_sig) = comp
     @assert !(name in keys(env.impl_dict)) "Component '$name' already present in the environment."
     push!(env.names, name)
@@ -96,10 +93,10 @@ function Base.push!(env::ComponentEnv, comps::ComponentFunc...)
 end
 
 function add_unitless_comp!(
-    env::ComponentEnv, 
-    name::Symbol, 
-    impl::Function, 
-    shape_sig::Pair{Vector{PShape}, PShape} = [ℝ] => ℝ,
+    env::ComponentEnv,
+    name::Symbol,
+    impl::Function;
+    shape_sig::Pair{Vector{PShape},PShape}=[ℝ] => ℝ,
 )::ComponentEnv
     push!(env, ComponentFunc(name, impl, shape_sig, signature_unitless))
 end
@@ -112,7 +109,8 @@ end
 void() = ()
 
 function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
-    push!(env,
+    push!(
+        env,
         ComponentFunc(:(+), (+), [ℝ, ℝ] => ℝ, signature_all_same),
         ComponentFunc(:(-), (-), [ℝ, ℝ] => ℝ, signature_all_same),
         ComponentFunc(:(*), (*), [ℝ, ℝ] => ℝ, (*)),
@@ -138,10 +136,10 @@ function scalar_arithmatic_rules!(rules; can_grow)
 
     # TODO: automatically check non-growness
     non_grow = @theory begin
-        0 - a => neg(a) 
+        0 - a => neg(a)
         neg(neg(a)) => a
         a - a => 0
-        a + neg(b) => a - b 
+        a + neg(b) => a - b
         neg(a) + neg(b) => neg(a + b)
         neg(a) * b == neg(a * b)
 
@@ -189,9 +187,7 @@ function components_special_functions!(env::ComponentEnv; can_grow=true)
     # add_unitless_comp!(env, :log, log)
     add_unitless_comp!(env, :tanh, tanh)
 
-    push!(env, 
-        ComponentFunc(:friction, friction, [ℝ, ℝ] => ℝ, signature_all_same)
-    )
+    push!(env, ComponentFunc(:friction, friction, [ℝ, ℝ] => ℝ, signature_all_same))
 
     non_grow = @theory begin
         sin(neg(x)) == neg(sin(x))
@@ -213,20 +209,23 @@ Almost flat when `abs(x) < f` but grows linearly otherwise.
 friction(x, f; α=1e-4) = begin
     f = abs(f)
     if abs(x) < f
-        α*x
+        α * x
     else
-        x - f * sign(x) * (1-α)
+        x - f * sign(x) * (1 - α)
     end
 end
 
 function components_vec2!(env::ComponentEnv; can_grow=true)
-    push!(env,
+    push!(
+        env,
         ComponentFunc(:R2, (mk_R2), [ℝ, ℝ] => ℝ2, signature_all_same), # constructor
         ComponentFunc(:norm_R2, norm_R2, [ℝ2] => ℝ, identity),
         ComponentFunc(:plus_R2, (+), [ℝ2, ℝ2] => ℝ2, signature_all_same),
         ComponentFunc(:minus_R2, (-), [ℝ2, ℝ2] => ℝ2, signature_all_same),
         ComponentFunc(:scale_R2, (*), [ℝ, ℝ2] => ℝ2, (*)),
-        ComponentFunc(:rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing),
+        ComponentFunc(
+            :rotate_R2, rotate2d, [ℝ, ℝ2] => ℝ2, (θ, v) -> isunitless(θ) ? v : nothing
+        ),
         ComponentFunc(:neg_R2, (-), [ℝ2] => ℝ2, identity),
         ComponentFunc(:cross_R2, cross_R2, [ℝ2, ℝ2] => ℝ, (*)),
     )
@@ -259,10 +258,10 @@ vec2_rules!(rules; can_grow) = begin
         abs(norm_R2(v)) => norm_R2(v)
     end
     grow = @theory begin
-        neg_R2(a) => minus_R2(:R2_0, a) 
-        neg_R2(R2(a, b)) => R2(neg(a), neg(b)) 
-        minus_R2(a, b) => plus_R2(a, neg_R2(b)) 
-        neg_R2(plus_R2(a, b)) => plus_R2(neg_R2(a), neg_R2(b)) 
+        neg_R2(a) => minus_R2(:R2_0, a)
+        neg_R2(R2(a, b)) => R2(neg(a), neg(b))
+        minus_R2(a, b) => plus_R2(a, neg_R2(b))
+        neg_R2(plus_R2(a, b)) => plus_R2(neg_R2(a), neg_R2(b))
     end
 
     append!(rules, non_grows)
@@ -271,8 +270,8 @@ end
 
 mk_R2(x, y) = @SVector [x, y]
 # this makes sure that gradient exists when norm = 0.
-norm_R2(x) = sqrt(x[1]^2 + x[2]^2+eps(x[1]))
-cross_R2(x, y) = x[1]*y[2] - x[2]*y[1]
-dir_R2(θ) = @SVector[cos(θ), sin(θ)]
+norm_R2(x) = sqrt(x[1]^2 + x[2]^2 + eps(x[1]))
+cross_R2(x, y) = x[1] * y[2] - x[2] * y[1]
+dir_R2(θ) = @SVector [cos(θ), sin(θ)]
 unit_R2(v) = v ./ norm_R2(v)
 project_R2(v, dir) = v'dir * dir

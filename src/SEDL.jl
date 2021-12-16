@@ -11,7 +11,7 @@ using MacroTools: @forward
 using Formatting: format
 using StaticArrays
 using DataStructures: OrderedDict
-import Random
+using Random: Random
 using Random: AbstractRNG
 using Distributions
 include("IOIndents.jl")
@@ -19,16 +19,16 @@ using .IOIndents
 using Statistics
 using Measurements
 using Optim
-import ForwardDiff
-import ThreadPools
+using ForwardDiff: ForwardDiff
+using ThreadPools: ThreadPools
 using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups
 using TimerOutputs
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
-import Metatheory
-using Metatheory: EGraph, EClassId, SaturationParams, AbstractRule 
+using Metatheory: Metatheory
+using Metatheory: EGraph, EClassId, SaturationParams, AbstractRule
 using Metatheory: addexpr!, saturate!, @theory
 using Metatheory.Library: commutative_monoid
 

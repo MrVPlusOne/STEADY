@@ -1,13 +1,13 @@
 using Flux: Dense, Chain, Dropout, ADAM
 using Flux.Data: DataLoader
-import Flux
-import CUDA
+using Flux: Flux
+using CUDA: CUDA
 
 struct NeuralNetWrapper{NN}
     network::NN
 end
 
-function (gg::GaussianGenerator{names, D, <:NeuralNetWrapper})(in) where {names, D}
+function (gg::GaussianGenerator{names,D,<:NeuralNetWrapper})(in) where {names,D}
     (; μ_f, σs) = gg
     μ = in |> values |> to_svec |> μ_f.network |> NamedTuple{names}
     map(values(μ), values(σs)) do m, s
@@ -15,21 +15,20 @@ function (gg::GaussianGenerator{names, D, <:NeuralNetWrapper})(in) where {names,
     end |> NamedTuple{names} |> DistrIterator
 end
 
-@kwdef(
-struct NeuralRegression{Net, Opt} <: AbstractRegerssionAlgorithm
+@kwdef(struct NeuralRegression{Net,Opt} <: AbstractRegerssionAlgorithm
     network::Net
     optimizer::Opt
-    l2_λ::Float64=0.01 # L2 regularization
-    batchsize::Int=64
-    max_epochs::Int=100
-    patience::Int=8
+    l2_λ::Float64 = 0.01 # L2 regularization
+    batchsize::Int = 64
+    max_epochs::Int = 100
+    patience::Int = 8
 end)
 
 function fit_best_dynamics(
     alg::NeuralRegression,
     sketch::MotionModelSketch,
-    (inputs, outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
-    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple}, Matrix{Float64}},
+    (inputs, outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
+    (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )
     (; network, optimizer, l2_λ, batchsize, max_epochs) = alg
@@ -43,8 +42,8 @@ function fit_best_dynamics(
     valid_target_mat = transpose(valid_outputs)
     @smart_assert size(target_mat, 2) == size(input_mat, 2)
 
-    train_loader = DataLoader((input_mat, target_mat), shuffle=true; batchsize)
-    valid_loader = DataLoader((valid_input_mat, valid_target_mat), shuffle=false; batchsize)
+    train_loader = DataLoader((input_mat, target_mat); shuffle=true, batchsize)
+    valid_loader = DataLoader((valid_input_mat, valid_target_mat); shuffle=false, batchsize)
 
     n_train, n_valid = length(inputs), length(valid_inputs)
 
@@ -54,8 +53,12 @@ function fit_best_dynamics(
     best_epoch = 0
     epochs_trained = 0
 
-    progress = Progress(max_epochs * length(train_loader), desc="fit_best_dynamics",
-        output=stdout, enabled=true)
+    progress = Progress(
+        max_epochs * length(train_loader);
+        desc="fit_best_dynamics",
+        output=stdout,
+        enabled=true,
+    )
     for epoch in 1:max_epochs
         for (x, y) in train_loader
             loss_f = () -> mean(((network(x) .- y) ./ σs) .^ 2) + l2_λ * sum(sqnorm, params)
@@ -86,9 +89,11 @@ function fit_best_dynamics(
     σ_list = [Symbol(name, ".σ") => σ for (name, σ) in zip(output_names, σs)]
 
     model_info = NamedTuple()
-    optimizer_info = (; epochs_trained, 
+    optimizer_info = (;
+        epochs_trained,
         train_loss=train_epoch_losses[end],
-        valid_loss=valid_epoch_losses[end])
+        valid_loss=valid_epoch_losses[end],
+    )
     display_info = (; epochs_trained, train_epoch_losses, valid_epoch_losses)
 
     (; dynamics, model_info, optimizer_info, display_info)
@@ -109,8 +114,8 @@ function fit_model_σ(data_loader, network)
         push!(Δs, (ŷ - y))
     end
     Δ = hcatreduce(Δs)
-    σs = std(Δ, mean=zeros(size(Δ, 1)), dims=2)
-    loss = mean(abs2, (Δ ./ σs))/2 + sum(log, σs)
+    σs = std(Δ; mean=zeros(size(Δ, 1)), dims=2)
+    loss = mean(abs2, (Δ ./ σs)) / 2 + sum(log, σs)
 
     return (; σs, loss)
 end
@@ -147,11 +152,11 @@ end
 Try to optimize the test time performance of the model by converting 
 matrices to static matrices.
 """
-function compile_neural_nets(chain::Chain) 
+function compile_neural_nets(chain::Chain)
     Chain(map(compile_neural_nets, chain.layers)...)
 end
 
-function compile_neural_nets(layer::Dense) 
+function compile_neural_nets(layer::Dense)
     (; weight, bias, σ) = layer
     Dense(to_static_array(weight), to_static_array(bias), σ)
 end
