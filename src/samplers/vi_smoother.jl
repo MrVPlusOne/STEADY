@@ -20,8 +20,24 @@ function (com::NormalSampler)(x)
     sample_normal((μ=loc_net(x), σ=softplus.(scale_net(x))))
 end
 
+struct ObsEncoder{M1 <: AbsVec, M2}
+    missing_embedding::M1
+    normal_encoder::M2
+end
+Flux.@functor ObsEncoder
+
+
+function (enc::ObsEncoder)(obs::Union{<:Some, Nothing}, batch_size)
+    (; missing_embedding, normal_encoder) = enc
+    if isnothing(obs)
+        batch_repeat(batch_size)(missing_embedding)
+    else
+        normal_encoder(obs.value)
+    end
+end
+
 @kwdef(
-struct VIGuide{H0, X0S<:NormalSampler, DXS<:NormalSampler, RNN, XE, OE}
+struct VIGuide{H0, X0S<:NormalSampler, DXS<:NormalSampler, RNN, XE, OE <: ObsEncoder}
     rnn_h0::H0
     x0_sampler::X0S
     dx_sampler::DXS
@@ -36,7 +52,7 @@ function (guide::VIGuide)(observations::Vector, Δt::Float32, batch_size)
     h = rnn_h0
     future_info = [
         begin
-            h, o = rnn(h, obs_encoder(observations[t]))
+            h, o = rnn(h, obs_encoder(observations[t], 1))
             h
         end
         for t in length(observations):-1:1
@@ -56,7 +72,7 @@ end
 
 function mk_guide(x_dim, y_dim, h_dim)
     VIGuide(;
-        rnn_h0 = zeros(Float32, h_dim), 
+        rnn_h0 = 0.01randn(Float32, h_dim), 
         x0_sampler = NormalSampler(
             Dense(h_dim, x_dim),
             Dense(h_dim, x_dim),
@@ -70,9 +86,12 @@ function mk_guide(x_dim, y_dim, h_dim)
             LayerNorm(x_dim),
             Dense(x_dim, h_dim, tanh),
         ),
-        obs_encoder = Chain(
-            LayerNorm(y_dim),
-            Dense(y_dim, h_dim, tanh),
+        obs_encoder = ObsEncoder(
+            0.01randn(Float32, h_dim),
+            Chain(
+                LayerNorm(y_dim), 
+                Dense(y_dim, h_dim, tanh)
+            ),
         ),
     )
 end
@@ -85,7 +104,14 @@ struct VISmoother{STV, VTS, OTV, G<:VIGuide}
     on_gpu::Bool
     state_to_vec::STV=s -> convert(Vector{Float32}, s) |> to_device(on_gpu)
     vec_to_state::VTS=s -> convert(Vector{Float64}, Flux.cpu(s))
-    obs_to_vec::OTV=s -> convert(Vector{Float32}, s) |> to_device(on_gpu)
+    obs_to_vec::OTV=s -> begin 
+        if isnothing(s) 
+            s 
+        else
+            @smart_assert s isa Some
+            Some(convert(Vector{Float32}, s.value) |> to_device(on_gpu))
+        end
+    end
 end)
 
 function (smoother::VISmoother)(observations, Δt::Float32, batch_size::Int)
@@ -99,7 +125,7 @@ end
 batch_repeat(n) = x -> repeat(x, [1 for _ in size(x)]..., n)
 
 function encode_observations(smoother::VISmoother, observations)
-    [repeat(smoother.obs_to_vec(o), 1, 1) for o in observations]
+    smoother.obs_to_vec.(observations)
 end
 
 function decode_trajectories(smoother::VISmoother, trajectory_enc::Vector)
@@ -150,12 +176,15 @@ function train_guide!(
     time_stats
 end
 
-
 function logpdf_normal(μ, σ, x)
     T = eltype(μ)
-    a = T(0.5log(2π))
-    vs = @. -0.5f0 * ((x - μ) / σ)^2 - log(σ) - a
-    sum(vs, dims=1)
+    a = log(T(2π))
+    vs = @. -(abs2((x - μ) / σ) + a) / 2 - log(σ)
+    if vs isa AbsMat
+        sum(vs, dims=1)
+    else
+        vs
+    end
 end
 
 let s=(5,2), μ = randn(s), σ = abs.(randn(s)), x = randn(s)
@@ -164,6 +193,7 @@ let s=(5,2), μ = randn(s), σ = abs.(randn(s)), x = randn(s)
 end
 
 function sample_normal((μ, σ)) 
+    σ = max.(σ, eps(eltype(σ)))
     x = μ + σ .* randn!(zero(μ))
     logp = logpdf_normal(μ, σ, x)
     (; val=x, logp)

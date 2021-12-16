@@ -72,7 +72,7 @@ function plot_trajectories!(
     plot!(concat_times, ys; label = permutedims(comp_names), linealpha, linecolor=[1 2])
 end
 
-obs_frames = 1:1:length(times)
+obs_frames = [1:4:26..., 60:4:80...]
 obs_data = (; times, sim_data.observations, sim_data.controls, obs_frames, x0_dist)
 
 post_sampler = ParticleFilterSampler(
@@ -90,18 +90,21 @@ use_gpu = true
 
 function mk_observation_vec(obs_data)
     map(1:length(obs_data.times)) do t
-        u = obs_data.controls[t]
         has_obs = t in obs_data.obs_frames
-        y = obs_data.observations[t]
-        y = has_obs ? y : zero(y)
-        [has_obs; u; y]
+        if has_obs
+            u = obs_data.controls[t]
+            y = obs_data.observations[t]
+            Some([u; y])
+        else
+            nothing
+        end
     end
 end
 observation_vec = mk_observation_vec(obs_data)
 
 x_dim = 2
 h_dim = 64
-y_dim = length(observation_vec[1])
+y_dim = length(obs_data.observations[1]) + length(obs_data.controls[1])
 
 guide = mk_guide(x_dim, y_dim, h_dim) |> to_device(use_gpu)
 vi_smoother = VISmoother(; guide, on_gpu = use_gpu)
@@ -123,7 +126,7 @@ let n_steps=2001, prog = Progress(n_steps)
     train_result = @time train_guide!(vi_smoother, log_joint, observation_vec, Δt; 
         optimizer=adam,
         n_steps,
-        anneal_schedule=step -> linear(1e-3, 1.0)(step / n_steps),
+        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 2step / n_steps)),
         callback=r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
@@ -135,8 +138,8 @@ let n_steps=2001, prog = Progress(n_steps)
             next!(prog, showvalues = [
                 (:elbo, r.elbo), (:step, r.step), (:batch_size, r.batch_size)])
         end,
-        # n_samples_f = step -> ceil(Int, linear(64, 512)(step / n_steps)),
-        n_samples_f = step -> 512,
+        n_samples_f = step -> ceil(Int, linear(64, 512)(step / n_steps)),
+        # n_samples_f = step -> 512,
     )
     display(train_result)
 end
