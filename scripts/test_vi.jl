@@ -30,7 +30,7 @@ function traj_logp(obs_data, Δt, device)
         end
         for t in 1:length(traj_encs)
             if t in obs_frames
-                lp += logpdf_normal(traj_encs[t], 0.1, device(observations[t]))
+                lp += logpdf_normal(traj_encs[t][1:1, :], 0.1, device(observations[t]))
             end
         end
         lp
@@ -88,9 +88,6 @@ plot_trajectories!(["x (post)", "v (post)"], sampling_result.trajectories) |> di
 using CUDA
 use_gpu = true
 
-x_dim = 32
-z_dim = 2
-rnn_dim = 64
 function mk_observation_vec(obs_data)
     map(1:length(obs_data.times)) do t
         u = obs_data.controls[t]
@@ -101,9 +98,12 @@ function mk_observation_vec(obs_data)
     end
 end
 observation_vec = mk_observation_vec(obs_data)
+
+x_dim = 2
+h_dim = 64
 y_dim = length(observation_vec[1])
 
-guide = mk_guide(x_dim, y_dim, z_dim, rnn_dim) |> to_device(use_gpu)
+guide = mk_guide(x_dim, y_dim, h_dim) |> to_device(use_gpu)
 vi_smoother = VISmoother(; guide, on_gpu = use_gpu)
 
 init_trajs = vi_smoother(observation_vec, Δt, 100).trajectories
@@ -119,9 +119,11 @@ log_joint = traj_logp(obs_data, Δt, to_device(use_gpu))
 linear(from, to) = x -> from + (to-from) * x
 
 let n_steps=2001, prog = Progress(n_steps)
+    @info "Training the guide..."
     train_result = @time train_guide!(vi_smoother, log_joint, observation_vec, Δt; 
         optimizer=adam,
         n_steps,
+        anneal_schedule=step -> linear(1e-3, 1.0)(step / n_steps),
         callback=r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
@@ -133,7 +135,8 @@ let n_steps=2001, prog = Progress(n_steps)
             next!(prog, showvalues = [
                 (:elbo, r.elbo), (:step, r.step), (:batch_size, r.batch_size)])
         end,
-        n_samples_f = step -> ceil(Int, linear(64, 512)(step / n_steps)),
+        # n_samples_f = step -> ceil(Int, linear(64, 512)(step / n_steps)),
+        n_samples_f = step -> 512,
     )
     display(train_result)
 end

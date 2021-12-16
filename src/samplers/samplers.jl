@@ -1,7 +1,6 @@
 using StatsFuns: softmax!, logsumexp, softmax
 using StatsBase: countmap
 
-export MarkovSystem
 struct MarkovSystem{X, X0_Dist, Motion, ObsM}
     x0_dist::X0_Dist
     "motion_model(x, control, Δt) -> distribution_of_x′"
@@ -9,6 +8,7 @@ struct MarkovSystem{X, X0_Dist, Motion, ObsM}
     "obs_model(x) -> distribtion_of_y"
     obs_model::ObsM
 end
+export MarkovSystem
 
 Base.show(io::IO, ::Type{<:MarkovSystem}) = print(io, "MarkovSystem{...}")
 

@@ -49,7 +49,7 @@ include("tests.jl")
 
 if false
     # include("../scripts/simulation_experiments.jl")
-    # include("../scripts/test_vi.jl")
+    include("../scripts/test_vi.jl")
     # include("../scripts/hovercraft_example.jl")
     # include("../scripts/car2d_example.jl")
     # include("../scripts/iterate_example.jl")

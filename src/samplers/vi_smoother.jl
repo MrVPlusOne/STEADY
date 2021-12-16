@@ -21,19 +21,18 @@ function (com::NormalSampler)(x)
 end
 
 @kwdef(
-struct VIGuide{H0, X0S<:NormalSampler, DXS<:NormalSampler, RNN, XE, OE, ZD}
+struct VIGuide{H0, X0S<:NormalSampler, DXS<:NormalSampler, RNN, XE, OE}
     rnn_h0::H0
     x0_sampler::X0S
     dx_sampler::DXS
     rnn::RNN
     x_encoder::XE
     obs_encoder::OE
-    z_decoder::ZD
 end)
 Flux.@functor VIGuide
 
 function (guide::VIGuide)(observations::Vector, Δt::Float32, batch_size)
-    (; rnn_h0, x0_sampler, dx_sampler, rnn, x_encoder, obs_encoder, z_decoder) = guide
+    (; rnn_h0, x0_sampler, dx_sampler, rnn, x_encoder, obs_encoder) = guide
     h = rnn_h0
     future_info = [
         begin
@@ -50,13 +49,12 @@ function (guide::VIGuide)(observations::Vector, Δt::Float32, batch_size)
                 repeat(future_info[t], 1, batch_size)))
             logp += logp1
             x += dx .* Δt
-            z_decoder(x)
         end
         for t in 1:length(future_info)]
     (; trajectory, logp)
 end
 
-function mk_guide(x_dim, y_dim, z_dim, h_dim)
+function mk_guide(x_dim, y_dim, h_dim)
     VIGuide(;
         rnn_h0 = zeros(Float32, h_dim), 
         x0_sampler = NormalSampler(
@@ -69,15 +67,12 @@ function mk_guide(x_dim, y_dim, z_dim, h_dim)
         ),
         rnn = Flux.GRUCell(h_dim, h_dim),
         x_encoder = Chain(
-            # LayerNorm(x_dim),
+            LayerNorm(x_dim),
             Dense(x_dim, h_dim, tanh),
         ),
         obs_encoder = Chain(
-            # LayerNorm(y_dim),
+            LayerNorm(y_dim),
             Dense(y_dim, h_dim, tanh),
-        ),
-        z_decoder = Chain(
-            Dense(x_dim, z_dim),
         ),
     )
 end
@@ -122,6 +117,7 @@ function train_guide!(
     optimizer,
     n_steps::Int,
     n_samples_f::Function,
+    anneal_schedule::Function = step -> 1.0,
     callback::Function= _ -> nothing,
 )
     (; state_to_vec, vec_to_state, obs_to_vec, guide) = smoother
@@ -133,14 +129,12 @@ function train_guide!(
             guide_time += @elapsed begin
                 traj_encs, lp_guide = guide(obs_encs, Δt, batch_size)
             end
-            # decode_time += @elapsed begin
-            #     trajs = decode_trajectories(smoother, traj_encs) # note that trajs are on CPU
-            # end
             log_joint_time += @elapsed begin
-                # lp_joint = sum(log_joint(tr, observations) for tr in trajs)
                 lp_joint = log_joint(traj_encs)
             end
-            (sum(lp_guide) - sum(lp_joint)) / batch_size
+            w = anneal_schedule(step)
+            @smart_assert 0 ≤ w ≤ 1
+            (w * sum(lp_guide) - sum(lp_joint)) / batch_size
         end
         ps = Flux.params(guide)
         (; val, grad) = Flux.withgradient(loss, ps) # compute gradient
@@ -159,8 +153,8 @@ end
 
 function logpdf_normal(μ, σ, x)
     T = eltype(μ)
-    a = T(log(2π))
-    vs = @. -0.5f0 * ((x - μ) / σ)^2 - log(σ) - 0.5f0a
+    a = T(0.5log(2π))
+    vs = @. -0.5f0 * ((x - μ) / σ)^2 - log(σ) - a
     sum(vs, dims=1)
 end
 
