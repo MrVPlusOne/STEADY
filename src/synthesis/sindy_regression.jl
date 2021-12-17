@@ -14,34 +14,24 @@ function fit_best_dynamics(
     (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )
-    (; optimizer_list) = algorithm
+    (; basis, optimizer_list) = algorithm
 
-    solutions = parallel_map(1:length(optimizer_list), algorithm) do alg, i
-        local optimizer, optimizer_params = alg.optimizer_list[i], alg.optimizer_param_list[i]
-        optimizer::SeqThresholdOptimizer
-
-        (; dynamics, stats, lexprs) = fit_dynamics_sindy(
-            alg.basis, inputs, outputs, sketch, comps_σ_guess, optimizer
-        )
-        train_score = data_likelihood(dynamics, inputs, outputs)
-        valid_score = data_likelihood(dynamics, valid_inputs, valid_outputs)
-        (; dynamics, stats, lexprs, train_score, valid_score, optimizer_params)
-    end
-    println("Pareto analysis: ")
-    ordering = sortperm(solutions; rev=true, by=x -> x.valid_score)
-    rows = map(solutions, ordering) do sol, rank
-        (; sol.optimizer_params..., sol.train_score, sol.valid_score, rank)
-    end
-    display(DataFrame(rows))
-
-    sol = solutions |> max_by(x -> x.valid_score)
-    (; dynamics, stats, lexprs, train_score, valid_score, optimizer_params) = sol
+    (; dynamics, stats, lexprs) = fit_dynamics_sindy(
+        basis,
+        inputs,
+        outputs,
+        valid_inputs,
+        valid_outputs,
+        sketch,
+        comps_σ_guess,
+        optimizer_list,
+    )
 
     σ_list = [Symbol(name, ".σ") => σ for (name, σ) in pairs(dynamics.σs)]
     model_info = (
         num_terms=sum(num_terms, lexprs), σ_list..., dynamics=repr("text/plain", dynamics)
     )
-    optimizer_info = (; optimizer_params..., train_score, valid_score)
+    optimizer_info = stats
     display_info = (;
         num_terms=sum(num_terms, lexprs),
         dynamics.σs,
@@ -52,7 +42,6 @@ function fit_best_dynamics(
     (; dynamics, model_info, optimizer_info, display_info)
 end
 
-
 """
 Fit the dynamics from trajectory data using the SINDy algorithm.
 """
@@ -60,9 +49,11 @@ function fit_dynamics_sindy(
     basis::Vector{<:CompiledFunc},
     inputs::AbsVec{<:NamedTuple},
     outputs::AbstractMatrix{Float64},
+    valid_inputs::AbsVec{<:NamedTuple},
+    valid_outputs::AbstractMatrix{Float64},
     sketch::MotionModelSketch,
     comps_σ::AbsVec{Float64},
-    optimizer::SparseOptimizer,
+    optimizer_list::AbsVec{<:SparseOptimizer},
 )
     @smart_assert length(comps_σ) == size(outputs, 2)
     foreach(basis) do f
@@ -76,31 +67,32 @@ function fit_dynamics_sindy(
         scale = sqrt(feature'feature / length(feature))
         feature / scale, scale
     end
-    basis_data = hcatreduce(features)
-    all(isfinite, basis_data) || @error "Basis data contains NaN or Inf: $basis_data."
+    input_mat = hcatreduce(features)
+    all(isfinite, input_mat) || @error "Input matrix contains NaN or Inf: $input_mat."
+
+    valid_input_mat = map(basis, scales) do f, scale
+        f.(valid_inputs) / scale
+    end |> hcatreduce
 
     output_types = [v.type for v in sketch.output_vars]
     output_names = Tuple((v.name for v in sketch.output_vars))
     @unzip lexprs, σs, stats = map(1:size(outputs, 2)) do c
         target = outputs[:, c]
-        opt_scaled = optimizer * comps_σ[c]
-        (; coeffs, intercept, active_ids, iterations) = regression(
-            opt_scaled, target, basis_data
-        )
+        valid_target = valid_outputs[:, c]
 
-        comp = if isempty(active_ids)
-            lexpr = LinearExpression(intercept, [], [], output_types[c])
-            σ_f = std(target; mean=0.0)
+        comp_fit = fit_component_sindy(
+            input_mat, target, valid_input_mat, valid_target, comps_σ[c], optimizer_list
+        )
+        (; σ_fit, coeffs, intercept, active_ids, opt_id, iterations) = comp_fit
+        lexpr = if isempty(active_ids)
+            LinearExpression(intercept, [], [], output_types[c])
         else
             fs = basis[active_ids]
-            σ_f = @views std(
-                basis_data[:, active_ids] * coeffs .+ intercept - target, mean=0.0
-            )
             coeffs1 = coeffs ./ scales[active_ids]
-            lexpr = LinearExpression(intercept, coeffs1, fs, output_types[c])
+            LinearExpression(intercept, coeffs1, fs, output_types[c])
         end
-        stat = (; term_weights=coeffs ./ comps_σ[c], iterations)
-        (lexpr, σ_f, stat)
+        stat = (; term_weights=coeffs ./ comps_σ[c], opt_id, iterations)
+        (lexpr, σ_fit, stat)
     end
 
     core = combine_functions(NamedTuple{output_names}(compile.(lexprs)))
@@ -109,4 +101,37 @@ function fit_dynamics_sindy(
         core, NamedTuple{output_names}(σs), NamedTuple{output_names}(lexprs)
     )
     (; dynamics, stats, lexprs)
+end
+
+function fit_component_sindy(
+    inputs::Matrix{Float64},
+    outputs::AbsVec{Float64},
+    valid_inputs::Matrix{Float64},
+    valid_outputs::AbsVec{Float64},
+    σ_guess::Float64,
+    optimizer_list::AbsVec{<:SparseOptimizer},
+)
+    solutions = parallel_map(eachindex(optimizer_list), nothing) do _, opt_id
+        optimizer = optimizer_list[opt_id]
+        opt_scaled = optimizer * σ_guess
+        solution_seq = regression(opt_scaled, outputs, inputs)
+        model_seq = parallel_map(solution_seq, nothing) do _, sol
+            (; coeffs, intercept, active_ids, iterations) = sol
+            if isempty(active_ids)
+                σ_fit = std(outputs; mean=0.0)
+                valid_loss = mean(abs2, valid_outputs)
+            else
+                σ_fit = @views std(
+                    inputs[:, active_ids] * coeffs .+ intercept - outputs, mean=0.0
+                )
+                valid_loss = @views mean(
+                    abs2,
+                    valid_inputs[:, active_ids] * coeffs .+ intercept - valid_outputs,
+                )
+            end
+            merge((; σ_fit, valid_loss, opt_id, iterations), sol)
+        end
+        model_seq |> max_by(model -> -model.valid_loss)
+    end
+    solutions |> max_by(model -> -model.valid_loss)
 end

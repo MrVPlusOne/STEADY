@@ -67,7 +67,7 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
     end
 
     # learning from the true posterior
-    n_fit_trajs = method === :neural ? 100 : 20
+    n_fit_trajs = post_sampler.n_trajs
     regressor = mk_regressor(regress_alg, sketch)
     dyn_from_posterior = test_dynamics_fitting(
         sce,
@@ -93,22 +93,16 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
 end
 
 function run_simulation_experiments(; is_test_run)
-    exp_dir = data_dir(is_test_run ? "batch_experiments-test_run" : "batch_experiments")
+    exp_dir = data_dir(is_test_run ? "test_run-batch_experiments" : "batch_experiments")
 
-    landmarks = @SVector([
-        @SVector([-1.0, 2.5]),
-        @SVector([6.0, -4.0]),
-        @SVector([6.0, 12.0]),
-        @SVector([10.0, 2.0]),
-    ])
-    lInfo = LandmarkInfo(; landmarks, bearing_only=Val(false))
     scenarios = [
-        "car2d-front_drive" => Car2dScenario(lInfo, BicycleCarDyn(; front_drive=true)),
-        "car2d-rear_drive" => Car2dScenario(lInfo, BicycleCarDyn(; front_drive=false)),
+        # "hovercraft" => hovercraft_scenario(),
+        "car2d-front_drive" => car2d_scenario(front_drive=true),
+        "car2d-rear_drive" => car2d_scenario(front_drive=false),
     ]
 
-
-    for (name, sce) in scenarios, alg_name in [:sindy, :neural]
+    results = []
+    for (name, sce) in scenarios, alg_name in [:sindy]#, :neural]
         configs = ExperimentConfigs(;
             n_train_setups=10,
             n_test_setups=50,
@@ -116,6 +110,7 @@ function run_simulation_experiments(; is_test_run)
             is_test_run=is_test_run,
         )
         save_dir = joinpath(exp_dir, savename(name, (; alg_name)))
-        run_experiment(sce, configs, save_dir)
+        push!(results, name => run_experiment(sce, configs, save_dir))
     end
+    results
 end

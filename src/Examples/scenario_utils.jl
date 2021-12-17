@@ -159,23 +159,23 @@ end
     controller::Ctrl
 end
 
-
 function simulate_scenario(
     scenario::Scenario,
     true_motion_model::Function,
     setups::Vector{<:ScenarioSetup};
     save_dir,
-    max_plots_to_show=8,
+    max_plots_to_show=10,
+    should_override_results=true,
 )
     if isdir(save_dir)
-        @warn("The save_dir '$save_dir' already exists.")
-        # menu = RadioMenu(["yes", "no"], pagesize=3)
-        # choice = request("Empty the save_dir and proceed?", menu)
-        choice = "yes" # TODO: make this work for the REPL
-        if choice == "yes"
+        if should_override_results
+            @warn("The save_dir '$save_dir' already exists, it will be overwritten.")
             rm(save_dir; recursive=true)
         else
-            error("Aborted.")
+            error(
+                "The save_dir '$save_dir' already exists, abort since " *
+                "`should_override_results=false`.",
+            )
         end
     end
     mkpath(save_dir)
@@ -220,7 +220,7 @@ function test_posterior_sampling(
     post_sampler::PosteriorSampler;
     state_L2_loss::Function, # (x, y) -> Float64
     generate_plots::Bool=true,
-    max_plots_to_show=8,
+    max_plots_to_show=5,
 )
     systems = map(setups) do setup
         x0_dist = initial_state_dist(scenario, setup.x0)
@@ -239,7 +239,7 @@ function test_posterior_sampling(
         run_trajs = post_trajs[:, i]
 
         if generate_plots && i <= max_plots_to_show
-            plt = plot(; aspect_ratio=1.0, title="Run $i")
+            plt = plot(; aspect_ratio=1.0, title="[$test_name] Run $i")
             plot_trajectories!(scenario, run_trajs, "true posterior"; linecolor=2)
             plot_scenario!(
                 scenario,
@@ -443,7 +443,6 @@ function analyze_motion_model_performance(
         ("baseline", baseline_mm), ("trained", trained_mm), ("true_model", true_mm)
     ]
 
-    prog_step = 0
     rows = @withprogress name = "analyze_motion_model_performance" begin
         map(motion_models) do (name, mm)
             row =
@@ -495,10 +494,11 @@ function mk_regressor(alg_name::Symbol, sketch)
             @show length(basis_expr)
             @show basis_expr
             basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-            lambdas = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8] .* 4
+            lambdas = [0.0, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
             @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
-                let reg = LassoRegression(λ; fit_intercept=true)
-                    SeqThresholdOptimizer(0.1, reg), (λ=λ,)
+                # let reg = LassoRegression(λ; fit_intercept=true)
+                let reg = RidgeRegression(λ; fit_intercept=true)
+                    SSR(reg), (λ=λ,)
                 end
             end
 

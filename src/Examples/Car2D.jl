@@ -4,9 +4,9 @@ abstract type CarDynamics end
 The 2D Car with sliding scenario
 """
 @kwdef struct Car2dScenario{LI<:LandmarkInfo} <: Scenario
-        landmark_info::LI
-        car_dynamics::CarDynamics
-    end
+    landmark_info::LI
+    car_dynamics::CarDynamics
+end
 
 @kwdef struct BicycleCarDyn <: CarDynamics
     front_drive::Bool = true
@@ -48,31 +48,28 @@ variables(::Car2dScenario) = variable_tuple(
 function variable_data(scenario::Car2dScenario)
     (; pos, vel, θ, ω) = variables(scenario)
     (; v̂, steer) = variables(scenario)
-    VariableData(
-        [pos, vel, θ, ω],
-        [v̂, steer],
-    )
+    VariableData([pos, vel, θ, ω], [v̂, steer])
 end
 
 function initial_state_dist(::Car2dScenario, x0)
     DistrIterator((
-        pos = SMvNormal(x0.pos, 0.2),
-        vel = SMvNormal(x0.vel, 0.2),
-        θ = CircularNormal(x0.θ, 8°),
-        ω = Normal(x0.ω, 0.1),
+        pos=SMvNormal(x0.pos, 0.2),
+        vel=SMvNormal(x0.vel, 0.2),
+        θ=CircularNormal(x0.θ, 8°),
+        ω=Normal(x0.ω, 0.1),
     ))
 end
 
 function observation_dist(sce::Car2dScenario)
     state -> begin
         lmr = landmark_readings(state, sce.landmark_info)
-        DistrIterator((landmarks = lmr,))
+        DistrIterator((landmarks=lmr,))
     end
 end
 
 function car2d_inputs_transform((; pos, vel, θ, ω), (; v̂, steer))
     local loc_v = rotate2d(-θ, vel)
-    (; loc_vx = loc_v[1], loc_vy = loc_v[2], ω, θ, v̂, steer)
+    (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, θ, v̂, steer)
 end
 
 function sindy_sketch(sce::Car2dScenario)
@@ -80,8 +77,13 @@ function sindy_sketch(sce::Car2dScenario)
     input_vars = [loc_vx, loc_vy, ω, θ, v̂, steer]
     output_vars = [loc_ax, loc_ay, der_ω]
 
-    MotionModelSketch(input_vars, output_vars,
-        car2d_inputs_transform, hover_outputs_transform, hover_outputs_inv_transform)
+    MotionModelSketch(
+        input_vars,
+        output_vars,
+        car2d_inputs_transform,
+        hover_outputs_transform,
+        hover_outputs_inv_transform,
+    )
 end
 
 function dynamics_sketch(sce::Car2dScenario)
@@ -106,12 +108,10 @@ function dynamics_sketch(sce::Car2dScenario)
         (; pos, vel, θ, ω) = state
         (; steer, v̂) = ctrl
         loc_v = rotate2d(-θ, vel)
-        (; loc_vx = loc_v[1], loc_vy = loc_v[2], ω, steer, v̂)
+        (; loc_vx=loc_v[1], loc_vy=loc_v[2], ω, steer, v̂)
     end
 
     outputs_to_state_dist((; f_x, f_y, f_θ), others, Δt) = begin
-        # TODO: think about how to use leap-frog with Brownian disturbance
-
         (; pos, vel, θ, ω, mass, rot_mass, σ_v, σ_ω) = others
 
         loc_ax = (f_x) / mass
@@ -119,20 +119,14 @@ function dynamics_sketch(sce::Car2dScenario)
         der_ω = (f_θ) / rot_mass
         acc = rotate2d(θ, @SVector([loc_ax, loc_ay]))
         DistrIterator((
-            pos = Dirac(pos + vel * Δt),
-            vel = SMvNormal(vel + acc * Δt, σ_v * Δt),
-            θ = Dirac(θ + ω * Δt),
-            ω = Normal(ω + der_ω * Δt, σ_ω * Δt),
+            pos=Dirac(pos + vel * Δt),
+            vel=SMvNormal(vel + acc * Δt, σ_v * Δt),
+            θ=Dirac(θ + ω * Δt),
+            ω=Normal(ω + der_ω * Δt, σ_ω * Δt),
         ))
     end
 
-    DynamicsSketch(;
-        inputs,
-        outputs,
-        params,
-        state_to_inputs,
-        outputs_to_state_dist
-    )
+    DynamicsSketch(; inputs, outputs, params, state_to_inputs, outputs_to_state_dist)
 end
 
 dynamics_core(sce::Car2dScenario) = dynamics_core(sce.car_dynamics)
@@ -188,10 +182,7 @@ function plot_trajectories!(::Car2dScenario, trajectories, name; plt_args...)
     plot_2d_trajectories!(trajectories, name; plt_args...)
 end
 
-function get_simplified_motion_model(
-    sce::Car2dScenario,
-    (; len, σ_v, σ_ω),
-)
+function get_simplified_motion_model(sce::Car2dScenario, (; len, σ_v, σ_ω))
     (state::NamedTuple, ctrl::NamedTuple, Δt::Real) -> begin
         (; pos, vel, θ, ω) = state
         (; steer, v̂) = ctrl
@@ -200,40 +191,40 @@ function get_simplified_motion_model(
         ω_pred = tan(steer) * v̂ / 2len
 
         DistrIterator((
-            pos = SMvNormal(pos + vel_pred * Δt, 5max(abs(v̂), 0.1) * Δt * σ_v),
-            vel = Dirac(vel_pred),
-            θ = Normal(θ + ω_pred * Δt, 5max(abs(ω_pred), 0.1) * Δt * σ_ω),
-            ω = Dirac(ω_pred),
+            pos=SMvNormal(pos + vel_pred * Δt, 5max(abs(v̂), 0.1) * Δt * σ_v),
+            vel=Dirac(vel_pred),
+            θ=Normal(θ + ω_pred * Δt, 5max(abs(ω_pred), 0.1) * Δt * σ_ω),
+            ω=Dirac(ω_pred),
         ))
     end
 end
 
-function simulation_controller(sce::Car2dScenario; noise = 0.5)
+function simulation_controller(sce::Car2dScenario; noise=0.5)
     pert(x, σ) = x + noise * σ * randn()
     front_drive = sce.car_dynamics.front_drive
     @unzip times, v̂_seq, steer_seq = if front_drive
         [
-            (t = 0.0, v̂ = 0.0, steer = 0.0),
-            (t = 1.0, v̂ = pert(3.2, 1.0), steer = pert(10°, 7°)),
-            (t = 4.0, v̂ = pert(3.0, 1.0), steer = pert(10°, 7°)),
-            (t = 4.5, v̂ = pert(3.3, 1.0), steer = pert(-30°, 7°)),
-            (t = 6.5, v̂ = pert(3.3, 1.0), steer = pert(-30°, 7°)),
-            (t = 7.2, v̂ = pert(2.0, 1.0), steer = pert(20°, 7°)),
-            (t = 9.0, v̂ = pert(1.8, 1.0), steer = pert(20°, 7°)),
-            (t = 9.6, v̂ = pert(2.5, 1.0), steer = pert(10°, 7°)),
-            (t = 15.0, v̂ = 2.0, steer = 0.0),
+            (t=0.0, v̂=0.0, steer=0.0),
+            (t=1.0, v̂=pert(3.2, 1.0), steer=pert(10°, 7°)),
+            (t=4.0, v̂=pert(3.0, 1.0), steer=pert(10°, 7°)),
+            (t=4.5, v̂=pert(3.3, 1.0), steer=pert(-30°, 7°)),
+            (t=6.5, v̂=pert(3.3, 1.0), steer=pert(-30°, 7°)),
+            (t=7.2, v̂=pert(2.0, 1.0), steer=pert(20°, 7°)),
+            (t=9.0, v̂=pert(1.8, 1.0), steer=pert(20°, 7°)),
+            (t=9.6, v̂=pert(2.5, 1.0), steer=pert(10°, 7°)),
+            (t=15.0, v̂=2.0, steer=0.0),
         ]
     else
         [
-            (t = 0.0, v̂ = 0.0, steer = 0.0),
-            (t = 1.0, v̂ = pert(2.0, 1.0), steer = pert(0°, 7°)),
-            (t = 4.0, v̂ = pert(2.0, 1.0), steer = pert(0°, 7°)),
-            (t = 4.5, v̂ = pert(2.5, 1.0), steer = pert(-20°, 7°)),
-            (t = 6.5, v̂ = pert(2.9, 1.0), steer = pert(-20°, 7°)),
-            (t = 7.2, v̂ = pert(3.2, 1.0), steer = pert(20°, 7°)),
-            (t = 9.0, v̂ = pert(3.0, 1.0), steer = pert(10°, 7°)),
-            (t = 10.6, v̂ = pert(2.4, 1.0), steer = pert(0°, 7°)),
-            (t = 15.0, v̂ = 2.0, steer = 0.0),
+            (t=0.0, v̂=0.0, steer=0.0),
+            (t=1.0, v̂=pert(2.0, 1.0), steer=pert(0°, 7°)),
+            (t=4.0, v̂=pert(2.0, 1.0), steer=pert(0°, 7°)),
+            (t=4.5, v̂=pert(2.5, 1.0), steer=pert(-20°, 7°)),
+            (t=6.5, v̂=pert(2.9, 1.0), steer=pert(-20°, 7°)),
+            (t=7.2, v̂=pert(3.2, 1.0), steer=pert(20°, 7°)),
+            (t=9.0, v̂=pert(3.0, 1.0), steer=pert(10°, 7°)),
+            (t=10.6, v̂=pert(2.4, 1.0), steer=pert(0°, 7°)),
+            (t=15.0, v̂=2.0, steer=0.0),
         ]
     end
     if rand() < 0.6
@@ -242,24 +233,43 @@ function simulation_controller(sce::Car2dScenario; noise = 0.5)
     v̂_f = LinearInterpolation(times, v̂_seq)
     steer_f = LinearInterpolation(times, steer_seq)
     (s, obs, t::Float64) -> begin
-        (v̂ = v̂_f(t), steer = steer_f(t))
+        (v̂=v̂_f(t), steer=steer_f(t))
     end
 end
 
 function simulation_x0(::Car2dScenario)
     (
-        pos=@SVector[-2.5+3randn(), 3randn()], 
-        vel=@SVector[0.3randn(), 0.3randn()],
-        θ=randn()°, 
-        ω=0.3randn(),
+        pos=@SVector([-2.5 + 3randn(), 3randn()]),
+        vel=@SVector([0.3randn(), 0.3randn()]),
+        θ=randn(),
+        ω=10° * randn(),
     )
 end
 
 function simulation_params(::Car2dScenario)
-    (; 
-        mass=2.0, drag_x=0.05, drag_y=0.11, rot_mass=0.65, rot_drag=0.07,
-        sep=0.48, len=0.42, fraction_max=1.5, σ_v=0.04, σ_ω=0.03,
+    (;
+        mass=2.0,
+        drag_x=0.05,
+        drag_y=0.11,
+        rot_mass=0.65,
+        rot_drag=0.07,
+        sep=0.48,
+        len=0.42,
+        fraction_max=1.5,
+        σ_v=0.04,
+        σ_ω=0.03,
     )
+end
+
+function car2d_scenario(; front_drive=false)
+    landmarks = @SVector([
+        @SVector([-1.0, 2.5]),
+        @SVector([6.0, -4.0]),
+        @SVector([6.0, 12.0]),
+        @SVector([10.0, 2.0]),
+    ])
+    lInfo = LandmarkInfo(; landmarks, bearing_only=Val(false))
+    Car2dScenario(lInfo, BicycleCarDyn(; front_drive=true))
 end
 
 state_L2_loss(::Car2dScenario) = L2_in_SE2

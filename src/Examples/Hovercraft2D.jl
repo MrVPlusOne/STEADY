@@ -130,8 +130,6 @@ function dynamics_sketch(sce::HovercraftScenario)
     end
 
     outputs_to_state_dist((; f_x, f_y, f_θ), others, Δt) = begin
-        # TODO: think about how to use leap-frog with Brownian disturbance
-
         (; pos, vel, θ, ω, ul, ur, mass, rot_mass, sep, σ_v, σ_ω) = others
 
         loc_ax = (ul + ur + f_x) / mass
@@ -197,6 +195,63 @@ function get_simplified_motion_model(
         sce, (; σ_v, σ_ω, mass, rot_mass, sep, drag_x=0.0, drag_y=0.0, rot_drag=0.0)
     )
     GaussianMotionModel(sketch, comps)
+end
+
+function simulation_controller(sce::HovercraftScenario; noise=0.5)
+    pert(x, σ) = x + noise * σ * randn()
+    @unzip times, ul_seq, ur_seq = [
+        (t=0.0, ul=0.0, ur=0.0),
+        (t=0.5, ul=pert(1.0, 0.2), ur=pert(0.4, 0.1)),
+        (t=2.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
+        (t=3.0, ul=pert(0.5, 0.2), ur=pert(0.5, 0.1)),
+        (t=5.0, ul=pert(1.1, 0.2), ur=pert(0.5, 0.1)),
+        (t=6.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
+        (t=9.0, ul=pert(0.5, 0.2), ur=pert(1.0, 0.1)),
+        (t=10.0, ul=pert(0.0, 0.2), ur=pert(0.4, 0.1)),
+        (t=12.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
+        (t=15.0, ul=0.0, ur=0.0),
+    ]
+    ul_f = LinearInterpolation(times, ul_seq)
+    ur_f = LinearInterpolation(times, ur_seq)
+    if rand() < 0.6
+        ul_f, ur_f = ur_f, ul_f
+    end
+    (s, obs, t::Float64) -> begin
+        (ul=ul_f(t), ur=ur_f(t))
+    end
+end
+
+function simulation_x0(::HovercraftScenario)
+    (
+        pos=@SVector([0.5 + 2randn(), 0.5 + 2randn()]),
+        vel=@SVector([0.25 + 0.3randn(), 0.0 + 0.2randn()]),
+        θ=randn(),
+        ω=10° * randn(),
+    )
+end
+
+function simulation_params(::HovercraftScenario)
+    (;
+        mass=1.5,
+        drag_x=0.06,
+        drag_y=0.10,
+        rot_mass=1.5,
+        rot_drag=0.07,
+        sep=0.81,
+        σ_v=0.04,
+        σ_ω=0.03,
+    )
+end
+
+function hovercraft_scenario()
+    landmarks = @SVector([
+        @SVector([-1.0, 2.5]),
+        @SVector([1.0, -1.0]),
+        @SVector([8.0, -5.5]),
+        @SVector([14.0, 6.0]),
+        @SVector([16.0, -7.5])
+    ])
+    HovercraftScenario(LandmarkInfo(; landmarks))
 end
 
 state_L2_loss(::HovercraftScenario) = L2_in_SE2

@@ -19,7 +19,7 @@ Base.:*(reg::GLR, s::Real) =
     GLR(reg.loss, reg.penalty / s, reg.fit_intercept, reg.penalize_intercept)
 
 """
-return `(; coeffs, intercept, active_ids, iterations)`.
+return a list of `(; coeffs, intercept, active_ids, iterations)`.
 """
 function regression(
     opt::SeqThresholdOptimizer,
@@ -38,10 +38,48 @@ function regression(
 
     is_active = abs.(coeffs) .> opt.ϵ
     if all(is_active)
-        return (; coeffs, intercept, active_ids, iterations)
+        return [(; coeffs, intercept, active_ids, iterations)]
     end
     active_ids = active_ids[is_active]
     return regression(opt, target, basis, active_ids, iterations + 1)
+end
+
+"""
+Stepwise sparse regression (SSR) greedy algorithm.
+Drop the smallest coefficient at every iteration.
+"""
+struct SSR{Reg<:GLR} <: SparseOptimizer
+    regressor::Reg
+end
+
+Base.:*(opt::SSR, s::Real) = opt
+
+"""
+return a list of `(; coeffs, intercept, active_ids, iterations)`.
+"""
+function regression(
+    opt::SSR,
+    target::AbsVec{Float64},
+    basis::AbsMat{Float64},
+)
+    solutions = []
+    active_ids::Vector{Int64}=collect(1:size(basis, 2))
+    
+    for iter in 1:length(active_ids)
+        X = @views basis[:, active_ids]
+        θ = MLJLinearModels.fit(opt.regressor, X, target)
+        (coeffs, intercept) = if opt.regressor.fit_intercept
+            (θ[1:(end - 1)], θ[end])
+        else
+            (θ, 0.0)
+        end
+        push!(solutions, (; coeffs, intercept, active_ids, iterations=iter))
+
+        _, id = findmin(abs, coeffs)
+        active_ids = deleteat!(copy(active_ids), id)
+    end
+
+    solutions |> specific_elems
 end
 
 struct LinearExpression{N}

@@ -18,16 +18,7 @@ landmarks = @SVector([
 scenario = HovercraftScenario(LandmarkInfo(; landmarks))
 times = collect(0.0:0.1:14)
 obs_frames = 1:4:length(times)
-true_params = (;
-    mass=1.5,
-    drag_x=0.06,
-    drag_y=0.10,
-    rot_mass=1.5,
-    rot_drag=0.07,
-    sep=0.81,
-    σ_v=0.04,
-    σ_ω=0.03,
-)
+true_params = simulation_params(scenario)
 params_guess = (;
     mass=1.65,
     drag_x=0.04,
@@ -38,30 +29,6 @@ params_guess = (;
     σ_v=0.1,
     σ_ω=0.1,
 )
-
-function manual_control()
-    pert(x) = x + 0.1randn()
-    @unzip times, ul_seq, ur_seq = [
-        (t=0.0, ul=0.0, ur=0.0),
-        (t=pert(0.5), ul=pert(1.0), ur=pert(0.4)),
-        (t=pert(2.0), ul=0.0, ur=0.0),
-        (t=pert(3.0), ul=pert(0.5), ur=pert(0.5)),
-        (t=pert(5.0), ul=pert(1.1), ur=pert(0.5)),
-        (t=pert(6.0), ul=0.0, ur=0.0),
-        (t=pert(9.0), ul=pert(0.5), ur=pert(1.0)),
-        (t=pert(11.0), ul=0.0, ur=pert(0.4)),
-        (t=12.0, ul=0.0, ur=0.0),
-        (t=15.0, ul=0.0, ur=0.0),
-    ]
-    ul_f = LinearInterpolation(times, ul_seq)
-    ur_f = LinearInterpolation(times, ur_seq)
-    if rand() < 0.6
-        ul_f, ur_f = ur_f, ul_f
-    end
-    (s, obs, t::Float64) -> begin
-        (ul=ul_f(t), ur=ur_f(t))
-    end
-end
 
 n_runs = 10
 n_test_runs = 10
