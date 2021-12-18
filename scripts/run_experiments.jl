@@ -8,7 +8,7 @@ using SEDL: SEDL
 
 experiment_results = SEDL.run_simulation_experiments(; is_test_run=false)
 for (name, r) in experiment_results
-    println("-----", name, "-----")
+    println("------- Scenario: $name -------")
     display(r)
 end
 ##-----------------------------------------------------------

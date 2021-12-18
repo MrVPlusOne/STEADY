@@ -1,15 +1,15 @@
-using Flux: Dense, Chain, Dropout, ADAM
+using Flux: Flux, Dense, Chain, Dropout, ADAM, SkipConnection
 using Flux.Data: DataLoader
-using Flux: Flux
 using CUDA: CUDA
 
-struct NeuralNetWrapper{NN}
+struct NeuralNetWrapper{Trans,NN}
+    input_transform::Trans
     network::NN
 end
 
 function (gg::GaussianGenerator{names,D,<:NeuralNetWrapper})(in) where {names,D}
     (; μ_f, σs) = gg
-    μ = in |> values |> to_svec |> μ_f.network |> NamedTuple{names}
+    μ = in |> values |> to_svec |> μ_f.input_transform |> μ_f.network |> NamedTuple{names}
     map(values(μ), values(σs)) do m, s
         Normal(m, s)
     end |> NamedTuple{names} |> DistrIterator
@@ -18,10 +18,10 @@ end
 @kwdef(struct NeuralRegression{Net,Opt} <: AbstractRegerssionAlgorithm
     network::Net
     optimizer::Opt
-    l2_λ::Float64 = 0.01 # L2 regularization
+    l2_λ::Float64 = 1e-4 # L2 regularization
     batchsize::Int = 64
-    max_epochs::Int = 100
-    patience::Int = 8
+    max_epochs::Int = 10_000
+    patience::Int = 5
 end)
 
 function fit_best_dynamics(
@@ -32,20 +32,22 @@ function fit_best_dynamics(
     comps_σ_guess::Vector{Float64},
 )
     (; network, optimizer, l2_λ, batchsize, max_epochs) = alg
-    σs = comps_σ_guess
 
     params = Flux.params(network)
 
-    input_mat = [collect(x) for x in inputs] |> hcatreduce  # (n_features, n_samples)
+    input_mat, input_transform =
+        let (; transformed, μ, σ) = normalize_transform([collect(x) for x in inputs])
+            μ_s = to_svec(μ)
+            σ_s = to_svec(σ)
+            hcatreduce(transformed), x -> (x .- μ_s) ./ σ_s
+        end  # input_mat shape: (n_features, n_samples)
     target_mat = transpose(outputs)
-    valid_input_mat = [collect(x) for x in valid_inputs] |> hcatreduce
+    valid_input_mat = [input_transform(collect(x)) for x in valid_inputs] |> hcatreduce
     valid_target_mat = transpose(valid_outputs)
     @smart_assert size(target_mat, 2) == size(input_mat, 2)
 
     train_loader = DataLoader((input_mat, target_mat); shuffle=true, batchsize)
     valid_loader = DataLoader((valid_input_mat, valid_target_mat); shuffle=false, batchsize)
-
-    n_train, n_valid = length(inputs), length(valid_inputs)
 
     train_epoch_losses = []
     valid_epoch_losses = []
@@ -55,22 +57,27 @@ function fit_best_dynamics(
 
     progress = Progress(
         max_epochs * length(train_loader);
-        desc="fit_best_dynamics",
+        desc="neural regression",
         output=stdout,
         enabled=true,
+        showspeed=true,
     )
     for epoch in 1:max_epochs
+        epoch_loss = []
         for (x, y) in train_loader
-            loss_f = () -> mean(((network(x) .- y) ./ σs) .^ 2) + l2_λ * sum(sqnorm, params)
-            gs = Flux.gradient(loss_f, params) # compute gradient
-            Flux.Optimise.update!(optimizer, params, gs) # update parameters
-            next!(progress)
+            loss_f() =
+                mean(abs2, ((network(x) .- y) ./ comps_σ_guess)) +
+                l2_λ * sum(sqnorm, params)
+            l, grad = Flux.withgradient(loss_f, params)
+            push!(epoch_loss, l)
+            Flux.Optimise.update!(optimizer, params, grad) # update parameters
+            next!(progress; showvalues=[(:epoch, epoch)])
         end
+        train_loss = mean(epoch_loss)
+        valid_loss = mean(
+            mean(abs2, ((network(x) .- y) ./ comps_σ_guess)) for (x, y) in valid_loader
+        )
 
-        (new_σs, train_loss) = fit_model_σ(train_loader, network)
-        (_, valid_loss) = fit_model_σ(valid_loader, network)
-
-        σs = new_σs
         push!(train_epoch_losses, train_loss)
         push!(valid_epoch_losses, valid_loss)
         epochs_trained += 1
@@ -84,9 +91,9 @@ function fit_best_dynamics(
     end
 
     output_names = [v.name for v in sketch.output_vars]
+    σs = fit_model_σ(valid_loader, network)
     σs_nt = NamedTuple(zip(output_names, σs))
-    dynamics = network_to_gaussian(network, σs_nt)
-    σ_list = [Symbol(name, ".σ") => σ for (name, σ) in zip(output_names, σs)]
+    dynamics = network_to_gaussian(network, σs_nt, input_transform)
 
     model_info = NamedTuple()
     optimizer_info = (;
@@ -101,10 +108,10 @@ end
 
 sqnorm(x) = sum(abs2, x)
 
-function network_to_gaussian(network, σs::NamedTuple)
-    net = network |> compile_neural_nets |> NeuralNetWrapper
-    Flux.trainmode!(net, true) # to enable dropout during sampling
-    GaussianGenerator(net, σs, (; network))
+function network_to_gaussian(network, σs::NamedTuple, input_transform)
+    net = network |> compile_neural_nets
+    μ_f = NeuralNetWrapper(input_transform, net)
+    GaussianGenerator(μ_f, σs, (; network))
 end
 
 function fit_model_σ(data_loader, network)
@@ -114,10 +121,7 @@ function fit_model_σ(data_loader, network)
         push!(Δs, (ŷ - y))
     end
     Δ = hcatreduce(Δs)
-    σs = std(Δ; mean=zeros(size(Δ, 1)), dims=2)
-    loss = mean(abs2, (Δ ./ σs)) / 2 + sum(log, σs)
-
-    return (; σs, loss)
+    std(Δ; mean=zeros(size(Δ, 1)), dims=2)
 end
 
 # function sample_particles_batch!(
@@ -161,6 +165,14 @@ function compile_neural_nets(layer::Dense)
     Dense(to_static_array(weight), to_static_array(bias), σ)
 end
 
+function compile_neural_nets(layer::LayerNorm)
+    layer
+end
+
+function compile_neural_nets(sk::SkipConnection)
+    SkipConnection(compile_neural_nets(sk.layers), sk.connection)
+end
+
 struct StaticDropout
     p::Float64
     function StaticDropout(p)
@@ -176,5 +188,6 @@ end
 end
 
 function compile_neural_nets(layer::Dropout)
-    StaticDropout(layer.p)
+    # StaticDropout(layer.p)
+    identity
 end

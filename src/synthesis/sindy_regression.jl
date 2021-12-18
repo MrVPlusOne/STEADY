@@ -14,7 +14,7 @@ function fit_best_dynamics(
     (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )
-    (; basis, optimizer_list) = algorithm
+    (; basis, optimizer_list, optimizer_param_list) = algorithm
 
     (; dynamics, stats, lexprs) = fit_dynamics_sindy(
         basis,
@@ -25,6 +25,7 @@ function fit_best_dynamics(
         sketch,
         comps_σ_guess,
         optimizer_list,
+        optimizer_param_list,
     )
 
     σ_list = [Symbol(name, ".σ") => σ for (name, σ) in pairs(dynamics.σs)]
@@ -54,6 +55,7 @@ function fit_dynamics_sindy(
     sketch::MotionModelSketch,
     comps_σ::AbsVec{Float64},
     optimizer_list::AbsVec{<:SparseOptimizer},
+    optimizer_param_list,
 )
     @smart_assert length(comps_σ) == size(outputs, 2)
     foreach(basis) do f
@@ -62,16 +64,15 @@ function fit_dynamics_sindy(
     end
     @smart_assert size(outputs, 1) == size(inputs, 1)
 
-    @unzip features, scales = map(basis) do f
+    @unzip features, shifts, scales = map(basis) do f
         feature = f.(inputs)
-        scale = sqrt(feature'feature / length(feature))
-        feature / scale, scale
+        normalize_transform(feature)
     end
     input_mat = hcatreduce(features)
     all(isfinite, input_mat) || @error "Input matrix contains NaN or Inf: $input_mat."
 
-    valid_input_mat = map(basis, scales) do f, scale
-        f.(valid_inputs) / scale
+    valid_input_mat = map(basis, shifts, scales) do f, shift, scale
+        (f.(valid_inputs) .- shift) / scale
     end |> hcatreduce
 
     output_types = [v.type for v in sketch.output_vars]
@@ -84,14 +85,16 @@ function fit_dynamics_sindy(
             input_mat, target, valid_input_mat, valid_target, comps_σ[c], optimizer_list
         )
         (; σ_fit, coeffs, intercept, active_ids, opt_id, iterations) = comp_fit
+        opt_params = optimizer_param_list[opt_id]
         lexpr = if isempty(active_ids)
             LinearExpression(intercept, [], [], output_types[c])
         else
             fs = basis[active_ids]
             coeffs1 = coeffs ./ scales[active_ids]
-            LinearExpression(intercept, coeffs1, fs, output_types[c])
+            intercept1 = intercept - coeffs1' * shifts[active_ids]
+            LinearExpression(intercept1, coeffs1, fs, output_types[c])
         end
-        stat = (; term_weights=coeffs ./ comps_σ[c], opt_id, iterations)
+        stat = (; term_weights=coeffs ./ comps_σ[c], opt_params, iterations)
         (lexpr, σ_fit, stat)
     end
 

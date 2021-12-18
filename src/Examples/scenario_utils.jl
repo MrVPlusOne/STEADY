@@ -164,7 +164,7 @@ function simulate_scenario(
     true_motion_model::Function,
     setups::Vector{<:ScenarioSetup};
     save_dir,
-    max_plots_to_show=10,
+    max_plots_to_show=6,
     should_override_results=true,
 )
     if isdir(save_dir)
@@ -220,7 +220,7 @@ function test_posterior_sampling(
     post_sampler::PosteriorSampler;
     state_L2_loss::Function, # (x, y) -> Float64
     generate_plots::Bool=true,
-    max_plots_to_show=5,
+    max_plots_to_show=6,
 )
     systems = map(setups) do setup
         x0_dist = initial_state_dist(scenario, setup.x0)
@@ -285,8 +285,8 @@ function test_dynamics_fitting(
 )
     @smart_assert train_split < length(obs_data_list)
 
+    @info("Synthesizing from true posterior...")
     if !(algorithm isa EnumerativeSynthesis)
-        @info("Synthesizing from true posterior...")
         output_types = [v.type for v in sketch.output_vars]
         sol = fit_best_dynamics(
             algorithm, sketch, post_trajs, obs_data_list, train_split, comps_σ; n_fit_trajs
@@ -299,7 +299,6 @@ function test_dynamics_fitting(
         end
     else
         (; params_guess) = algorithm
-        @info("Testing parameters fitting with the correct dynamics structure...")
         sketch = dynamics_sketch(scenario)
         sketch_core = dynamics_core(scenario)
         # true_motion_model = to_p_motion_model(sketch_core, sketch)(true_params)
@@ -424,47 +423,6 @@ function synthesize_scenario(
     syn_result
 end
 
-function analyze_motion_model_performance(
-    scenario::Scenario,
-    dyn_est::GaussianGenerator,
-    true_mm::Function,
-    baseline_mm::Function,
-    test_sim_result;
-    save_dir,
-    post_sampler,
-    state_L2_loss,
-)
-    trained_mm = let
-        sketch = sindy_sketch(scenario)
-        GaussianMotionModel(sketch, dyn_est)
-    end
-
-    motion_models = [
-        ("baseline", baseline_mm), ("trained", trained_mm), ("true_model", true_mm)
-    ]
-
-    rows = @withprogress name = "analyze_motion_model_performance" begin
-        map(motion_models) do (name, mm)
-            row =
-                test_posterior_sampling(
-                    scenario,
-                    mm,
-                    name,
-                    test_sim_result,
-                    post_sampler;
-                    state_L2_loss,
-                    generate_plots=true,
-                ).metrics
-            (; name, row...)
-        end
-    end
-    metric_table = DataFrame(rows)
-    CSV.write(joinpath(save_dir, "metrics.csv"), metric_table)
-    @tagsave(joinpath(save_dir, "metrics.jld2"), @strdict(metric_table))
-
-    metric_table
-end
-
 function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
     (; state_to_inputs, outputs_to_state_dist) = sketch
     (; states, controls) = ex_data
@@ -476,7 +434,7 @@ function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
 end
 
 function mk_regressor(alg_name::Symbol, sketch)
-    if alg_name === :sindy
+    if alg_name ∈ [:sindy, :sindy_ssr]
         let
             shape_env = ℝenv()
             comp_env = ComponentEnv()
@@ -494,25 +452,51 @@ function mk_regressor(alg_name::Symbol, sketch)
             @show length(basis_expr)
             @show basis_expr
             basis = [compile(e, shape_env, comp_env) for e in basis_expr]
-            lambdas = [0.0, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
-            @unzip optimizer_list, optimizer_descs = map(lambdas) do λ
-                # let reg = LassoRegression(λ; fit_intercept=true)
-                let reg = RidgeRegression(λ; fit_intercept=true)
+            @unzip optimizer_list, optimizer_descs = if alg_name === :sindy_ssr
+                lambdas = [0.0, 0.1, 0.5, 1.0, 5.0, 10.0]
+                map(lambdas) do λ
+                    reg = RidgeRegression(λ; fit_intercept=true)
                     SSR(reg), (λ=λ,)
                 end
+            else
+                @smart_assert alg_name === :sindy
+                lambdas = [0.0, 0.1, 1.0, 10.0]
+                ϵs = [0.0, 0.001, 0.1]
+                [
+                    let reg = RidgeRegression(λ; fit_intercept=true)
+                        SeqThresholdOptimizer(ϵ, reg), (; λ, ϵ)
+                    end for ϵ in ϵs for λ in lambdas
+                ]
             end
 
             SindyRegression(comp_env, basis, optimizer_list, optimizer_descs)
         end
-    elseif alg_name === :neural
-        let
+    elseif alg_name in [:neural, :neural_dropout]
+        let n_in = length(sketch.input_vars)
+            network = if alg_name === :neural
+                Chain(Dense(n_in, 64, tanh), Dense(64, length(sketch.output_vars)))
+            else
+                @smart_assert alg_name === :neural_dropout
+                Chain(
+                    Dense(n_in, 64, tanh),
+                    Dropout(0.5),
+                    Dense(64, length(sketch.output_vars)),
+                )
+            end
+            optimizer = ADAM(1e-4)
+            NeuralRegression(; network, optimizer, patience=10)
+        end
+    elseif alg_name === :neural_skip
+        let n_in = length(sketch.input_vars)
             network = Chain(
-                Dense(length(sketch.input_vars), 32, relu),
-                # Dropout(0.5),
-                Dense(32, length(sketch.output_vars)),
+                SkipConnection(
+                    Chain(Dense(n_in, 32, tanh), SkipConnection(Dense(32, 16, tanh), vcat)),
+                    vcat,
+                ),
+                Dense(n_in + 32 + 16, length(sketch.output_vars)),
             )
-            optimizer = ADAM(2e-4)
-            NeuralRegression(; network, optimizer, max_epochs=100, patience=5)
+            optimizer = ADAM(1e-4)
+            NeuralRegression(; network, optimizer, patience=10)
         end
     else
         error("Unknown regressor name: $alg_name")

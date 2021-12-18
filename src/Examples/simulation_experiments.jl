@@ -1,12 +1,12 @@
 @kwdef struct ExperimentConfigs
     n_train_setups::Int
     n_test_setups::Int
-    regress_alg::Symbol
+    regress_algs::Vector{Symbol}
     is_test_run::Bool
 end
 
-function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
-    (; n_train_setups, n_test_setups, regress_alg, is_test_run) = configs
+function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir, timer)
+    (; n_train_setups, n_test_setups, regress_algs, is_test_run) = configs
 
     dyn_params = simulation_params(sce)
     true_motion_model = let
@@ -17,45 +17,48 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
 
 
     # generate simulation data
-    train_setups = map(1:n_train_setups) do _
-        times = collect(is_test_run ? (0.0:0.1:2.0) : (0.0:0.1:10))
-        ScenarioSetup(;
-            times,
-            obs_frames=1:length(times),
-            x0=simulation_x0(sce),
-            controller=simulation_controller(sce),
+    @timeit timer "simulation" begin
+        train_setups = map(1:n_train_setups) do _
+            times = collect(is_test_run ? (0.0:0.1:2.0) : (0.0:0.1:10))
+            ScenarioSetup(;
+                times,
+                obs_frames=1:4:length(times),
+                x0=simulation_x0(sce),
+                controller=simulation_controller(sce),
+            )
+        end
+        train_sim = simulate_scenario(
+            sce, true_motion_model, train_setups; save_dir=joinpath(save_dir, "train")
         )
-    end
-    train_sim = simulate_scenario(
-        sce, true_motion_model, train_setups; save_dir=joinpath(save_dir, "train")
-    )
 
-    test_setups = map(1:n_test_setups) do _
-        times = collect(is_test_run ? (0.0:0.1:3.0) : (0.0:0.1:15))
-        ScenarioSetup(;
-            times,
-            obs_frames=1:5:length(times),
-            x0=simulation_x0(sce),
-            controller=simulation_controller(sce),
+        test_setups = map(1:n_test_setups) do _
+            times = collect(is_test_run ? (0.0:0.1:3.0) : (0.0:0.1:15))
+            ScenarioSetup(;
+                times,
+                obs_frames=1:5:length(times),
+                x0=simulation_x0(sce),
+                controller=simulation_controller(sce),
+            )
+        end
+        test_sim = simulate_scenario(
+            sce, true_motion_model, test_setups; save_dir=joinpath(save_dir, "test")
         )
     end
-    test_sim = simulate_scenario(
-        sce, true_motion_model, test_setups; save_dir=joinpath(save_dir, "test")
-    )
 
     post_sampler = ParticleFilterSampler(;
         n_particles=is_test_run ? 2000 : 50_000, n_trajs=100
     )
 
-    true_post_trajs =
+    true_post_trajs = @timeit timer "training data sampling" begin
         test_posterior_sampling(
             sce,
             true_motion_model,
-            "test_truth",
+            "true_model",
             train_sim,
             post_sampler;
             state_L2_loss=state_L2_loss(sce),
         ).post_trajs
+    end
 
     train_split = ceil(Int, n_train_setups * 0.6)
     sketch = sindy_sketch(sce)
@@ -68,49 +71,90 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir)
 
     # learning from the true posterior
     n_fit_trajs = post_sampler.n_trajs
-    regressor = mk_regressor(regress_alg, sketch)
-    dyn_from_posterior = test_dynamics_fitting(
-        sce,
-        train_split,
-        true_post_trajs,
-        train_sim.obs_data_list,
-        regressor,
-        sketch,
-        comps_σ,
-        n_fit_trajs,
+    models_from_posterior = []
+    foreach(regress_algs) do alg
+        regressor = mk_regressor(alg, sketch)
+        @timeit timer "dynamics_fitting: $alg" begin
+            @info("dynamics_fitting: $alg")
+            dyn_est = test_dynamics_fitting(
+                sce,
+                train_split,
+                true_post_trajs,
+                train_sim.obs_data_list,
+                regressor,
+                sketch,
+                comps_σ,
+                n_fit_trajs,
+            )
+        end
+        push!(models_from_posterior, string(alg) => GaussianMotionModel(sketch, dyn_est))
+    end
+
+    push!(
+        models_from_posterior,
+        "handcrafted" => get_simplified_motion_model(sce, dyn_params),
+        "true_model" => true_motion_model,
     )
 
-    return analyze_motion_model_performance(
-        sce,
-        dyn_from_posterior,
-        true_motion_model,
-        get_simplified_motion_model(sce, dyn_params),
-        test_sim;
-        save_dir=joinpath(save_dir, "test"),
-        post_sampler,
-        state_L2_loss=L2_in_SE2,
-    )
+    datasets = ["train" => train_sim, "test" => test_sim]
+
+    rows = []
+    @withprogress name = "analyze_motion_model_performance" begin
+        for (model_name, model) in models_from_posterior
+            cols = @timeit timer "analyze_model: $model_name" begin
+                map(datasets) do (data_name, data)
+                    metrics =
+                        test_posterior_sampling(
+                            sce,
+                            model,
+                            "$data_name ($model_name)",
+                            data,
+                            post_sampler;
+                            state_L2_loss=state_L2_loss(sce),
+                            generate_plots=true,
+                        ).metrics
+                    map(collect(metrics)) do (mname, mvalue)
+                        Symbol("$mname-$data_name") => mvalue
+                    end
+                end |> vcatreduce
+            end
+            push!(rows, (; model_name, cols...))
+        end
+    end
+    metric_table = DataFrame(rows)
+    display(metric_table)
+    CSV.write(joinpath(save_dir, "metrics.csv"), metric_table)
+    @tagsave(joinpath(save_dir, "metrics.jld2"), @strdict(metric_table))
+
+    metric_table
 end
 
 function run_simulation_experiments(; is_test_run)
     exp_dir = data_dir(is_test_run ? "test_run-batch_experiments" : "batch_experiments")
 
     scenarios = [
-        # "hovercraft" => hovercraft_scenario(),
-        "car2d-front_drive" => car2d_scenario(front_drive=true),
-        "car2d-rear_drive" => car2d_scenario(front_drive=false),
+        "hovercraft" => hovercraft_scenario(),
+        "car2d-front_drive" => car2d_scenario(; front_drive=true),
+        "car2d-rear_drive" => car2d_scenario(; front_drive=false),
     ]
 
+    configs = ExperimentConfigs(;
+        n_train_setups=10,
+        n_test_setups=50,
+        regress_algs=[:neural, :neural_skip, :sindy, :sindy_ssr],
+        is_test_run=is_test_run,
+    )
+
+    timer = TimerOutput()
     results = []
-    for (name, sce) in scenarios, alg_name in [:sindy]#, :neural]
-        configs = ExperimentConfigs(;
-            n_train_setups=10,
-            n_test_setups=50,
-            regress_alg=alg_name,
-            is_test_run=is_test_run,
-        )
-        save_dir = joinpath(exp_dir, savename(name, (; alg_name)))
-        push!(results, name => run_experiment(sce, configs, save_dir))
+    for (name, sce) in scenarios
+        save_dir = joinpath(exp_dir, name)
+        @timeit timer "run_experiment($name)" begin
+            @info("Running experiment: $name")
+            push!(results, name => run_experiment(sce, configs, save_dir, timer))
+        end
     end
+    TimerOutputs.complement!(timer)
+    display(timer)
     results
 end

@@ -71,12 +71,11 @@ end
 function normalize_transform(xs::AbstractVector)
     σ = std(xs)
     μ = mean(xs)
-    if σ ≈ zero(σ)
-        transformed = xs
-        μ = zero(μ)
-        σ = one(σ)
-    else
-        transformed = (xs .- μ) ./ σ
+    σ = map(σ) do s
+        s ≈ zero(s) ? one(s) : s
+    end
+    transformed = map(xs) do v
+        (v .- μ) ./ σ
     end
     (; transformed, μ, σ)
 end
