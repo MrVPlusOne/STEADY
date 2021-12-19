@@ -425,7 +425,9 @@ sort_by(f::Function) = xs -> sort(xs; by=f)
     map_optional(f, x) = x === nothing ? nothing : f(x)
 """
 map_optional(f::Function, ::Nothing) = nothing
+map_optional(f::Function, x::Some) = Some(f(x.value))
 map_optional(f::Function, x) = f(x)
+map_optional(f::Function) = x -> map_optional(f, x)
 ##-----------------------------------------------------------
 using Distributed
 using ProgressMeter: Progress, next!

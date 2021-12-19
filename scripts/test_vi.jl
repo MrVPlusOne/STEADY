@@ -3,6 +3,7 @@
 using StatsPlots
 
 StatsPlots.default(; dpi=300, legend=:outerbottom)
+
 ##-----------------------------------------------------------
 # generate data
 # state vec represents pos and vel.
@@ -11,7 +12,7 @@ quick_test = false
 x0_dist = SMvNormal([1.0, 0.0], 0.4)
 
 function motion_model(x::X, control, Δt) where {X}
-    μ = x + X([x[2], control[1] / 2]) * Δt
+    μ = x + X([x[2], control[1] / 2 - 0.2x[2]]) * Δt
     MvNormal(μ, X([0.1, 0.5]) * Δt)
 end
 
@@ -25,7 +26,8 @@ function traj_logp(obs_data, Δt, device)
         batch_size = length(lp)
         for t in 2:length(traj_encs)
             uvec = repeat(device(controls[t - 1]), 1, batch_size)
-            μ = traj_encs[t - 1] + vcat(traj_encs[t - 1][2:2, :], uvec / 2) * Δt
+            x = traj_encs[t - 1]
+            μ = x + vcat(x[2:2, :], uvec / 2 - 0.1x[2:2, :]) * Δt
             lp += logpdf_normal(μ, device([0.1, 0.5]) * Δt, traj_encs[t])
         end
         for t in 1:length(traj_encs)
@@ -38,7 +40,7 @@ function traj_logp(obs_data, Δt, device)
 end
 
 function obs_model(x)
-    Normal(x[1], 0.1)
+    DistrIterator([Normal(x[1], 0.1)])
 end
 
 function controller(x, obs, t)
@@ -47,7 +49,7 @@ end
 
 system = MarkovSystem(x0_dist, motion_model, obs_model)
 Δt = 0.1
-times = 0:Δt:8 |> collect
+times = 0:Δt:10 |> collect
 Δt = Float32(Δt)
 
 sim_data = simulate_trajectory(times, [1.0, 0.0], system, controller)
@@ -82,15 +84,12 @@ plot(times, hcatreduce(sim_data.states)'; label=["x (truth)" "v (truth)"])
 plot_trajectories!(["x (post)", "v (post)"], sampling_result.trajectories) |> display
 ##-----------------------------------------------------------
 using CUDA
+# CUDA.allowscalar(false)
 use_gpu = true
-
 function mk_observation_vec(obs_data)
     map(1:length(obs_data.times)) do t
-        has_obs = t in obs_data.obs_frames
-        if has_obs
-            u = obs_data.controls[t]
-            y = obs_data.observations[t]
-            Some([u; y])
+        if t in obs_data.obs_frames
+            Some(obs_data.observations[t])
         else
             nothing
         end
@@ -100,12 +99,13 @@ observation_vec = mk_observation_vec(obs_data)
 
 x_dim = 2
 h_dim = 64
-y_dim = length(obs_data.observations[1]) + length(obs_data.controls[1])
+y_dim = 1
+u_dim = 1
 
-guide = mk_guide(x_dim, y_dim, h_dim) |> to_device(use_gpu)
+guide = mk_guide(; x_dim, y_dim, u_dim, h_dim) |> to_device(use_gpu)
 vi_smoother = VISmoother(; guide, on_gpu=use_gpu)
 
-init_trajs = vi_smoother(observation_vec, Δt, 100).trajectories
+init_trajs = vi_smoother(observation_vec, obs_data.controls, Δt, 100).trajectories
 plot(times, hcatreduce(sim_data.states)'; label=["x (truth)" "v (truth)"])
 plot_trajectories!(["x (init)", "v (init)"], init_trajs) |> display
 
@@ -117,12 +117,13 @@ log_joint = traj_logp(obs_data, Δt, to_device(use_gpu))
 
 linear(from, to) = x -> from + (to - from) * x
 
-let n_steps = 2001, prog = Progress(n_steps)
+let n_steps = quick_test ? 3 : 2001, prog = Progress(n_steps)
     @info "Training the guide..."
     train_result = @time train_guide!(
         vi_smoother,
         log_joint,
         observation_vec,
+        obs_data.controls,
         Δt;
         optimizer=adam,
         n_steps,
@@ -130,7 +131,8 @@ let n_steps = 2001, prog = Progress(n_steps)
         callback=r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
-                sampled_trajs = vi_smoother(observation_vec, Δt, 100).trajectories
+                sampled_trajs =
+                    vi_smoother(observation_vec, obs_data.controls, Δt, 100).trajectories
                 plot(
                     times,
                     hcatreduce(sim_data.states)';
@@ -152,6 +154,7 @@ let n_steps = 2001, prog = Progress(n_steps)
 end
 
 plot(elbo_history; label="ELBO") |> display
+println("Final ELBO: $(elbo_history[end])")
 ##-----------------------------------------------------------
 test_data = simulate_trajectory(times, [0.9, 1.1], system, controller)
 
@@ -159,7 +162,10 @@ let
     test_obs_data = (;
         times, test_data.observations, test_data.controls, obs_frames, x0_dist
     )
-    test_trajs = vi_smoother(mk_observation_vec(test_obs_data), Δt, 100).trajectories
+    test_trajs =
+        vi_smoother(
+            mk_observation_vec(test_obs_data), test_data.controls, Δt, 100
+        ).trajectories
     plot(
         times,
         hcatreduce(test_data.states)';
