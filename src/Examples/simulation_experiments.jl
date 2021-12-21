@@ -5,16 +5,16 @@
     is_test_run::Bool
 end
 
-function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir, timer)
+function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir, timer; seed)
     (; n_train_setups, n_test_setups, regress_algs, is_test_run) = configs
 
+    Random.seed!(seed)
     dyn_params = simulation_params(sce)
     true_motion_model = let
         sketch = dynamics_sketch(sce)
         core = dynamics_core(sce)
         to_p_motion_model(core, sketch)(dyn_params)
     end
-
 
     # generate simulation data
     @timeit timer "simulation" begin
@@ -141,7 +141,7 @@ function run_simulation_experiments(; is_test_run)
     configs = ExperimentConfigs(;
         n_train_setups=10,
         n_test_setups=50,
-        regress_algs=[:genetic, :sindy_ssr], #[:neural, :neural_skip, :sindy, :sindy_ssr],
+        regress_algs=[:neural_l1_32, :neural_skip_32, :neural], #[:genetic, :sindy_ssr, :neural, :sindy, :sindy_ssr],
         is_test_run=is_test_run,
     )
 
@@ -151,7 +151,8 @@ function run_simulation_experiments(; is_test_run)
         save_dir = joinpath(exp_dir, name)
         @timeit timer "run_experiment($name)" begin
             @info("Running experiment: $name")
-            push!(results, name => run_experiment(sce, configs, save_dir, timer))
+            seed = hash(name)
+            push!(results, name => run_experiment(sce, configs, save_dir, timer; seed))
         end
     end
     TimerOutputs.complement!(timer)

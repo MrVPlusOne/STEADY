@@ -15,14 +15,16 @@ function (gg::GaussianGenerator{names,D,<:NeuralNetWrapper})(in) where {names,D}
     end |> NamedTuple{names} |> DistrIterator
 end
 
-@kwdef(struct NeuralRegression{Net,Opt} <: AbstractRegerssionAlgorithm
+sqnorm(x) = sum(abs2, x)
+
+@kwdef struct NeuralRegression{Net,Opt} <: AbstractRegerssionAlgorithm
     network::Net
     optimizer::Opt
-    l2_λ::Float64 = 1e-4 # L2 regularization
+    regularizer::Function = params -> 1e-4 * sum(sqnorm, params)
     batchsize::Int = 64
     max_epochs::Int = 10_000
     patience::Int = 5
-end)
+end
 
 function fit_best_dynamics(
     alg::NeuralRegression,
@@ -31,7 +33,7 @@ function fit_best_dynamics(
     (valid_inputs, valid_outputs)::Tuple{Vector{<:NamedTuple},Matrix{Float64}},
     comps_σ_guess::Vector{Float64},
 )
-    (; network, optimizer, l2_λ, batchsize, max_epochs) = alg
+    (; network, optimizer, regularizer, batchsize, max_epochs) = alg
 
     params = Flux.params(network)
 
@@ -66,8 +68,7 @@ function fit_best_dynamics(
         epoch_loss = []
         for (x, y) in train_loader
             loss_f() =
-                mean(abs2, ((network(x) .- y) ./ comps_σ_guess)) +
-                l2_λ * sum(sqnorm, params)
+                mean(abs2, ((network(x) .- y) ./ comps_σ_guess)) + regularizer(params)
             l, grad = Flux.withgradient(loss_f, params)
             push!(epoch_loss, l)
             Flux.Optimise.update!(optimizer, params, grad) # update parameters
@@ -105,8 +106,6 @@ function fit_best_dynamics(
 
     (; dynamics, model_info, optimizer_info, display_info)
 end
-
-sqnorm(x) = sum(abs2, x)
 
 function network_to_gaussian(network, σs::NamedTuple, input_transform)
     net = network |> compile_neural_nets

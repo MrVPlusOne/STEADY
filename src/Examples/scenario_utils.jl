@@ -438,6 +438,7 @@ Main.eval(
         signs(s, x) = s * sign(x)
         sines(s, x) = s * sin(x)
         square(x) = x * x
+        norm2(x, y) = sqrt(x * x + y * y)
     end,
 )
 
@@ -494,23 +495,34 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
             optimizer = ADAM(1e-4)
             NeuralRegression(; network, optimizer, patience=10)
         end
-    elseif alg_name === :neural_skip
+    elseif alg_name in [:neural_skip_16, :neural_skip_32, :neural_l1_32, :neural_skip_64]
+        h_dims = split(string(alg_name), "_")[end] |> s -> parse(Int, s)
         let n_in = length(sketch.input_vars)
             network = Chain(
                 SkipConnection(
-                    Chain(Dense(n_in, 32, tanh), SkipConnection(Dense(32, 16, tanh), vcat)),
+                    Chain(
+                        Dense(n_in, h_dims, tanh),
+                        SkipConnection(Dense(h_dims, h_dims ÷ 2, tanh), vcat),
+                    ),
                     vcat,
                 ),
-                Dense(n_in + 32 + 16, length(sketch.output_vars)),
+                Dense(n_in + h_dims + h_dims ÷ 2, length(sketch.output_vars)),
             )
             optimizer = ADAM(1e-4)
-            NeuralRegression(; network, optimizer, patience=10)
+            regularizer = if alg_name === :neural_l1_32
+                params -> sum(p -> sum(abs, p), params) * 1e-3
+            else
+                params -> sum(p -> sum(abs2, p), params) * 1e-4
+            end
+                
+            NeuralRegression(; network, optimizer, regularizer, patience=10)
         end
     elseif alg_name === :genetic
         GeneticProgrammingRegression(;
             options=SymReg.Options(;
-                binary_operators=(+, -, *, /), 
-                unary_operators=(sin, sign, sqrt, Main.square), npopulations=10
+                binary_operators=(+, -, *, /, Main.norm2),
+                unary_operators=(sin, sign, sqrt, Main.square),
+                npopulations=10,
             ),
             numprocs=10,
             runtests=false,
@@ -520,4 +532,3 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
         error("Unknown regressor name: $alg_name")
     end
 end
-
