@@ -73,7 +73,7 @@ function run_experiment(sce::Scenario, configs::ExperimentConfigs, save_dir, tim
     n_fit_trajs = post_sampler.n_trajs
     models_from_posterior = []
     foreach(regress_algs) do alg
-        regressor = mk_regressor(alg, sketch)
+        regressor = mk_regressor(alg, sketch; is_test_run)
         @timeit timer "dynamics_fitting: $alg" begin
             @info("dynamics_fitting: $alg")
             dyn_est = test_dynamics_fitting(
@@ -141,7 +141,7 @@ function run_simulation_experiments(; is_test_run)
     configs = ExperimentConfigs(;
         n_train_setups=10,
         n_test_setups=50,
-        regress_algs=[:neural, :neural_skip, :sindy, :sindy_ssr],
+        regress_algs=[:genetic, :sindy_ssr], #[:neural, :neural_skip, :sindy, :sindy_ssr],
         is_test_run=is_test_run,
     )
 

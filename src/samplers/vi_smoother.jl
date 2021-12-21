@@ -56,7 +56,7 @@ function (guide::VIGuide)(observations::Vector, controls::Vector, Δt::Float32, 
         [
             begin
                 h, o = rnn(h, obs_encoder(observations[t], controls[t], 1))
-                h
+                o
             end for t in length(observations):-1:1
         ] |> reverse
 
@@ -88,6 +88,8 @@ function mk_guide(; x_dim, y_dim, u_dim, h_dim)
         dx_sampler=NormalSampler(mlp(h_dim + rnn_dim, x_dim), mlp(h_dim + rnn_dim, x_dim)),
         rnn=Flux.GRUCell(rnn_dim, rnn_dim),
         rnn_h0=0.01randn(Float32, rnn_dim),
+        # rnn=Flux.LSTMCell(rnn_dim, rnn_dim),
+        # rnn_h0=(0.01randn(Float32, rnn_dim), 0.01randn(Float32, rnn_dim)),
         x_encoder=Chain(LayerNorm(x_dim), mlp(x_dim, h_dim, tanh)),
         obs_encoder=ObsEncoder(
             0.01randn(Float32, y_enc_dim),

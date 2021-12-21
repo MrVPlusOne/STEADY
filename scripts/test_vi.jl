@@ -127,7 +127,7 @@ let n_steps = quick_test ? 3 : 2001, prog = Progress(n_steps)
         Δt;
         optimizer=adam,
         n_steps,
-        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 2step / n_steps)),
+        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 3step / n_steps)),
         callback=r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
@@ -144,10 +144,15 @@ let n_steps = quick_test ? 3 : 2001, prog = Progress(n_steps)
             end
             next!(
                 prog;
-                showvalues=[(:elbo, r.elbo), (:step, r.step), (:batch_size, r.batch_size)],
+                showvalues=[
+                    (:elbo, r.elbo),
+                    (:step, r.step),
+                    (:batch_size, r.batch_size),
+                    (:annealing, r.annealing),
+                ],
             )
         end,
-        n_samples_f=step -> ceil(Int, linear(64, 512)(step / n_steps)),
+        n_samples_f=step -> ceil(Int, linear(64, 256)(step / n_steps)),
         # n_samples_f = step -> 512,
     )
     display(train_result)

@@ -11,8 +11,7 @@ using MacroTools: @forward
 using Formatting: format
 using StaticArrays
 using DataStructures: OrderedDict
-using Random: Random
-using Random: AbstractRNG
+using Random: Random, AbstractRNG
 using Distributions
 include("IOIndents.jl")
 using .IOIndents
@@ -27,13 +26,6 @@ using SplitApplyCombine: group as to_groups
 using TimerOutputs
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
-using Metatheory: Metatheory
-using Metatheory: EGraph, EClassId, SaturationParams, AbstractRule
-using Metatheory: addexpr!, saturate!, @theory
-using Metatheory.Library: commutative_monoid
-
-Metatheory.@metatheory_init()
-
 
 include("utils.jl")
 include("distributions_utils.jl")
@@ -57,7 +49,6 @@ if false
     # include("../scripts/rocket_example.jl")
 
     # include("../scripts/archived/car1d_example.jl")
-    include("../scripts/scratch.jl")
 end
 
 end # end module

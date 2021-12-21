@@ -8,8 +8,7 @@ checkpoints
 
 scripts/scratch.jl
 
-hall_of_fame.csv
-hall_of_fame.csv.bkup
+hall_of_fame.*
 
 ################################################################################
 #                          DrWatson Project Structure                          #

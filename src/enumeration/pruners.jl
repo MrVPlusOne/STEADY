@@ -1,5 +1,3 @@
-include("egraph_pruning.jl")
-
 """
 Each prunner can optionally override the following functions
 - [`prune_iteration!`](@ref)
@@ -100,75 +98,6 @@ function prune_immediately!(pruner::IOPruner, prog::TAST, size::Integer)
     vec_to_prog[(prog.type, vec_rounded)] = prog
 
     return nothing
-end
-
-"""
-Build a new e-graph at every iteration.
-"""
-@kwdef(struct RebootPruner{NtoS<:Function} <: AbstractPruner
-    rules::Vector{AbstractRule}
-    "will prune all types if empty"
-    compute_saturation_params::NtoS = default_saturation_params
-    reports::Vector = []
-    explain_merges::Bool = false
-    only_postprocess::Bool = false
-end)
-
-prune_iteration!(
-    pruner::RebootPruner, result::EnumerationResult, types_to_prune, size; is_last
-) =
-    if pruner.only_postprocess == is_last
-        (; rules, compute_saturation_params, reports, explain_merges) = pruner
-        members = if isempty(types_to_prune)
-            result[]
-        else
-            Iterators.flatten(result[ty] for ty in types_to_prune)
-        end
-        sorted = collect(TAST, members) |> sort_by(ast_size)
-        isempty(sorted) && return TAST[]
-        kept, pruned, report = prune_redundant(
-            sorted, rules, compute_saturation_params; explain_merges
-        )
-        push!(reports, report)
-        pruned
-    else
-        []
-    end
-
-"""
-Rereuse e-graphs across iterations. 
-This works best if the rules does not grow the size of the egraph.
-"""
-@kwdef(
-    struct IncrementalPruner{NtoS<:Function} <: AbstractPruner
-        rules::Vector{AbstractRule}
-        compute_saturation_params::NtoS = default_saturation_params
-        reports::Vector = []
-        club::PruningClub = PruningClub{TAST,PType}(; to_expr=to_expr, to_group=p -> p.type)
-    end
-)
-
-prune_iteration!(
-    pruner::IncrementalPruner, result::EnumerationResult, types_to_prune, size; is_last
-) = begin
-    is_last && return TAST[]
-
-    # TODO implement types_to_prune
-    (; rules, compute_saturation_params, reports, club) = pruner
-
-    if size == 1
-        for special in [0, 1, :R2_0]
-            addexpr!(club.graph, special)
-        end
-    end
-
-    new_members = collect(TAST, result[size])
-
-    kept, pruned, report = admit_members!(
-        club, new_members, rules, compute_saturation_params, ast_size
-    )
-    push!(reports, report)
-    pruned
 end
 
 total_time_report(reports) = begin

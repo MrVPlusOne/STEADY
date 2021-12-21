@@ -38,10 +38,9 @@ struct ComponentEnv
     "Julia functions that implement the corresponding components."
     impl_dict::Dict{Symbol,Function}
     signatures::Dict{Symbol,FuncSignature}
-    rules::Vector{AbstractRule}
 end
 
-ComponentEnv() = ComponentEnv([], Dict(), Dict(), [])
+ComponentEnv() = ComponentEnv([], Dict(), Dict())
 Base.show(io::IO, env::ComponentEnv) = begin
     print(io, "ComponentEnv(components=$(keys(env.impl_dict)))")
 end
@@ -123,61 +122,9 @@ function components_scalar_arithmatic!(env::ComponentEnv; can_grow=true)
         ComponentFunc(:sqrt, sqrt ∘ abs, [ℝ] => ℝ, u -> u^(1//2)),
     )
 
-    scalar_arithmatic_rules!(env.rules; can_grow)
     env
 end
 square(x) = x^2
-
-Metatheory.Library.commutative_group
-
-function scalar_arithmatic_rules!(rules; can_grow)
-    append!(rules, commutative_monoid(:(*), 1))
-    append!(rules, commutative_monoid(:(+), 0))
-
-    # TODO: automatically check non-growness
-    non_grow = @theory begin
-        0 - a => neg(a)
-        neg(neg(a)) => a
-        a - a => 0
-        a + neg(b) => a - b
-        neg(a) + neg(b) => neg(a + b)
-        neg(a) * b == neg(a * b)
-
-        # a / a => 1  # TODO: need a better way to apply this
-        1 / a => reciprocal(a)
-        reciprocal(reciprocal(a)) => a
-        a * reciprocal(b) => a / b
-        reciprocal(a) * reciprocal(b) => reciprocal(a * b)
-
-        a * b + a * c => a * (b + c)
-
-        abs(0) => 0
-        abs(abs(a)) => abs(a)
-        abs(neg(a)) => abs(a)
-        abs(a) * abs(b) => abs(a * b)
-        sqrt(a) * sqrt(b) => sqrt(a * b)
-        x * x => square(x)
-        sqrt(square(x)) => abs(x)
-        square(sqrt(x)) => abs(x)
-        sqrt(abs(x)) => sqrt(x)
-    end
-    append!(rules, non_grow)
-
-    grow = @theory begin
-        neg(a) => 0 - a
-        a - b => a + neg(b)
-        neg(a + b) => neg(a) + neg(b)
-        reciprocal(a) => 1 / a
-        a / b => a * reciprocal(b)
-        reciprocal(a * b) => reciprocal(a) * reciprocal(b)
-        abs(a * b) => abs(a) * abs(b)
-        sqrt(a * b) => sqrt(a) * sqrt(b)
-        square(x) => x * x
-    end
-
-    can_grow && append!(rules, grow)
-    rules
-end
 
 function components_special_functions!(env::ComponentEnv; can_grow=true)
     add_unitless_comp!(env, :sin, sin)
@@ -189,17 +136,6 @@ function components_special_functions!(env::ComponentEnv; can_grow=true)
 
     push!(env, ComponentFunc(:friction, friction, [ℝ, ℝ] => ℝ, signature_all_same))
 
-    non_grow = @theory begin
-        sin(neg(x)) == neg(sin(x))
-        cos(neg(x)) => cos(x)
-        exp(a) * exp(b) => exp(a + b)
-        tanh(neg(x)) == neg(tanh(x))
-    end
-    grow = @theory begin
-        exp(a + b) => exp(a) * exp(b)
-    end
-    append!(env.rules, non_grow)
-    can_grow && append!(env.rules, grow)
     env
 end
 
@@ -230,42 +166,7 @@ function components_vec2!(env::ComponentEnv; can_grow=true)
         ComponentFunc(:cross_R2, cross_R2, [ℝ2, ℝ2] => ℝ, (*)),
     )
 
-    vec2_rules!(env.rules; can_grow)
     env
-end
-
-vec2_rules!(rules; can_grow) = begin
-    append!(rules, commutative_monoid(:plus_R2, :R2_0))
-    non_grows = @theory begin
-        minus_R2(:R2_0, a) => neg_R2(a)
-        neg_R2(neg_R2(a)) => a
-        minus_R2(a, a) => :R2_0
-        plus_R2(a, neg_R2(b)) => minus_R2(a, b)
-        plus_R2(neg_R2(a), neg_R2(b)) => neg_R2(plus_R2(a, b))
-        scale_R2(s, neg_R2(a)) == scale_R2(neg(s), a)
-        scale_R2(s, neg_R2(a)) == neg_R2(scale_R2(s, a))
-        R2(neg(a), neg(b)) => neg_R2(R2(a, b))
-        neg(cross_R2(a, b)) => cross_R2(b, a)
-
-        # rotate_R2(b, rotate_R2(a, v)) => rotate_R2(a+b, v)
-        rotate_R2(θ, neg_R2(a)) == neg_R2(rotate_R2(θ, a))
-        rotate_R2(0, a) => a
-
-        norm_R2(:R2_0) => 0
-        norm_R2(neg_R2(v)) => norm_R2(v)
-        norm_R2(rotate_R2(θ, v)) => norm_R2(v)
-        abs(s) * norm_R2(v) => norm_R2(scale_R2(s, v))
-        abs(norm_R2(v)) => norm_R2(v)
-    end
-    grow = @theory begin
-        neg_R2(a) => minus_R2(:R2_0, a)
-        neg_R2(R2(a, b)) => R2(neg(a), neg(b))
-        minus_R2(a, b) => plus_R2(a, neg_R2(b))
-        neg_R2(plus_R2(a, b)) => plus_R2(neg_R2(a), neg_R2(b))
-    end
-
-    append!(rules, non_grows)
-    can_grow && append!(rules, grow)
 end
 
 mk_R2(x, y) = @SVector [x, y]

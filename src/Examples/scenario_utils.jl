@@ -433,7 +433,15 @@ function transform_sketch_inputs(f::Function, sketch, ex_data, true_params)
     end
 end
 
-function mk_regressor(alg_name::Symbol, sketch)
+Main.eval(
+    quote
+        signs(s, x) = s * sign(x)
+        sines(s, x) = s * sin(x)
+        square(x) = x * x
+    end,
+)
+
+function mk_regressor(alg_name::Symbol, sketch; is_test_run)
     if alg_name ∈ [:sindy, :sindy_ssr]
         let
             shape_env = ℝenv()
@@ -498,7 +506,18 @@ function mk_regressor(alg_name::Symbol, sketch)
             optimizer = ADAM(1e-4)
             NeuralRegression(; network, optimizer, patience=10)
         end
+    elseif alg_name === :genetic
+        GeneticProgrammingRegression(;
+            options=SymReg.Options(;
+                binary_operators=(+, -, *, /), 
+                unary_operators=(sin, sign, sqrt, Main.square), npopulations=10
+            ),
+            numprocs=10,
+            runtests=false,
+            niterations=is_test_run ? 2 : 10,
+        )
     else
         error("Unknown regressor name: $alg_name")
     end
 end
+

@@ -4,7 +4,7 @@
 struct CompiledFunc{return_type,F} <: Function
     f::F
     ast::Any
-    julia::Expr
+    julia::Any
 end
 
 (cf::CompiledFunc{return_type})(args::NamedTuple) where {return_type} = begin
