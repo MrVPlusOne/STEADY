@@ -53,6 +53,26 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
+function landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing))
+    # simplified version, does not model angle warping.
+    σ = convert(eltype(pos), σ_bearing)
+    map(landmarks) do l
+        rel = l .- pos
+        angle = atan.(rel[2, :], rel[1, :]) .- θ
+        angle += σ .* Random.randn!(zero(angle))
+        (; angle)
+    end
+end
+
+function landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing), obs::Vector)
+    @smart_assert length(obs) == length(landmarks)
+    σ = convert(eltype(pos), σ_bearing)
+    map(landmarks, obs) do l, (; angle)
+        rel = l .- pos
+        @. logpdf_normal(atan(rel[2, :], rel[1, :]) - θ, σ, angle)
+    end |> sum
+end
+
 """
 The L2 loss defined on the SE(2) manifold.
 """

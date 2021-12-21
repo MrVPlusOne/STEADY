@@ -1,5 +1,7 @@
 name = "SEDL"
-authors = ["Jiayi Wei"]
+uuid = "e77b95fd-94c7-432f-b1eb-5e6f7a8468de"
+authors = ["Jiayi Wei <wjydzh1@gmail.com>"]
+version = "0.2.0"
 
 [deps]
 AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
@@ -59,6 +61,7 @@ StatsPlots = "f3b207a7-027a-5e70-b257-86293d7955fd"
 SymbolicRegression = "8254be44-1295-4e6a-a16d-46603ac705cb"
 TensorBoardLogger = "899adc3e-224a-11e9-021f-63837185c80f"
 TerminalLoggers = "5d786b92-1e48-4d6f-9151-6b4477ca9bed"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 ThreadPools = "b189fb0b-2eb5-4ed4-bc0c-d34c51242431"
 TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 Transducers = "28d57a85-8fef-5791-bfe6-a80928e7c999"

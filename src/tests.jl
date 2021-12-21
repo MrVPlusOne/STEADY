@@ -1,4 +1,6 @@
+using Test
 using DataFrames
+using CUDA
 
 """
 Randomly sample inputs to test function equivalance. 
@@ -50,28 +52,20 @@ function check_pruning_soundness(
     (; n_passed, failed)
 end
 
-function example_pruning_check()
-    scalars = [
-        Var(:l, ℝ, PUnits.Length) => Normal(),
-        Var(:v, ℝ, PUnits.Speed) => Normal(),
-        Var(:a, ℝ, PUnits.Acceleration) => Normal(),
-    ]
-    vectors = [
-        Var(n, ℝ2, PUnits.Length) => MvNormal([0.0, 0.0], 1.0) for n in [:v1, :v2, :v3]
-    ]
-    var_dists = Dict([scalars; vectors])
-    comp_env = ComponentEnv()
-    components_scalar_arithmatic!(comp_env)
-    components_special_functions!(comp_env)
-    components_vec2!(comp_env)
+function testset_gpu_related()
+    @testset "GPU related" begin
+        let landmarks = [[1.4, 2.0], [2.1, 1.02]] |> Flux.gpu
+            N = 10000
+            pos = CUDA.randn(2, N)
+            θ = CUDA.randn(N)
+            obs = SEDL.landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing=0.1))
+            r = SEDL.landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing=0.1), obs)
+            @test r isa CuArray{Float32}
+            @test length(r) === N
+        end
+    end
+end
 
-    max_size = 5
-    pruner = RebootPruner(; comp_env.rules, only_postprocess=false)
-    types_to_prune = Set([PType(ℝ, PUnits.Speed)])
-    (; n_passed, failed) = check_pruning_soundness(
-        var_dists; comp_env, max_size, pruner, types_to_prune
-    )
-    @show n_passed
-    println("Failed: ")
-    display(DataFrame(failed))
+function run_all_tests()
+    CUDA.functional() && testset_gpu_related()
 end
