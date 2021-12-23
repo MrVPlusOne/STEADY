@@ -14,7 +14,7 @@ using .SEDL: @smart_assert
 is_quick_test = false
 use_gpu = true
 tconf = SEDL.TensorConfig(use_gpu, Float32)
-device = SEDL.to_device(tconf)
+device = use_gpu ? Flux.gpu : Flux.cpu
 
 landmarks = [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
 landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
@@ -68,6 +68,8 @@ let
     SEDL.plot_2d_scenario!(first_states, obs_data, "Ground truth"; landmarks)
     SEDL.plot_2d_trajectories!(sim_en.states, "forward simulation") |> display
 end
+
+SEDL.plot_batched_series(times, SEDL.TensorConfig(false).(sim_en.states))
 ##-----------------------------------------------------------
 
 

@@ -5,6 +5,16 @@ using Flux: @functor, softplus
 using Random
 using TimerOutputs
 
+##-----------------------------------------------------------
+"""
+A configuration specifying which type (cpu or gpu) and floating type should be used
+for array/tensor operations. 
+
+## Usages
+- Use `tconf(x)` to convert an object `x` (e.g. a number or an array) to having the 
+desired configuration `tconf`.
+- Use `check_type(tconf, x)` to check if the object `x` has the desired configuration.
+"""
 struct TensorConfig{on_gpu,ftype}
     TensorConfig(on_gpu, ftype=Float32) = new{on_gpu,ftype}()
 end
@@ -24,11 +34,8 @@ end
 end
 
 (tconf::TensorConfig{on_gpu,ftype})(v::Real) where {on_gpu,ftype} = convert(ftype, v)
-(tconf::TensorConfig{on_gpu,ftype})(a::AbstractArray) where {on_gpu,ftype} =
+(tconf::TensorConfig{on_gpu,ftype})(a::AbstractArray{<:Real}) where {on_gpu,ftype} =
     convert(tensor_type(tconf), a)
-
-to_device(::TensorConfig{true,Float32}) = x -> x isa CUDA.CuArray{Float32} ? x : Flux.gpu(x)
-to_device(::TensorConfig{false}) = Flux.cpu
 
 function check_type(tconf::TensorConfig{on_gpu,ftype}, x::Real) where {on_gpu,ftype}
     @smart_assert x isa ftype
@@ -39,6 +46,19 @@ function check_type(tconf::TensorConfig{on_gpu,ftype}, x) where {on_gpu,ftype}
     @smart_assert typeof(x) <: desired_type
 end
 
+##-----------------------------------------------------------
+"""
+A wrapper over a batch of data with named components.
+
+## Usages
+Assuming `batch::BatchTuple`:
+- Use `batch.val` to access the underlying NamedTuple, in which each 
+component is a batch of data, with the last dimension having the batch size.
+- Use `tconf(batch)` to change the batch to a different `TensorConfig`. 
+- Use `tconf[idx]` to access a subset of the batch, e.g., `tconf[1]` or `tconf[3:6]`, 
+both returns a new `BatchTuple`.
+
+"""
 struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
     tconf::C
     batch_size::Int
@@ -75,6 +95,15 @@ function Base.getindex(batch::BatchTuple, ids)
     BatchTuple(batch.tconf, length(ids), new_val)
 end
 
+function (tconf::TensorConfig)(batch::BatchTuple)
+    if tconf == batch.tconf
+        batch
+    else
+        new_val = map(tconf, batch.val)
+        BatchTuple(tconf, batch.batch_size, new_val)
+    end
+end
+
 function batch_subset(m::Union{Real,AbstractArray}, ids)
     r = if m isa Real
         m
@@ -85,12 +114,13 @@ function batch_subset(m::Union{Real,AbstractArray}, ids)
         else
             colons = map(_ -> :, s)
             ids1 = ids isa Integer ? (ids:ids) : ids
-            m[colons[1:end-1]..., ids1]
+            m[colons[1:(end - 1)]..., ids1]
         end
     end
     r::typeof(m)
 end
-
+##-----------------------------------------------------------
+# Batch utils
 common_batch_size(sizes::Integer...) = begin
     max_size = max(sizes...)
     all(sizes) do s
@@ -103,6 +133,66 @@ common_batch_size(bts::BatchTuple...) = begin
     common_batch_size(map(x -> x.batch_size, bts)...)
 end
 
+"""
+A general plotting function that plots a time series of `BatchedTuple`s. Each batch 
+component will be plotted inside a separate subplot.
+
+## Examples
+```julia
+let
+    tconf = TensorConfig(false)
+    times = 0:0.1:5
+    series = [
+        BatchTuple(tconf, 
+            [
+                (
+                    pos=[randn(Float32), randn(Float32)+2], 
+                    θ=[randn(Float32) * sin(Float32(t))],
+                ) 
+                for b in 1:3
+            ]) 
+        for t in times
+    ]
+
+    plot_batched_series(times, series)
+end
+```
+"""
+function plot_batched_series(
+    times, series::TimeSeries{<:BatchTuple}; plot_width=600, plot_args...
+)
+    to_plot_data(ys::TimeSeries{<:Real}) = (; xs=times, ys, alpha=1.0)
+    to_plot_data(ys::TimeSeries{<:AbsMat{<:Real}}) = begin
+        local (dim, batch_size) = size(ys[1])
+        local Num = eltype(ys[1])
+        local T = length(ys)
+        local x_out = repeat([times; NaN], batch_size)
+        local y_out = Matrix{Num}(undef, batch_size * (T + 1), dim)
+        for i in 1:batch_size
+            for t in 1:T
+                y_out[(i - 1) * (T + 1) + t, :] = ys[t][:, i]
+            end
+            y_out[i * (T + 1), :] .= NaN
+        end
+        (; xs=x_out, ys=y_out, alpha=1.0 / sqrt(batch_size))
+    end
+
+    template = series[1]
+    @smart_assert !template.tconf.on_gpu
+
+    subplots = []
+    for k in keys(template.val)
+        xs, ys, linealpha = to_plot_data((b -> b.val[k]).(series))
+        push!(subplots, plot(xs, ys; title=k, linealpha))
+    end
+    plot(
+        subplots...;
+        layout=(length(subplots), 1),
+        size=(plot_width, 0.6plot_width * length(subplots)),
+        plot_args...,
+    )
+end
+##-----------------------------------------------------------
 """
 Normal Sampler.
 """
@@ -352,6 +442,10 @@ let s = (5, 2), μ = randn(s), σ = abs.(randn(s)), x = randn(s)
         sum(logpdf(MvNormal(μ[:, i], σ[:, i]), x[:, i]) for i in 1:2)
 end
 
+"""
+    sample_normal((μ, σ)) -> (; val, logp)
+Sample a noramlly distributed value along with the corresponding log probability density.
+"""
 function sample_normal((μ, σ))
     σ = max.(σ, eps(eltype(σ)))
     x = μ + σ .* randn!(zero(μ))
