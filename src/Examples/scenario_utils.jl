@@ -28,7 +28,7 @@ Information related to 2D landmark observations.
     "If true, will only include bearing (angle) but not range (distrance) readings."
     bearing_only::Val{bo} = Val(false)
 end
-@show_short_type LandmarkInfo
+@use_short_show LandmarkInfo
 
 function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff, p_detect_min) = linfo

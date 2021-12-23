@@ -200,8 +200,9 @@ struct NormalSampler{M1,M2}
     loc_net::M1
     scale_net::M2
 end
+
 Flux.@functor NormalSampler
-@show_short_type NormalSampler
+@use_short_show NormalSampler
 
 function (com::NormalSampler)(x)
     (; loc_net, scale_net) = com
@@ -216,17 +217,22 @@ end
     "transform_NN_outputs(state, NN_outputs, Δt) -> new_state"
     output_to_state::F2
 end
-@show_short_type BatchedMotionSketch
+@use_short_show BatchedMotionSketch
 
 """
     motion_model(state::BatchTuple, control::BatchTuple, Δt) -> (; new_state::BatchTuple, logp)
+
+A probabilistic motion model that can be used to sample new states in batch.
+The motion model is constructed from a sketch and a core. Sampling of the new state is 
+performed inside some local coordinate frame using the core, and the sketch is used to 
+transform between this local and the global coordinate frame.
 """
-@kwdef struct BatchedMotionModel{TConf<:TensorConfig,SK,Core}
+@kwdef struct BatchedMotionModel{TConf<:TensorConfig,SK<:BatchedMotionSketch,Core}
     tconf::TConf
     sketch::SK
     core::Core
 end
-@show_short_type BatchedMotionModel
+@use_short_show BatchedMotionModel
 
 
 
@@ -287,7 +293,7 @@ end
     obs_encoder::OE
 end)
 Flux.@functor VIGuide
-@show_short_type(VIGuide)
+@use_short_show VIGuide
 
 function (guide::VIGuide)(observations::Vector, controls::Vector, Δt::Float32, batch_size)
     (; rnn_h0, x0_sampler, dx_sampler, rnn, x_encoder, obs_encoder) = guide

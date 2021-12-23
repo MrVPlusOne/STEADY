@@ -51,7 +51,7 @@ end
 Specify that the given type `t` should be displayed as `"t{...}"`.
 This can be used to avoid cluttering display when `t` has too many type parameters.
 """
-macro show_short_type(type)
+macro use_short_show(type)
     type_string = "$type{...}"
     quote
         function Base.show(io::IO, ::Type{<:$(esc(type))})
