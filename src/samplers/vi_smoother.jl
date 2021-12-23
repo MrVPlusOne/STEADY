@@ -5,6 +5,103 @@ using Flux: @functor, softplus
 using Random
 using TimerOutputs
 
+struct TensorConfig{on_gpu,ftype}
+    TensorConfig(on_gpu, ftype=Float32) = new{on_gpu,ftype}()
+end
+
+function Base.getproperty(::TensorConfig{on_gpu,ftype}, s::Symbol) where {on_gpu,ftype}
+    if s === :on_gpu
+        return on_gpu
+    elseif s === :ftype
+        return ftype
+    else
+        error("Unknown property: $s ")
+    end
+end
+
+@inline function tensor_type(::TensorConfig{on_gpu,ftype}) where {on_gpu,ftype}
+    (on_gpu ? CUDA.CuArray : Array){ftype}
+end
+
+(tconf::TensorConfig{on_gpu,ftype})(v::Real) where {on_gpu,ftype} = convert(ftype, v)
+(tconf::TensorConfig{on_gpu,ftype})(a::AbstractArray) where {on_gpu,ftype} =
+    convert(tensor_type(tconf), a)
+
+to_device(::TensorConfig{true,Float32}) = x -> x isa CUDA.CuArray{Float32} ? x : Flux.gpu(x)
+to_device(::TensorConfig{false}) = Flux.cpu
+
+function check_type(tconf::TensorConfig{on_gpu,ftype}, x::Real) where {on_gpu,ftype}
+    @smart_assert x isa ftype
+end
+
+function check_type(tconf::TensorConfig{on_gpu,ftype}, x) where {on_gpu,ftype}
+    desired_type = tensor_type(tconf)
+    @smart_assert typeof(x) <: desired_type
+end
+
+struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
+    tconf::C
+    batch_size::Int
+    val::V
+    BatchTuple(
+        tconf::TensorConfig{on_gpu}, batch_size::Int, val::NamedTuple
+    ) where {on_gpu} = begin
+        map(keys(val)) do k
+            v = getproperty(val, k)
+            check_type(tconf, v)
+            v isa Real ||
+                size(v)[end] == 1 ||
+                size(v)[end] == batch_size ||
+                error("Element $k has size $(size(v)), but batch size is $batch_size")
+        end
+        new{typeof(tconf),typeof(val)}(tconf, batch_size, val)
+    end
+end
+
+function BatchTuple(tconf::TensorConfig, values::Vector{<:NamedTuple})
+    BatchTuple(tconf, length(values), hcatreduce(values) |> to_device(tconf))
+end
+
+function Base.length(batch::BatchTuple)
+    batch.batch_size
+end
+
+function Base.lastindex(batch::BatchTuple)
+    batch.batch_size
+end
+
+function Base.getindex(batch::BatchTuple, ids)
+    new_val = map(v -> batch_subset(v, ids), batch.val)
+    BatchTuple(batch.tconf, length(ids), new_val)
+end
+
+function batch_subset(m::Union{Real,AbstractArray}, ids)
+    r = if m isa Real
+        m
+    else
+        s = size(m)
+        if s[end] == 1
+            m
+        else
+            colons = map(_ -> :, s)
+            ids1 = ids isa Integer ? (ids:ids) : ids
+            m[colons[1:end-1]..., ids1]
+        end
+    end
+    r::typeof(m)
+end
+
+common_batch_size(sizes::Integer...) = begin
+    max_size = max(sizes...)
+    all(sizes) do s
+        s == max_size || s == 1 || error("Inconsistent batch sizes: $sizes")
+    end
+    max_size
+end
+
+common_batch_size(bts::BatchTuple...) = begin
+    common_batch_size(map(x -> x.batch_size, bts)...)
+end
 
 """
 Normal Sampler.
@@ -14,10 +111,61 @@ struct NormalSampler{M1,M2}
     scale_net::M2
 end
 Flux.@functor NormalSampler
+@show_short_type NormalSampler
 
 function (com::NormalSampler)(x)
     (; loc_net, scale_net) = com
     sample_normal((μ=loc_net(x), σ=softplus.(scale_net(x))))
+end
+
+@kwdef struct BatchedMotionSketch{inputs,outputs,F1,F2}
+    input_vars::NamedTuple{inputs,<:Tuple{Vararg{Int}}}
+    output_vars::NamedTuple{outputs,<:Tuple{Vararg{Int}}}
+    "to_NN_inputs(state, control) -> NN_inputs"
+    state_to_input::F1
+    "transform_NN_outputs(state, NN_outputs, Δt) -> new_state"
+    output_to_state::F2
+end
+@show_short_type BatchedMotionSketch
+
+"""
+    motion_model(state::BatchTuple, control::BatchTuple, Δt) -> (; new_state::BatchTuple, logp)
+"""
+@kwdef struct BatchedMotionModel{TConf<:TensorConfig,SK,Core}
+    tconf::TConf
+    sketch::SK
+    core::Core
+end
+@show_short_type BatchedMotionModel
+
+
+
+function (motion_model::BatchedMotionModel{TC})(
+    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real
+) where {TC}
+    bs = common_batch_size(x.batch_size, u.batch_size)
+    sketch, core = motion_model.sketch, motion_model.core
+
+    inputs = sketch.state_to_input(x, u)::BatchTuple{TC}
+    foreach(inputs.val, sketch.input_vars) do v, dim
+        @smart_assert size(v, 1) == dim
+    end
+
+    (; μs, σs) = core(inputs)
+    μs::BatchTuple{TC}
+    σs::BatchTuple{TC}
+
+    @unzip out, logps = map(μs.val, σs.val) do μ, σ
+        sample_normal((μ, σ))
+    end
+    foreach(out, sketch.output_vars) do v, dim
+        @smart_assert size(v, 1) == dim
+    end
+
+    out_batch = BatchTuple(x.tconf, bs, out)
+    new_state = sketch.output_to_state(x, out_batch, x.tconf(Δt))::BatchTuple{TC}
+
+    (; new_state, logp=sum(values(logps)))
 end
 
 struct ObsEncoder{M1<:AbsVec,M2,M3}
@@ -39,7 +187,8 @@ function (enc::ObsEncoder)(obs::Union{<:Some,Nothing}, control, batch_size)
     vcat(obs_encoding, control_encoding)
 end
 
-@kwdef(struct VIGuide{H0,X0S<:NormalSampler,DXS<:NormalSampler,RNN,XE,OE<:ObsEncoder}
+@kwdef(struct VIGuide{SK<:BatchedMotionSketch,H0,X0S,DXS,RNN,XE,OE<:ObsEncoder}
+    sketch::SK
     rnn_h0::H0
     x0_sampler::X0S
     dx_sampler::DXS
@@ -48,9 +197,11 @@ end
     obs_encoder::OE
 end)
 Flux.@functor VIGuide
+@show_short_type(VIGuide)
 
 function (guide::VIGuide)(observations::Vector, controls::Vector, Δt::Float32, batch_size)
     (; rnn_h0, x0_sampler, dx_sampler, rnn, x_encoder, obs_encoder) = guide
+    sketch = guide.sketch
     h = rnn_h0
     future_info =
         [
@@ -64,6 +215,8 @@ function (guide::VIGuide)(observations::Vector, controls::Vector, Δt::Float32, 
     x, logp = x0_sampler(repeat(future_info[1], 1, batch_size))
     trajectory = [
         begin
+            inputs = sketch.to_NN_inputs(x, controls[t])
+            dx_sampler
             (dx, logp1) = dx_sampler(
                 vcat(x_encoder(x), repeat(future_info[t], 1, batch_size))
             )

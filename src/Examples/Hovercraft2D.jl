@@ -51,8 +51,8 @@ function initial_state_dist(::HovercraftScenario, x0)
     DistrIterator((
         pos=SMvNormal(x0.pos, 0.2),
         vel=SMvNormal(x0.vel, 0.2),
-        θ=CircularNormal(x0.θ, 8°),
-        ω=Normal(x0.ω, 0.1),
+        θ=CircularNormal(x0.θ[1], 8°),
+        ω=Normal(x0.ω[1], 0.1),
     ))
 end
 
@@ -106,6 +106,31 @@ function sindy_sketch(sce::HovercraftScenario)
     )
 end
 
+function batched_sketch(sce::HovercraftScenario)
+    function state_to_input(state::BatchTuple, control::BatchTuple)
+        local bs = common_batch_size(state.batch_size, control.batch_size)
+        (; vel, θ, ω) = state.val
+        (; ul, ur) = control.val
+        local loc_v = rotate2d(-θ, vel)
+        BatchTuple(state.tconf, bs, (; loc_v, ω, θ, ul, ur))
+    end
+
+    function output_to_state(state::BatchTuple, output::BatchTuple, Δt)
+        local bs = common_batch_size(state.batch_size, output.batch_size)
+        local (; pos, vel, θ, ω) = state.val
+        local (; loc_acc, a_θ) = output.val
+        local acc = rotate2d(θ, loc_acc)
+        BatchTuple(state.tconf, bs, (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt))
+    end
+
+    BatchedMotionSketch(;
+        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
+        output_vars=(; loc_acc=2, a_θ=1),
+        state_to_input,
+        output_to_state,
+    )
+end
+
 function dynamics_sketch(sce::HovercraftScenario)
     vars = variables(sce)
     inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.ul, vars.ur]
@@ -154,6 +179,23 @@ function dynamics_core(::HovercraftScenario)
         f_y = -drag_y * loc_vy
         f_θ = -ω * rot_drag
         (; f_x, f_y, f_θ)
+    end
+end
+
+function batched_core(::HovercraftScenario, params)
+    input -> let
+        (; tconf, batch_size) = input
+        (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf,params)
+
+        (; loc_v, ω, ul, ur) = input.val
+        a_x = (ul .+ ur .- drag_x * loc_v[1:1, :]) / mass
+        a_y = -drag_y * loc_v[2:2, :] / mass
+        a_θ = (ur .- ul .- rot_drag * ω) / rot_mass
+        loc_acc = vcat(a_x, a_y)
+        @smart_assert size(loc_acc) == size(loc_v)
+        μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
+        σs = BatchTuple(tconf, batch_size, (; loc_acc=σ_v, a_θ=σ_ω))
+        (; μs, σs)
     end
 end
 

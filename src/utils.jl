@@ -8,6 +8,58 @@ using ForwardDiff: Dual
 # import ReverseDiff
 using LineSearches: LineSearches
 
+"""
+Like @assert, but try to print out additional information about the arguments.
+## Examples
+```julia
+julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+
+ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+Stacktrace:
+...
+```
+"""
+macro smart_assert(ex, msg=nothing)
+    has_msg = msg !== nothing
+    if @capture(ex, op_(lhs_, rhs_)) || @capture(ex, (lhs_ <: rhs_))
+        ex_q = QuoteNode(ex)
+        lhs_q = QuoteNode(lhs)
+        rhs_q = QuoteNode(rhs)
+        quote
+            lv = $(esc(lhs))
+            rv = $(esc(rhs))
+            if !$(esc(ex))
+                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+                if $has_msg
+                    msg_v = $(esc(msg))
+                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
+                else
+                    throw(AssertionError(reason_text))
+                end
+            end
+        end
+    else
+        if has_msg
+            esc(:(@assert($ex, $msg)))
+        else
+            esc(:(@assert($ex)))
+        end
+    end
+end
+
+"""
+Specify that the given type `t` should be displayed as `"t{...}"`.
+This can be used to avoid cluttering display when `t` has too many type parameters.
+"""
+macro show_short_type(type)
+    type_string = "$type{...}"
+    quote
+        function Base.show(io::IO, ::Type{<:$(esc(type))})
+            print(io, $type_string)
+        end
+    end
+end
+
 const Optional{X} = Union{X,Nothing}
 const AbsVec = AbstractVector
 const AbsMat = AbstractMatrix
@@ -29,45 +81,6 @@ count_len(iters) = count(_ -> true, iters)
 get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
 get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
-"""
-Like @assert, but try to print out additional information about the arguments.
-## Examples
-```julia
-julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
-
-ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
-Stacktrace:
-...
-```
-"""
-macro smart_assert(ex, msg=nothing)
-    has_msg = msg !== nothing
-    if @capture(ex, op_(lhs_, rhs_))
-        ex_q = QuoteNode(ex)
-        lhs_q = QuoteNode(lhs)
-        rhs_q = QuoteNode(rhs)
-        quote
-            lv = $(esc(lhs))
-            rv = $(esc(rhs))
-            if !$(esc(op))(lv, rv)
-                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
-                if $has_msg
-                    msg_v = $(esc(msg))
-                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
-                else
-                    throw(AssertionError(reason_text))
-                end
-            end
-        end
-    else
-        if has_msg
-            esc(:(@assert($ex, $msg)))
-        else
-            esc(:(@assert($ex)))
-        end
-    end
-end
-
 function normalize_transform(xs::AbstractVector)
     σ = std(xs)
     μ = mean(xs)
@@ -84,6 +97,22 @@ end
 Concat columns horizontally.
 """
 hcatreduce(xs::AbsVec) = reduce(hcat, xs)
+
+
+"""
+Concat a vector of named tuples, recursively calling `hcatreduce` on each tupe element.
+```jldoctest
+julia> hcatreduce(fill((a = [1], b = [2, 3]), 3)) == (a = [1 1 1], b = [2 2 2 ; 3 3 3])
+true
+```
+"""
+function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where keys 
+    vs = map(keys) do k
+        hcatreduce(map(x -> getproperty(x, k), xs))
+    end
+    NamedTuple{keys}(vs)
+end
+
 """
 Concat rows vertically.
 """
@@ -165,7 +194,18 @@ end
     sin(θ) cos(θ)
 ])
 
-rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
+rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
+
+function rotate2d(θ, v::AbsMat)
+    @smart_assert size(θ)[end] == size(v)[end]
+    x = @views v[1:1, :]
+    y = @views v[2:2, :]
+    s, c = sin.(θ), cos.(θ)
+    r = vcat((c .* x .- s .* y), (s .* x .+ c .* y))
+    @smart_assert size(r) == size(v)
+    r
+end
+
 
 const ° = π / 180
 

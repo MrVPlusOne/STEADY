@@ -54,14 +54,24 @@ end
 
 function testset_gpu_related()
     @testset "GPU related" begin
-        let landmarks = [[1.4, 2.0], [2.1, 1.02]] |> Flux.gpu
-            N = 10000
-            pos = CUDA.randn(2, N)
-            θ = CUDA.randn(N)
-            obs = SEDL.landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing=0.1))
-            r = SEDL.landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing=0.1), obs)
-            @test r isa CuArray{Float32}
-            @test length(r) === N
+        @testset "Observation models" begin
+            let landmarks = [[1.4, 2.0], [2.1, 1.02]] |> Flux.gpu
+                N = 10000
+                pos = CUDA.randn(2, N)
+                θ = CUDA.randn(N)
+                obs = SEDL.landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing=0.1))
+                r = SEDL.landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing=0.1), obs)
+                @test r isa CuArray{Float32}
+                @test length(r) === N
+            end
+        end
+
+        @testset "rotate2d" begin
+            @test rotate2d(90°, vcat(ones(10)', zeros(10)')) ≈ vcat(zeros(10)', ones(10)')
+            @test(
+                rotate2d(Float32(90°), vcat(CUDA.ones(10)', CUDA.zeros(10)')) isa
+                    CuArray{Float32}
+            )
         end
     end
 end
@@ -69,3 +79,5 @@ end
 function run_all_tests()
     CUDA.functional() && testset_gpu_related()
 end
+
+# run_all_tests()

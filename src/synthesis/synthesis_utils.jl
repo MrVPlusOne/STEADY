@@ -92,7 +92,6 @@ function (motion_model::GaussianMotionModel{<:GaussianGenerator{names}})(
     )
 end
 
-
 """
 A regression algorith specifies how to synthesize the dynamics from a given set of 
 state transition data.

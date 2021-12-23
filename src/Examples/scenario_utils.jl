@@ -16,20 +16,19 @@ abstract type Scenario end
 """
 Information related to 2D landmark observations.
 """
-@kwdef(
-    struct LandmarkInfo{bo,N}
-        landmarks::SVector{N,SVector{2,Float64}}
-        σ_range::Float64 = 1.0
-        σ_bearing::Float64 = 5°
-        sensor_range::Float64 = 10.0
-        "The width of the sigmoid function that gives the probability of having observations 
-        near the sensor range limit."
-        range_falloff::Float64 = 1.0
-        p_detect_min::Float64 = 1e-4
-        "If true, will only include bearing (angle) but not range (distrance) readings."
-        bearing_only::Val{bo} = Val(false)
-    end
-)
+@kwdef struct LandmarkInfo{bo,L<:AbsVec}
+    landmarks::L
+    σ_range::Float64 = 1.0
+    σ_bearing::Float64 = 5°
+    sensor_range::Float64 = 10.0
+    "The width of the sigmoid function that gives the probability of having observations 
+    near the sensor range limit."
+    range_falloff::Float64 = 1.0
+    p_detect_min::Float64 = 1e-4
+    "If true, will only include bearing (angle) but not range (distrance) readings."
+    bearing_only::Val{bo} = Val(false)
+end
+@show_short_type LandmarkInfo
 
 function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff, p_detect_min) = linfo
@@ -53,24 +52,35 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
-function landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing))
+function landmark_obs_sample(state::BatchTuple, (; landmarks, σ_bearing))
     # simplified version, does not model angle warping.
-    σ = convert(eltype(pos), σ_bearing)
-    map(landmarks) do l
-        rel = l .- pos
-        angle = atan.(rel[2, :], rel[1, :]) .- θ
-        angle += σ .* Random.randn!(zero(angle))
-        (; angle)
-    end
+    @smart_assert size(landmarks)[2] == 2
+
+    (; pos, θ) = state.val
+    (; tconf, batch_size) = state
+    σ = tconf(σ_bearing)
+    check_type(tconf, landmarks)
+
+    rel = landmarks .- reshape(pos, 1, 2, :)
+    bearing = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
+    bearing += σ .* Random.randn!(zero(bearing))
+    BatchTuple(tconf, batch_size, (; bearing))
 end
 
-function landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing), obs::Vector)
-    @smart_assert length(obs) == length(landmarks)
-    σ = convert(eltype(pos), σ_bearing)
-    map(landmarks, obs) do l, (; angle)
-        rel = l .- pos
-        @. logpdf_normal(atan(rel[2, :], rel[1, :]) - θ, σ, angle)
-    end |> sum
+function landmark_obs_logp(
+    state::BatchTuple{C}, (; landmarks, σ_bearing), obs::BatchTuple{C}
+) where {C}
+    (; pos, θ) = state.val
+    (; angle) = obs.val
+    tconf = state.tconf
+    bs = common_batch_size(state, obs)
+    σ = tconf(σ_bearing)
+    
+    rel = landmarks .- pos
+    angle_μ = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
+    lps = sum(logpdf_normal(angle_μ, σ, angle), dims=1)
+    @smart_assert size(lps) == (bs,)
+    BatchTuple(tconf, bs, lps)
 end
 
 """
@@ -121,8 +131,9 @@ function plot_2d_scenario!(
     let
         markers = states[obs_frames]
         @unzip xs, ys = map(x -> x.pos, markers)
+        xs::AbsVec{<:Real}
         dirs = map(markers) do x
-            rotate2d(x.θ, @SVector [marker_len, 0.0])
+            rotate2d(x.θ[1], @SVector [marker_len, 0.0])
         end
         @unzip us, vs = dirs
         quiver!(
@@ -158,7 +169,7 @@ function plot_2d_scenario!(
     end
 end
 
-function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=4)
+function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=1)
     linealpha = 1.0 / sqrt(length(trajectories))
     xs, ys = Float64[], Float64[]
     for tr in trajectories
@@ -170,6 +181,18 @@ function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; lin
     end
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha)
+end
+
+function plot_2d_trajectories!(trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1)
+    linealpha = 2.0 / sqrt(length(trajectories))
+    pos_seq = (x -> x.val.pos).(trajectories)
+    end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
+    push!(pos_seq, end_marker)
+    xs_mat = (b -> b[1, :]).(pos_seq) |> hcatreduce |> Flux.cpu
+    ys_mat = (b -> b[2, :]).(pos_seq) |> hcatreduce |> Flux.cpu
+    xs = eachrow(xs_mat) |> collect |> vcatreduce
+    ys = eachrow(ys_mat) |> collect |> vcatreduce
+    plot!(xs, ys; label="Position ($name)", linecolor, linealpha, aspect_ratio=1.0)
 end
 
 @kwdef struct ScenarioSetup{A<:AbsVec{Float64},B<:AbsVec{Int},X<:NamedTuple,Ctrl<:Function}
@@ -534,7 +557,7 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
             else
                 params -> sum(p -> sum(abs2, p), params) * 1e-4
             end
-                
+
             NeuralRegression(; network, optimizer, regularizer, patience=10)
         end
     elseif alg_name === :genetic
