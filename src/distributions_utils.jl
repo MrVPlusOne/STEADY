@@ -9,10 +9,10 @@ using StatsFuns: StatsFuns
 
 ## simplify the distribution displays
 Base.show(io::IO, d::Normal) = print(io, "Normal(μ=$(d.μ), σ=$(d.σ))")
-Base.show(io::IO, ::Type{<:Normal}) = print(io, "Normal{...}")
+@use_short_show Normal
 
 Base.show(io::IO, d::Uniform) = print(io, "Uniform(lb=$(d.a), ub=$(d.b))")
-Base.show(io::IO, ::Type{<:Uniform}) = print(io, "Uniform{...}")
+@use_short_show Uniform
 
 
 """
@@ -166,7 +166,7 @@ Base.show(io::IO, di::DistrIterator) =
         print(io, "DistrIterator($(di.core))")
     end
 
-Base.show(io::IO, ::Type{<:DistrIterator}) = print(io, "DistrIterator{...}")
+@use_short_show DistrIterator
 
 """
 An iterator of bijectors, used to transform [`DistrIterator`](@ref).
@@ -291,7 +291,7 @@ struct CircularNormal{T1,T2} <: ContinuousUnivariateDistribution
     σ::T2
     CircularNormal(μ::T1, σ::T2) where {T1,T2} = new{T1,T2}(warp_angle(μ), σ)
 end
-Base.show(io::IO, ::Type{<:CircularNormal}) = print(io, "CircularNormal{...}")
+@use_short_show CircularNormal
 Base.show(io::IO, d::CircularNormal) = print(io, "CircularNormal(μ=$(d.μ), σ=$(d.σ))")
 
 extrema(::CircularNormal) = (0.0, 2π)
@@ -344,7 +344,7 @@ Base.print(io::IO, d::OptionalDistr) = print(io, "OptionalDistr(p=$(d.p), core=$
 
 Base.show(io::IO, d::OptionalDistr) = print(io, d)
 
-Base.show(io::IO, ::Type{<:OptionalDistr}) = print(io, "OptionalDistr{...}")
+@use_short_show OptionalDistr
 
 function rand(rng::AbstractRNG, d::OptionalDistr)
     b = rand(rng, Bernoulli(d.p))::Bool
@@ -404,7 +404,7 @@ struct GenericDistrTransform{C<:GDistr,F<:Function,B<:Function} <: DistrTransfor
     inv_transform::B
 end
 
-Base.show(io::IO, ::Type{<:GenericDistrTransform}) = print(io, "GenericDistrTransform{...}")
+@use_short_show GenericDistrTransform
 
 forward_transform(d::GenericDistrTransform, x) = d.transform(x)
 inverse_transform(d::GenericDistrTransform, x) = d.inv_transform(x)
@@ -420,7 +420,7 @@ end
 
 Rotate2dDistr(θ, d::Rotate2dDistr) = Rotate2dDistr(θ + d.θ, d.core)
 
-Base.show(io::IO, ::Type{<:Rotate2dDistr}) = print(io, "Rotate2dDistr{...}")
+@use_short_show Rotate2dDistr
 Base.show(io::IO, d::Rotate2dDistr) = print(io, "rotate2d($(d.θ), $(d.core))")
 
 forward_transform(d::Rotate2dDistr, x) = rotate2d(d.θ, x)
@@ -444,7 +444,7 @@ end
 
 ShiftDistr(shift, core::ShiftDistr) = ShiftDistr(shift + core.shift, core.core)
 
-Base.show(io::IO, ::Type{<:ShiftDistr}) = print(io, "ShiftDistr{...}")
+@use_short_show ShiftDistr
 Base.show(io::IO, d::ShiftDistr) = print(io, "ShiftDistr($(d.shift), $(d.core))")
 
 forward_transform(d::ShiftDistr, x) = x + d.shift

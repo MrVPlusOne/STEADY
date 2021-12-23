@@ -10,7 +10,7 @@ struct MarkovSystem{X,X0_Dist,Motion,ObsM}
 end
 export MarkovSystem
 
-Base.show(io::IO, ::Type{<:MarkovSystem}) = print(io, "MarkovSystem{...}")
+@use_short_show MarkovSystem
 
 MarkovSystem(x0_dist::A, motion_model::B, obs_model::C) where {A<:GDistr,B,C} = begin
     X = typeof(rand(x0_dist))

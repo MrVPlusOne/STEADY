@@ -11,6 +11,7 @@ struct GaussianGenerator{names,D,F} <: Function
     σs::NamedTuple{names,NTuple{D,Float64}}
     meta::NamedTuple
 end
+@use_short_show GaussianGenerator
 
 Base.length(gg::GaussianGenerator) = length(gg.σs)
 
@@ -27,10 +28,6 @@ function Base.print(io::IO, expr::GaussianGenerator)
     !compact && print(io, "GaussianGenerator")
     print(io, "(σs = ", expr.σs)
     print(io, ", meta = ", expr.meta, ")")
-end
-
-function Base.show(io::IO, ::Type{<:GaussianGenerator})
-    print(io, "GaussianGenerator{...}")
 end
 
 Base.show(io::IO, comp::GaussianGenerator) = print(io, comp)
@@ -63,11 +60,7 @@ Use [mk_motion_model](@ref) to construct the motion model from the sketch and co
     "inversely compute sketch outputs from (state, next_state, Δt)"
     outputs_inv_transform::F3
 end)
-
-function Base.show(io::IO, ::Type{<:MotionModelSketch})
-    print(io, "MotionModelSketch{...}")
-end
-
+@use_short_show MotionModelSketch
 
 struct GaussianMotionModel{Core<:GaussianGenerator,SK<:MotionModelSketch} <: Function
     sketch::SK
@@ -154,17 +147,16 @@ With the missing dynamics provided (by e.g., a synthesizer), this skech can then
 compiled into a parameterized dynamics of the form
 `params -> (state, control, Δt) -> distribution_of_state`.
 """
-@kwdef(
-    struct DynamicsSketch{F,G}
-        inputs::Vector{Var}
-        outputs::Vector{Var}
-        params::OrderedDict{Var,GDistr}
-        "state_to_inputs(state::NamedTuple, control::NamedTuple) -> inputs"
-        state_to_inputs::F
-        "outputs_to_state_dist(outputs, (; state..., control..., inputs...), Δt) -> distribution_of_state"
-        outputs_to_state_dist::G
-    end
-)
+@kwdef struct DynamicsSketch{F,G}
+    inputs::Vector{Var}
+    outputs::Vector{Var}
+    params::OrderedDict{Var,GDistr}
+    "state_to_inputs(state::NamedTuple, control::NamedTuple) -> inputs"
+    state_to_inputs::F
+    "outputs_to_state_dist(outputs, (; state..., control..., inputs...), Δt) -> distribution_of_state"
+    outputs_to_state_dist::G
+end
+@use_short_show DynamicsSketch
 
 params_distribution(sketch::DynamicsSketch) = begin
     DistrIterator((; (v.name => dist for (v, dist) in sketch.params)...))
