@@ -1,4 +1,3 @@
-const TimeSeries{T} = Vector{T}
 const ObservationData = NamedTuple{(
     :times, :obs_frames, :observations, :controls, :x0_dist
 )}

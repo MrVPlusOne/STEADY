@@ -63,6 +63,8 @@ end
 const Optional{X} = Union{X,Nothing}
 const AbsVec = AbstractVector
 const AbsMat = AbstractMatrix
+const TimeSeries{T} = Vector{T}
+const NamedNTuple{names,T} = NamedTuple{names,<:Tuple{Vararg{T}}}
 
 abstract type Either end
 
@@ -106,7 +108,7 @@ julia> hcatreduce(fill((a = [1], b = [2, 3]), 3)) == (a = [1 1 1], b = [2 2 2 ; 
 true
 ```
 """
-function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where keys 
+function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where {keys}
     vs = map(keys) do k
         hcatreduce(map(x -> getproperty(x, k), xs))
     end

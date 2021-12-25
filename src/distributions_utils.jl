@@ -371,7 +371,7 @@ function log_score(d::OptionalDistr, x)
     end
 end
 
-struct GenericSamplable{F,G}
+@kwdef struct GenericSamplable{F,G}
     rand_f::F
     log_pdf::G
 end

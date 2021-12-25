@@ -106,29 +106,8 @@ function sindy_sketch(sce::HovercraftScenario)
     )
 end
 
-function batched_sketch(sce::HovercraftScenario)
-    function state_to_input(state::BatchTuple, control::BatchTuple)
-        local bs = common_batch_size(state.batch_size, control.batch_size)
-        (; vel, θ, ω) = state.val
-        (; ul, ur) = control.val
-        local loc_v = rotate2d(-θ, vel)
-        BatchTuple(state.tconf, bs, (; loc_v, ω, θ, ul, ur))
-    end
-
-    function output_to_state(state::BatchTuple, output::BatchTuple, Δt)
-        local bs = common_batch_size(state.batch_size, output.batch_size)
-        local (; pos, vel, θ, ω) = state.val
-        local (; loc_acc, a_θ) = output.val
-        local acc = rotate2d(θ, loc_acc)
-        BatchTuple(state.tconf, bs, (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt))
-    end
-
-    BatchedMotionSketch(;
-        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
-        output_vars=(; loc_acc=2, a_θ=1),
-        state_to_input,
-        output_to_state,
-    )
+function batched_sketch(::HovercraftScenario)
+    batched_sketch_SE2()
 end
 
 function dynamics_sketch(sce::HovercraftScenario)
@@ -185,7 +164,7 @@ end
 function batched_core(::HovercraftScenario, params)
     input -> let
         (; tconf, batch_size) = input
-        (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf,params)
+        (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf, params)
 
         (; loc_v, ω, ul, ur) = input.val
         a_x = (ul .+ ur .- drag_x * loc_v[1:1, :]) / mass

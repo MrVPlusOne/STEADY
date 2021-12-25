@@ -1,0 +1,4 @@
+[sysimage]
+exclude=["Flux", "JET"] # FIXME: add Flux back when PackageCompiler issue 643 is fixed
+statements_files=[]  # Precompile statements files to be used, relative to the project folder
+execution_files=["scripts/precompile/workload.jl"] # Precompile execution files to be used, relative to the project folder

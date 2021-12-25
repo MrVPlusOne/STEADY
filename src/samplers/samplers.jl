@@ -32,8 +32,7 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
     controls = []
 
     for t in 1:T
-        y_out = obs_model(state)
-        y = y_out isa BatchTuple ? y_out : rand(y_out)
+        y = rand(obs_model(state))
         u = controller(state, y, times[t])
 
         push!(states, state)
@@ -42,8 +41,7 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
 
         if t < T
             Δt = times[t + 1] - times[t]
-            mout = motion_model(state, u, Δt)
-            state = mout isa BatchTuple ? mout : rand(mout)
+            state = rand(motion_model(state, u, Δt))
         end
     end
 

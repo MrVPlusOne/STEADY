@@ -1,7 +1,5 @@
 using Interpolations: LinearInterpolation
 using DrWatson
-using REPL: REPL
-using REPL.TerminalMenus
 using JSON: JSON
 using TensorBoardLogger: TBLogger
 using Serialization
@@ -52,7 +50,7 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
-function landmark_obs_sample(state::BatchTuple, (; landmarks, σ_bearing))
+function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     # simplified version, does not model angle warping.
     @smart_assert size(landmarks)[2] == 2
 
@@ -62,25 +60,60 @@ function landmark_obs_sample(state::BatchTuple, (; landmarks, σ_bearing))
     check_type(tconf, landmarks)
 
     rel = landmarks .- reshape(pos, 1, 2, :)
-    bearing = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
-    bearing += σ .* Random.randn!(zero(bearing))
-    BatchTuple(tconf, batch_size, (; bearing))
+    bearing_mean = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            bearing = bearing_mean + σ .* Random.randn!(rng, zero(bearing_mean))
+            BatchTuple(tconf, batch_size, (; bearing))
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            logpdf_normal(bearing_mean, σ, obs.val.bearing)
+        end,
+    )
 end
 
-function landmark_obs_logp(
-    state::BatchTuple{C}, (; landmarks, σ_bearing), obs::BatchTuple{C}
-) where {C}
-    (; pos, θ) = state.val
-    (; angle) = obs.val
-    tconf = state.tconf
-    bs = common_batch_size(state, obs)
-    σ = tconf(σ_bearing)
-    
-    rel = landmarks .- pos
-    angle_μ = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
-    lps = sum(logpdf_normal(angle_μ, σ, angle), dims=1)
-    @smart_assert size(lps) == (bs,)
-    BatchTuple(tconf, bs, lps)
+function batched_sketch_SE2()
+    function state_to_input(state::BatchTuple, control::BatchTuple)
+        local bs = common_batch_size(state.batch_size, control.batch_size)
+        (; vel, θ, ω) = state.val
+        (; ul, ur) = control.val
+        local loc_v = rotate2d(-θ, vel)
+        BatchTuple(state.tconf, bs, (; loc_v, ω, θ, ul, ur))
+    end
+
+    function output_to_state(state::BatchTuple, output::BatchTuple, Δt)
+        local bs = common_batch_size(state.batch_size, output.batch_size)
+        local (; pos, vel, θ, ω) = state.val
+        local (; loc_acc, a_θ) = output.val
+        local acc = rotate2d(θ, loc_acc)
+        BatchTuple(
+            state.tconf,
+            bs,
+            (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt),
+        )
+    end
+
+    function output_from_state(state::BatchTuple, next_state::BatchTuple, Δt)
+        @smart_assert state.batch_size == next_state.batch_size
+        local (; θ) = state.val
+        local derivatives = map(next_state.val, state.val) do x, x′
+            x′ - x / Δt
+        end
+        local acc, a_θ = derivatives.vel, derivatives.ω
+        local loc_acc = rotate2d(-θ, acc)
+        BatchTuple(state.tconf, state.batch_size, (; loc_acc, a_θ))
+    end
+
+    BatchedMotionSketch(;
+        state_vars=(; pos=2, vel=2, θ=1, ω=1),
+        control_vars=(; ul=1, ur=1),
+        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
+        output_vars=(; loc_acc=2, a_θ=1),
+        state_to_input,
+        output_to_state,
+        output_from_state,
+    )
 end
 
 """
@@ -183,7 +216,9 @@ function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; lin
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha)
 end
 
-function plot_2d_trajectories!(trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1)
+function plot_2d_trajectories!(
+    trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1
+)
     linealpha = 2.0 / sqrt(length(trajectories))
     pos_seq = (x -> x.val.pos).(trajectories)
     end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
