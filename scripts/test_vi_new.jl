@@ -10,14 +10,14 @@ StatsPlots.default(; dpi=300, legend=:outerbottom)
 using TensorBoardLogger: TBLogger
 using ProgressMeter
 
-!false && begin
+!true && begin
     include("../src/SEDL.jl")  # reloads the module
-    using .SEDL: @smart_assert
+    using .SEDL
 end
-using SEDL: @smart_assert
+using SEDL: SEDL
+using SEDL
 ##---------------------------------------------------------- 
 # set up scenario and simulate some data
-
 if !@isdefined is_quick_test
     is_quick_test = false
 end
@@ -77,7 +77,7 @@ let
     SEDL.plot_2d_trajectories!(sim_en.states, "forward simulation") |> display
 end
 
-SEDL.plot_batched_series(times, SEDL.TensorConfig(false).(sim_en.states))
+SEDL.plot_batched_series(times, TensorConfig(false).(sim_en.states)) |> display
 ##-----------------------------------------------------------
 # set up the VI model
 h_dim = 64
@@ -87,7 +87,9 @@ guide = SEDL.mk_guide(; sketch, h_dim, y_dim) |> device
 log_joint =
     let u_seq = sim_en.controls, obs_seq = sim_en.observations, x1_truth = sim_en.states[1]
         x_seq -> (
-            sum(map((x, y) -> SEDL.logpdf_normal(x, 1f0, y), x1_truth.val, x_seq[1].val)) +
+            sum(
+                map((x, y) -> SEDL.logpdf_normal(x, 1.0f0, y), x1_truth.val, x_seq[1].val),
+            ) +
             SEDL.transition_logp(motion_model, x_seq, u_seq, Δt) +
             SEDL.observation_logp(obs_model, x_seq, obs_seq)
         )
@@ -102,19 +104,19 @@ elbo_history = []
 linear(from, to) = x -> from + (to - from) * x
 
 let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
+    test_n_traj = 100
+    test_obs = map(b -> repeat(b[1], test_n_traj), sim_en.observations)
+    test_controls = map(b -> repeat(b[1], test_n_traj), sim_en.controls)
     callback =
         r -> begin
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
-                # sampled_trajs =
-                #     vi_smoother(observation_vec, obs_data.controls, Δt, 100).trajectories
-                # plot(
-                #     times,
-                #     hcatreduce(sim_data.states)';
-                #     label=["x (truth)" "v (truth)"],
-                #     title="iteration $(r.step)",
-                # )
-                # plot_trajectories!(["x (trained)", "v (trained)"], sampled_trajs) |> display
+                test_trajs, _ = guide(test_obs, test_controls, Δt)
+                SEDL.plot_batched_series(
+                    times,
+                    SEDL.TensorConfig(false).(test_trajs);
+                    truth=SEDL.TensorConfig(false).(sim_en.states),
+                ) |> display
             end
             Base.with_logger(logger) do
                 @info "training" r.elbo r.batch_size r.annealing

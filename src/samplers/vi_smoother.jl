@@ -5,8 +5,10 @@ using Flux: @functor, softplus
 using Random
 using TimerOutputs
 using Zygote: Zygote
-
+using Setfield
 ##-----------------------------------------------------------
+
+export TensorConfig, tensor_type, check_type
 """
 A configuration specifying which type (cpu or gpu) and floating type should be used
 for array/tensor operations. 
@@ -50,6 +52,7 @@ function check_type(tconf::TensorConfig{on_gpu,ftype}, x) where {on_gpu,ftype}
 end
 
 ##-----------------------------------------------------------
+export BatchTuple, common_batch_size, inflate_batch, split_components
 """
 A wrapper over a batch of data with named components.
 
@@ -58,9 +61,11 @@ Assuming `batch::BatchTuple`:
 - Use `batch.val` to access the underlying NamedTuple, in which each 
 component is a batch of data, with the last dimension having the batch size.
 - Use `tconf(batch)` to change the batch to a different `TensorConfig`. 
-- Use `tconf[idx]` to access a subset of the batch, e.g., `tconf[1]` or `tconf[3:6]`, 
+- Use `batch[idx]` to access a subset of the batch, e.g., `tconf[1]` or `tconf[3:6]`, 
 both returns a new `BatchTuple`.
-
+- Use `inflate_batch(batch)` to expand the underlying value to full batch size (if the batch 
+dimension is 1).
+- Use `common_batch_size(batchs...)` to get the common batch size of a list of `BatchTuple`.
 """
 struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
     tconf::C
@@ -82,6 +87,9 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
 end
 @use_short_show BatchTuple
 
+"""
+Create from a batch of values.
+"""
 function BatchTuple(tconf::TensorConfig, values::Vector{<:NamedTuple})
     BatchTuple(tconf, length(values), map(tconf, hcatreduce(values)))
 end
@@ -137,6 +145,15 @@ common_batch_size(bts::BatchTuple...) = begin
     common_batch_size(map(x -> x.batch_size, bts)...)
 end
 
+function Base.repeat(batch::BatchTuple, n::Int; inflate=false)
+    @smart_assert batch.batch_size == 1
+    nb = @set batch.batch_size = n
+    if inflate
+        nb = inflate(nb)
+    end
+    nb
+end
+
 """
 Split a matrix into a named tuple of matrices according to the given sizes.
 
@@ -156,6 +173,22 @@ function split_components(x::AbsMat, comp_sizes::NamedNTuple{names,Int}) where {
     NamedTuple{names}(comps)
 end
 
+"""
+Foreach component whose batch dimension size is 1, repeat along the batch dimension 
+to grow it to the batch size.
+"""
+function inflate_batch(batch::BatchTuple)
+    bs = batch.batch_size
+    map(batch.val) do v
+        if size(v)[end] == 1
+            repeat(v, bs)
+        else
+            @smart_assert size(v)[end] == bs
+            v
+        end
+    end
+end
+
 function check_components(
     batch::BatchTuple, comp_sizes::NamedNTuple{names,Int}
 ) where {names}
@@ -167,6 +200,7 @@ function check_components(
     end
 end
 
+export plot_batched_series
 """
 A general plotting function that plots a time series of `BatchedTuple`s. Each batch 
 component will be plotted inside a separate subplot.
@@ -193,7 +227,11 @@ end
 ```
 """
 function plot_batched_series(
-    times, series::TimeSeries{<:BatchTuple}; plot_width=600, plot_args...
+    times,
+    series::TimeSeries{<:BatchTuple};
+    truth::Union{Nothing,TimeSeries{<:BatchTuple}}=nothing,
+    plot_width=600,
+    plot_args...,
 )
     to_plot_data(ys::TimeSeries{<:Real}) = (; xs=times, ys, alpha=1.0)
     to_plot_data(ys::TimeSeries{<:AbsMat{<:Real}}) = begin
@@ -213,11 +251,23 @@ function plot_batched_series(
 
     template = series[1]
     @smart_assert !template.tconf.on_gpu
+    if truth !== nothing
+        truth_temp = truth[1]
+        @smart_assert truth_temp.batch_size == 1
+        @smart_assert !truth_temp.tconf.on_gpu
+        @smart_assert keys(truth_temp.val) == keys(template.val)
+    end
 
     subplots = []
     for k in keys(template.val)
         xs, ys, linealpha = to_plot_data((b -> b.val[k]).(series))
-        push!(subplots, plot(xs, ys; title=k, linealpha))
+        n_comps = size(template.val[k], 1)
+        label = ["$k[$i]" for i in 1:n_comps] |> hcatreduce
+        push!(subplots, plot(xs, ys; title=k, linealpha, label))
+        if truth !== nothing
+            txs, tys, _ = to_plot_data((b -> b.val[k]).(truth))
+            plot!(txs, tys; label=hcatreduce(["$k[$i] (truth)" for i in 1:n_comps]))
+        end
     end
     plot(
         subplots...;
@@ -227,6 +277,7 @@ function plot_batched_series(
     )
 end
 ##-----------------------------------------------------------
+export FluxLayer
 """
     FluxLayer(forward, Val(layer_name), trainable, [layer_info=trainable])
 
@@ -269,10 +320,6 @@ Flux.@functor FluxLayer
 FluxLayer(forward::Function, layer_name, trainable; info=trainable) =
     FluxLayer(forward, layer_name, trainable, info)
 
-layer = FluxLayer(Val(:MyBilinear), (w=rand(2, 3),); info=(x_dim=3, y_dim=2)) do trainable
-    (x, y) -> y' * trainable.w * x
-end
-
 function Base.show(io::IO, ::Type{<:FluxLayer{name}}) where {name}
     print(io, "FluxLayer{$name, ...}")
 end
@@ -288,6 +335,10 @@ end
 function Flux.trainable(l::FluxLayer)
     Flux.trainable(l.trainable)
 end
+
+##-----------------------------------------------------------
+# batched motion model
+export BatchedMotionSketch, BatchedMotionModel, transition_logp, observation_logp
 
 @kwdef struct BatchedMotionSketch{states,controls,inputs,outputs,F1,F2,F3}
     state_vars::NamedNTuple{states,Int}
@@ -310,6 +361,8 @@ A probabilistic motion model that can be used to sample new states in batch.
 The motion model is constructed from a sketch and a core. Sampling of the new state is 
 performed inside some local coordinate frame using the core, and the sketch is used to 
 transform between this local and the global coordinate frame.
+
+See also: [`transition_logp`](@ref), [`observation_logp`](@ref)
 """
 @kwdef struct BatchedMotionModel{TConf<:TensorConfig,SK<:BatchedMotionSketch,Core}
     tconf::TConf
@@ -373,10 +426,16 @@ function observation_logp(obs_model, x_seq::TimeSeries, obs_seq)
     end |> sum
 end
 
+##-----------------------------------------------------------
+# VI Guide
+export VIGuide, mk_guide, train_guide!
 """
     guide(obs_seq, control_seq, Δt) -> (; trajectory, logp)
+
+Use `mk_guide` to create a new guide with the default architecture and `train_guide!`
+to train the guide using variational inference.
 """
-@kwdef(struct VIGuide{SK<:BatchedMotionSketch,X0S,GC,RNN,H0,OE}
+@kwdef struct VIGuide{SK<:BatchedMotionSketch,X0S,GC,RNN,H0,OE}
     sketch::SK
     "x0_sampler(future_batch) -> (x0_batch, logp)"
     x0_sampler::X0S
@@ -386,7 +445,7 @@ end
     rnn_h0::H0
     "obs_encoder(y_batch, u_batch) -> obs_encoding"
     obs_encoder::OE
-end)
+end
 Flux.@functor VIGuide
 @use_short_show VIGuide
 
@@ -411,7 +470,8 @@ function (guide::VIGuide)(
             end for t in length(obs_seq):-1:1
         ] |> reverse
 
-    x, logp = x0_sampler(future_info[1])
+    future1 = inflate_batch(future_info[1])
+    x, logp = x0_sampler(future1)
     x::BatchTuple{TC}
     trajectory = [
         begin
@@ -496,8 +556,9 @@ function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
     )
 end
 
-batch_repeat(n) = x -> repeat(x, [1 for _ in size(x)]..., n)
-
+"""
+`vcat` with broadcasting along the batch dimension.
+"""
 vcat_bc(xs::AbsMat...; batch_size) = begin
     xs = map(xs) do x
         if size(x, 2) == batch_size

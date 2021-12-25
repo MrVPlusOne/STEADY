@@ -1,4 +1,4 @@
-export specific_elems, count_len, @unzip, @unzip_named
+export specific_elems, count_len
 export max_by, sort_by
 export rotate2d, rotation2D, °
 export Optional, map_optional
@@ -7,6 +7,11 @@ using MacroTools: @capture
 using ForwardDiff: Dual
 # import ReverseDiff
 using LineSearches: LineSearches
+using Logging: Logging
+
+##-----------------------------------------------------------
+# macros
+export @unzip, @unzip_named, @smart_assert, @use_short_show
 
 """
 Like @assert, but try to print out additional information about the arguments.
@@ -59,66 +64,6 @@ macro use_short_show(type)
         end
     end
 end
-
-const Optional{X} = Union{X,Nothing}
-const AbsVec = AbstractVector
-const AbsMat = AbstractMatrix
-const TimeSeries{T} = Vector{T}
-const NamedNTuple{names,T} = NamedTuple{names,<:Tuple{Vararg{T}}}
-
-abstract type Either end
-
-struct Left{X} <: Either
-    value::X
-end
-
-struct Right{Y} <: Either
-    value::Y
-end
-
-specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
-
-count_len(iters) = count(_ -> true, iters)
-
-get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
-get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
-
-function normalize_transform(xs::AbstractVector)
-    σ = std(xs)
-    μ = mean(xs)
-    σ = map(σ) do s
-        s ≈ zero(s) ? one(s) : s
-    end
-    transformed = map(xs) do v
-        (v .- μ) ./ σ
-    end
-    (; transformed, μ, σ)
-end
-
-"""
-Concat columns horizontally.
-"""
-hcatreduce(xs::AbsVec) = reduce(hcat, xs)
-
-
-"""
-Concat a vector of named tuples, recursively calling `hcatreduce` on each tupe element.
-```jldoctest
-julia> hcatreduce(fill((a = [1], b = [2, 3]), 3)) == (a = [1 1 1], b = [2 2 2 ; 3 3 3])
-true
-```
-"""
-function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where {keys}
-    vs = map(keys) do k
-        hcatreduce(map(x -> getproperty(x, k), xs))
-    end
-    NamedTuple{keys}(vs)
-end
-
-"""
-Concat rows vertically.
-"""
-vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 
 """
     @unzip xs, [ys,...] = collection
@@ -189,6 +134,93 @@ macro unzip_named(assign)
     end
     Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
 end
+
+##-----------------------------------------------------------
+# types
+export Optional, AbsVec, AbsMat
+
+const Optional{X} = Union{X,Nothing}
+const AbsVec = AbstractVector
+const AbsMat = AbstractMatrix
+const TimeSeries{T} = Vector{T}
+const NamedNTuple{names,T} = NamedTuple{names,<:Tuple{Vararg{T}}}
+
+abstract type Either end
+
+struct Left{X} <: Either
+    value::X
+end
+
+struct Right{Y} <: Either
+    value::Y
+end
+
+##-----------------------------------------------------------
+# utility functions
+export hcatreduce, vcatreduce
+
+specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
+
+count_len(iters) = count(_ -> true, iters)
+
+get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
+get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
+
+function normalize_transform(xs::AbstractVector)
+    σ = std(xs)
+    μ = mean(xs)
+    σ = map(σ) do s
+        s ≈ zero(s) ? one(s) : s
+    end
+    transformed = map(xs) do v
+        (v .- μ) ./ σ
+    end
+    (; transformed, μ, σ)
+end
+
+function Logging.default_metafmt(level::Logging.LogLevel, _module, group, id, file, line)
+    @nospecialize
+    color = Logging.default_logcolor(level)
+    prefix = string(level == Logging.Warn ? "Warning" : string(level), ':')
+    suffix::String = ""
+    # make it always show file location
+    # Info <= level < Warn && return color, prefix, suffix
+    _module !== nothing && (suffix *= "$(_module)")
+    if file !== nothing
+        _module !== nothing && (suffix *= " ")
+        suffix *= Base.contractuser(file)::String
+        if line !== nothing
+            suffix *= ":$(isa(line, UnitRange) ? "$(first(line))-$(last(line))" : line)"
+        end
+    end
+    !isempty(suffix) && (suffix = "@ " * suffix)
+    return color, prefix, suffix
+end
+
+"""
+Concat columns horizontally.
+"""
+hcatreduce(xs::AbsVec) = reduce(hcat, xs)
+
+
+"""
+Concat a vector of named tuples, recursively calling `hcatreduce` on each tupe element.
+```jldoctest
+julia> hcatreduce(fill((a = [1], b = [2, 3]), 3)) == (a = [1 1 1], b = [2 2 2 ; 3 3 3])
+true
+```
+"""
+function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where {keys}
+    vs = map(keys) do k
+        hcatreduce(map(x -> getproperty(x, k), xs))
+    end
+    NamedTuple{keys}(vs)
+end
+
+"""
+Concat rows vertically.
+"""
+vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 
 
 @inline rotation2D(θ) = @SArray([
