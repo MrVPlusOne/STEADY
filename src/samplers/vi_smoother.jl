@@ -174,12 +174,12 @@ function split_components(x::AbsMat, comp_sizes::NamedNTuple{names,Int}) where {
 end
 
 """
-Foreach component whose batch dimension size is 1, repeat along the batch dimension 
-to grow it to the batch size.
+Foreach component whose batch dimension size is 1, pad it along the batch dimension 
+to grow to the full batch size.
 """
 function inflate_batch(batch::BatchTuple)
     bs = batch.batch_size
-    map(batch.val) do v
+    @set batch.val = map(batch.val) do v
         if size(v)[end] == 1
             repeat(v, bs)
         else
@@ -197,6 +197,15 @@ function check_components(
         foreach(batch.val, comp_sizes) do v, dim
             @smart_assert size(v, 1) == dim
         end
+    end
+end
+
+function check_approx(batch1::BatchTuple, batch2::BatchTuple; kargs...)
+    @smart_assert keys(batch1.val) == keys(batch2.val)
+    foreach(keys(batch1.val)) do k
+        isapprox(batch1.val[k], batch2.val[k]; kargs...) || error(
+            "Faild for componenet $k.\n\tLeft = $(batch1.val[k])\n\tRight = $(batch2.val[k])",
+        )
     end
 end
 
@@ -249,12 +258,12 @@ function plot_batched_series(
         (; xs=x_out, ys=y_out, alpha=1.0 / sqrt(batch_size))
     end
 
+    series = TensorConfig(false).(series)
     template = series[1]
-    @smart_assert !template.tconf.on_gpu
     if truth !== nothing
+        truth = TensorConfig(false).(truth)
         truth_temp = truth[1]
         @smart_assert truth_temp.batch_size == 1
-        @smart_assert !truth_temp.tconf.on_gpu
         @smart_assert keys(truth_temp.val) == keys(template.val)
     end
 
@@ -262,17 +271,21 @@ function plot_batched_series(
     for k in keys(template.val)
         xs, ys, linealpha = to_plot_data((b -> b.val[k]).(series))
         n_comps = size(template.val[k], 1)
+        linecolor = hcatreduce(1:n_comps)
         label = ["$k[$i]" for i in 1:n_comps] |> hcatreduce
-        push!(subplots, plot(xs, ys; title=k, linealpha, label))
+        push!(subplots, plot(xs, ys; linealpha, linecolor, label))
         if truth !== nothing
             txs, tys, _ = to_plot_data((b -> b.val[k]).(truth))
-            plot!(txs, tys; label=hcatreduce(["$k[$i] (truth)" for i in 1:n_comps]))
+            plot!(
+                txs, tys; label=hcatreduce(["$k[$i] (truth)" for i in 1:n_comps]), linecolor
+            )
         end
     end
     plot(
         subplots...;
         layout=(length(subplots), 1),
         size=(plot_width, 0.6plot_width * length(subplots)),
+        left_margin=1.5cm,
         plot_args...,
     )
 end
@@ -375,7 +388,7 @@ Flux.trainable(bmm::BatchedMotionModel) = Flux.trainable(bmm.core)
 
 
 function (motion_model::BatchedMotionModel{TC})(
-    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real
+    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency::Bool=false
 ) where {TC}
     bs = common_batch_size(x.batch_size, u.batch_size)
     sketch, core = motion_model.sketch, motion_model.core
@@ -387,26 +400,38 @@ function (motion_model::BatchedMotionModel{TC})(
     μs::BatchTuple{TC}
     σs::BatchTuple{TC}
 
-    rand_f(rng) =
+    sample_next_state(rng) =
         let
-            @unzip out, _ = map(μs.val, σs.val) do μ, σ
+            @unzip out, lps = map(μs.val, σs.val) do μ, σ
                 sample_normal(rng, μ, σ)
             end
             out_batch = BatchTuple(x.tconf, bs, out)
             check_components(out_batch, sketch.output_vars)
-            sketch.output_to_state(x, out_batch, x.tconf(Δt))::BatchTuple{TC}
+            next_state = sketch.output_to_state(x, out_batch, x.tconf(Δt))::BatchTuple{TC}
+            (; next_state, out_batch, lp=sum(lps))
         end
 
-    log_pdf(next_state::BatchTuple{TC}) =
+    compute_logp(next_state::BatchTuple{TC}) =
         let
             out_batch = sketch.output_from_state(x, next_state, x.tconf(Δt))::BatchTuple{TC}
             check_components(out_batch, sketch.output_vars)
-            map(μs.val, σs.val, out_batch.val) do μ, σ, o
+            lp = map(μs.val, σs.val, out_batch.val) do μ, σ, o
                 logpdf_normal(μ, σ, o)
             end |> sum
+            (; lp, out_batch)
         end
 
-    GenericSamplable(rand_f, log_pdf)
+    if test_consistency
+        (x1, out_batch1, lp1) = sample_next_state(Random.GLOBAL_RNG)
+        (lp2, out_batch2) = compute_logp(x1)
+        check_approx(out_batch1, out_batch2)
+        @smart_assert(
+            isapprox(lp1, lp2, rtol=0.001),
+            "relative diff: $(norm(lp1-lp2)/max(norm(lp1),norm(lp2)))"
+        )
+    end
+
+    GenericSamplable(rng -> sample_next_state(rng)[1], x1 -> compute_logp(x1)[1])
 end
 
 function transition_logp(
@@ -437,7 +462,7 @@ to train the guide using variational inference.
 """
 @kwdef struct VIGuide{SK<:BatchedMotionSketch,X0S,GC,RNN,H0,OE}
     sketch::SK
-    "x0_sampler(future_batch) -> (x0_batch, logp)"
+    "x0_sampler(future_batch_1) -> (x0_batch, logp)"
     x0_sampler::X0S
     "guide_core(core_in_batch, future_batch) -> core_out_batch"
     guide_core::GC
@@ -454,13 +479,14 @@ function (guide::VIGuide)(
     control_seq::TimeSeries{<:BatchTuple{TC}},
     Δt::Real;
     rng=Random.GLOBAL_RNG,
+    test_consistency::Bool=false,
 ) where {TC}
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
     tconf = TC()
 
     (; rnn_h0, x0_sampler, rnn, obs_encoder) = guide
 
-    h = rnn_h0
+    h = (rnn_h0::Trainable).array
     future_info =
         [
             begin
@@ -471,18 +497,18 @@ function (guide::VIGuide)(
         ] |> reverse
 
     future1 = inflate_batch(future_info[1])
-    x, logp = x0_sampler(future1)
-    x::BatchTuple{TC}
-    trajectory = [
-        begin
-            core = inputs -> guide.guide_core(inputs::BatchTuple, future_info[t])
-            mm_t = BatchedMotionModel(tconf, guide.sketch, core)
-            x_dist = mm_t(x, control_seq[t], Δt)
-            x = rand(rng, x_dist)
-            logp += logpdf(x_dist, x)
-            x
-        end for t in 1:length(future_info)
-    ]
+    x0, logp = x0_sampler(future1)
+    x::BatchTuple{TC} = x0
+    trans = map(2:length(future_info)) do t
+        core = inputs -> guide.guide_core(inputs::BatchTuple, future_info[t])
+        mm_t = BatchedMotionModel(tconf, guide.sketch, core)
+        x_dist = mm_t(x, control_seq[t - 1], Δt; test_consistency)
+        x = rand(rng, x_dist)
+        logp += logpdf(x_dist, x)
+        x
+    end
+    trajectory = vcat([x0], trans)
+
     (; trajectory, logp)
 end
 
@@ -551,7 +577,7 @@ function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
         x0_sampler,
         guide_core,
         rnn=Flux.GRUCell(rnn_dim, rnn_dim),
-        rnn_h0=0.01randn(Float32, rnn_dim),
+        rnn_h0=Trainable(false, 0.01randn(Float32, rnn_dim)),
         obs_encoder,
     )
 end
@@ -582,28 +608,39 @@ function train_guide!(
     n_samples_f::Function,
     anneal_schedule::Function=step -> 1.0,
     callback::Function=_ -> nothing,
+    weight_decay=1f-4,
 )
     guide_time = log_joint_time = 0.0
+    batch_size = common_batch_size(obs_seq[1], control_seq[1])
+    T = length(obs_seq)
+
+    all_ps = Flux.params(guide)
+    reg_ps = Flux.Params(collect(regular_params(guide)))
+
     for step in 1:n_steps
-        batch_size = n_samples_f(step)::Int
+        # batch_size = n_samples_f(step)::Int  fixme
         w = anneal_schedule(step)
         @smart_assert 0 ≤ w ≤ 1
 
-        loss() = begin
+        loss(; test_consistency=false) = begin
             guide_time += @elapsed begin
-                traj_seq, lp_guide = guide(obs_seq, control_seq, Δt)
+                traj_seq, lp_guide = guide(obs_seq, control_seq, Δt; test_consistency)
             end
             log_joint_time += @elapsed begin
                 lp_joint = log_joint(traj_seq)
             end
-            (w * sum(lp_guide) - sum(lp_joint)) / batch_size
+            @smart_assert size(lp_guide) == (1, batch_size)
+            @smart_assert size(lp_joint) == (1, batch_size)
+            (w * sum(lp_guide) - sum(lp_joint)) / (batch_size * T)
         end
-        ps = Flux.params(guide)
-        step == 1 && loss()  # just for testing
-        (; val, grad) = Flux.withgradient(loss, ps) # compute gradient
+        step == 1 && loss(; test_consistency=true)  # just for testing
+        (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
         elbo = -val
         if isfinite(elbo)
-            Flux.update!(optimizer, ps, grad) # update parameters
+            Flux.update!(optimizer, all_ps, grad) # update parameters
+            for p in reg_ps
+                p .-= weight_decay * p
+            end
         else
             @warn "elbo is not finite: $elbo, skip a gradient step."
         end
@@ -618,7 +655,7 @@ function logpdf_normal(μ, σ, x)
     a = log(T(2π))
     vs = @. -(abs2((x - μ) / σ) + a) / 2 - log(σ)
     if vs isa AbsMat
-        sum(vs; dims=1)
+        sum(vs; dims=1)::AbsMat
     else
         vs
     end
@@ -641,3 +678,36 @@ function sample_normal(rng::Random.AbstractRNG, μ, σ)
 end
 
 sample_normal((μ, σ)) = sample_normal(Random.GLOBAL_RNG, μ, σ)
+
+"""
+Return an iterator of trainable parameters that require regularization.
+You can also wrap an array `x` inside a [`Trainale`](@ref), which would allow you 
+to specify whether `x` needs regularization.
+"""
+regular_params(layer::Union{VIGuide,FluxLayer,Chain,SkipConnection}) =
+    Iterators.flatten(map(regular_params, Flux.trainable(layer)))
+
+regular_params(layer::Dense) = (layer.weight,)
+
+regular_params(layer::Flux.GRUCell) = (layer.Wi, layer.Wh)
+
+regular_params(::Union{BatchedMotionSketch,Function}) = tuple()
+
+"""
+A wrapper over a trainalbe array parameter that carries the information about whether it 
+requires regularization.
+"""
+struct Trainable{regular, M<:AbstractArray}
+    is_regular::Val{regular}
+    array::M
+end
+Trainable(regular::Bool, a::AbstractArray) = Trainable(Val(regular), a)
+
+Flux.@functor Trainable
+
+Base.show(io::IO, x::Trainable{regular}) where regular = begin
+    print(io, "Trainable($(regular), $(x.array))")
+end
+
+regular_params(layer::Trainable{true}) = (layer.array,)
+regular_params(layer::Trainable{false}) = tuple()

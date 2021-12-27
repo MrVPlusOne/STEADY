@@ -35,7 +35,6 @@ size(landmarks_tensor)
 linfo = SEDL.LandmarkInfo(; landmarks)
 sce = SEDL.HovercraftScenario(linfo)
 
-n_trajs = 20
 x0_batch = SEDL.BatchTuple(
     tconf,
     [
@@ -44,7 +43,7 @@ x0_batch = SEDL.BatchTuple(
             vel=[0.25 + 0.3randn(), 0.1 + 0.2randn()],
             θ=[π / 5 + π * randn()],
             ω=[π / 50 + 0.1π * randn()],
-        ) for _ in 1:n_trajs
+        ) for _ in 1:1
     ],
 )
 
@@ -56,8 +55,9 @@ true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
 sketch = SEDL.batched_sketch(sce)
 motion_model = SEDL.BatchedMotionModel(tconf, sketch, SEDL.batched_core(sce, true_params))
 
-obs_model =
-    state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, linfo.σ_bearing))
+# obs_model =
+#     state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, linfo.σ_bearing))
+obs_model = state -> SEDL.gaussian_obs_model(state, (pos=1.0, vel=1.0, θ=1.0, ω=1.0))
 
 controller = let scontroller = SEDL.simulation_controller(sce)
     (args...) -> begin
@@ -67,6 +67,10 @@ controller = let scontroller = SEDL.simulation_controller(sce)
 end
 
 sim_en = SEDL.simulate_trajectory(times, x0_batch, (; motion_model, obs_model), controller)
+repeat_factor = 128
+sim_en = map(sim_en) do seq
+    map(b -> repeat(b, repeat_factor), seq)
+end
 
 let
     first_states = [Flux.cpu(b[1].val) for b in sim_en.states]
@@ -88,13 +92,16 @@ log_joint =
     let u_seq = sim_en.controls, obs_seq = sim_en.observations, x1_truth = sim_en.states[1]
         x_seq -> (
             sum(
-                map((x, y) -> SEDL.logpdf_normal(x, 1.0f0, y), x1_truth.val, x_seq[1].val),
+                map(x1_truth.val, x_seq[1].val) do x, y
+                    SEDL.logpdf_normal(x, 1.0f0, y)
+                end,
             ) +
             SEDL.transition_logp(motion_model, x_seq, u_seq, Δt) +
             SEDL.observation_logp(obs_model, x_seq, obs_seq)
         )
     end
-adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
+# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
+adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.ADAM(1e-4))
 save_dir = SEDL.data_dir(savename("test_vi", (; h_dim); connector="-"))
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
 
@@ -105,6 +112,7 @@ linear(from, to) = x -> from + (to - from) * x
 
 let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
     test_n_traj = 100
+    test_true_states = map(b -> b[1], sim_en.states)
     test_obs = map(b -> repeat(b[1], test_n_traj), sim_en.observations)
     test_controls = map(b -> repeat(b[1], test_n_traj), sim_en.controls)
     callback =
@@ -112,11 +120,13 @@ let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
             push!(elbo_history, r.elbo)
             if r.step % 50 == 1
                 test_trajs, _ = guide(test_obs, test_controls, Δt)
-                SEDL.plot_batched_series(
-                    times,
-                    SEDL.TensorConfig(false).(test_trajs);
-                    truth=SEDL.TensorConfig(false).(sim_en.states),
-                ) |> display
+                plt = SEDL.plot_batched_series(
+                    times, SEDL.TensorConfig(false).(test_trajs); truth=test_true_states
+                ) 
+                Base.with_logger(logger) do
+                    @info "training" posterior=plt
+                end
+                display(plt)
             end
             Base.with_logger(logger) do
                 @info "training" r.elbo r.batch_size r.annealing
@@ -147,3 +157,4 @@ let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
     display(train_result)
 end
 ##-----------------------------------------------------------
+plot(elbo_history[500:end], title="ELBO (training)") |> display

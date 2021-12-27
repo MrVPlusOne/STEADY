@@ -73,6 +73,23 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     )
 end
 
+function gaussian_obs_model(state::BatchTuple, σs::NamedTuple)
+    (; tconf, batch_size) = state
+    σs1 = map(tconf, σs)
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            y = map(state.val, σs1) do x, σ
+                x + σ .* Random.randn!(rng, zero(x))
+            end
+            BatchTuple(tconf, batch_size, y)
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            sum(map(logpdf_normal, state.val, σs1, obs.val))
+        end,
+    )
+end
+
 function batched_sketch_SE2()
     function state_to_input(state::BatchTuple, control::BatchTuple)
         local bs = common_batch_size(state.batch_size, control.batch_size)
@@ -97,8 +114,8 @@ function batched_sketch_SE2()
     function output_from_state(state::BatchTuple, next_state::BatchTuple, Δt)
         @smart_assert state.batch_size == next_state.batch_size
         local (; θ) = state.val
-        local derivatives = map(next_state.val, state.val) do x, x′
-            x′ - x / Δt
+        local derivatives = map(state.val, next_state.val) do x, x′
+            (x′ - x) / Δt
         end
         local acc, a_θ = derivatives.vel, derivatives.ω
         local loc_acc = rotate2d(-θ, acc)

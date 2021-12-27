@@ -196,6 +196,7 @@ function Logging.default_metafmt(level::Logging.LogLevel, _module, group, id, fi
     !isempty(suffix) && (suffix = "@ " * suffix)
     return color, prefix, suffix
 end
+@info "Changed the default @info format to always include src location."
 
 """
 Concat columns horizontally.
