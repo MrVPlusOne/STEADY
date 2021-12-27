@@ -43,11 +43,11 @@ x0_batch = SEDL.BatchTuple(
             vel=[0.25 + 0.3randn(), 0.1 + 0.2randn()],
             θ=[π / 5 + π * randn()],
             ω=[π / 50 + 0.1π * randn()],
-        ) for _ in 1:1
+        ) for _ in 1:128
     ],
 )
 
-Δt = 0.1
+Δt = tconf(0.1)
 times = 0:Δt:10
 obs_frames = 1:10:length(times)
 
@@ -67,10 +67,10 @@ controller = let scontroller = SEDL.simulation_controller(sce)
 end
 
 sim_en = SEDL.simulate_trajectory(times, x0_batch, (; motion_model, obs_model), controller)
-repeat_factor = 128
-sim_en = map(sim_en) do seq
-    map(b -> repeat(b, repeat_factor), seq)
-end
+# repeat_factor = 128
+# sim_en = map(sim_en) do seq
+#     map(b -> repeat(b, repeat_factor), seq)
+# end
 
 let
     first_states = [Flux.cpu(b[1].val) for b in sim_en.states]
@@ -86,14 +86,22 @@ SEDL.plot_batched_series(times, TensorConfig(false).(sim_en.states)) |> display
 # set up the VI model
 h_dim = 64
 y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
-guide = SEDL.mk_guide(; sketch, h_dim, y_dim) |> device
+guide = @time SEDL.mk_guide(;
+    sketch,
+    h_dim,
+    y_dim,
+    sample_states=(sim_en.states),
+    sample_observations=(sim_en.observations),
+    sample_controls=(sim_en.controls),
+    Δt,
+) |> device
 
 log_joint =
     let u_seq = sim_en.controls, obs_seq = sim_en.observations, x1_truth = sim_en.states[1]
         x_seq -> (
             sum(
                 map(x1_truth.val, x_seq[1].val) do x, y
-                    SEDL.logpdf_normal(x, 1.0f0, y)
+                    SEDL.logpdf_normal(x, 0.01f0, y)
                 end,
             ) +
             SEDL.transition_logp(motion_model, x_seq, u_seq, Δt) +
@@ -101,32 +109,54 @@ log_joint =
         )
     end
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
-adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.ADAM(1e-4))
+adam = Flux.ADAM(1e-4)
 save_dir = SEDL.data_dir(savename("test_vi", (; h_dim); connector="-"))
+if isdir(save_dir)
+    @warn "removing old data at $save_dir..."
+    rm(save_dir, recursive=true)
+end
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
 
 elbo_history = []
+let (prior_trajs, _) = guide(sim_en.observations, sim_en.controls, Δt)
+    SEDL.plot_batched_series(
+        times, SEDL.TensorConfig(false).(prior_trajs); title="Guide prior"
+    ) |> display
+end
 ##-----------------------------------------------------------
 # train the guide
 linear(from, to) = x -> from + (to - from) * x
 
-let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
+total_steps = 5000
+let n_steps = is_quick_test ? 2 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
     test_n_traj = 100
-    test_true_states = map(b -> b[1], sim_en.states)
-    test_obs = map(b -> repeat(b[1], test_n_traj), sim_en.observations)
-    test_controls = map(b -> repeat(b[1], test_n_traj), sim_en.controls)
+    test_data = map([1, 10]) do i
+        (
+            id=i,
+            test_true_states=map(b -> b[i], sim_en.states),
+            test_obs=map(b -> repeat(b[i], test_n_traj), sim_en.observations),
+            test_controls=map(b -> repeat(b[i], test_n_traj), sim_en.controls),
+        )
+    end
+
     callback =
         r -> begin
             push!(elbo_history, r.elbo)
-            if r.step % 50 == 1
-                test_trajs, _ = guide(test_obs, test_controls, Δt)
-                plt = SEDL.plot_batched_series(
-                    times, SEDL.TensorConfig(false).(test_trajs); truth=test_true_states
-                ) 
-                Base.with_logger(logger) do
-                    @info "training" posterior=plt
+            if r.step % 100 == 1
+                foreach(test_data) do (; id, test_true_states, test_obs, test_controls)
+                    test_trajs, _ = guide(test_obs, test_controls, Δt)
+                    plt = SEDL.plot_batched_series(
+                        times,
+                        SEDL.TensorConfig(false).(test_trajs);
+                        truth=test_true_states,
+                        title="Trajectory $id (iter $(r.step))",
+                    )
+                    Base.with_logger(logger) do
+                        kv = ["traj $id" => plt]
+                        @info "training" kv...
+                    end
+                    display(plt)
                 end
-                display(plt)
             end
             Base.with_logger(logger) do
                 @info "training" r.elbo r.batch_size r.annealing
@@ -138,6 +168,7 @@ let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
                     (:step, r.step),
                     (:batch_size, r.batch_size),
                     (:annealing, r.annealing),
+                    (:learning_rate, r.lr),
                 ],
             )
         end
@@ -153,8 +184,11 @@ let n_steps = is_quick_test ? 2 : 2001, prog = Progress(n_steps)
         anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 3step / n_steps)),
         callback,
         n_samples_f=step -> ceil(Int, linear(64, 256)(step / n_steps)),
+        lr_schedule=let β = 100^2 / total_steps
+            step -> 2e-3 / sqrt(β * step)
+        end,
     )
     display(train_result)
 end
 ##-----------------------------------------------------------
-plot(elbo_history[500:end], title="ELBO (training)") |> display
+plot(elbo_history[500:end]; title="ELBO (training)") |> display

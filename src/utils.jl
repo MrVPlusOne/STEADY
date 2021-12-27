@@ -137,7 +137,7 @@ end
 
 ##-----------------------------------------------------------
 # types
-export Optional, AbsVec, AbsMat
+export Optional, AbsVec, AbsMat, NormalTransform
 
 const Optional{X} = Union{X,Nothing}
 const AbsVec = AbstractVector
@@ -155,6 +155,28 @@ struct Right{Y} <: Either
     value::Y
 end
 
+@kwdef struct NormalTransform{T}
+    shift::T
+    scale::T
+end
+
+function NormalTransform(data::AbsVec)
+    (; μ, σ) = normalize_transform(data)
+    NormalTransform(μ, σ)
+end
+
+(trans::NormalTransform{<:AbsVec})(x::AbsVec) = x .* trans.scale .+ trans.shift
+Base.inv(trans::NormalTransform{<:AbsVec}) =
+    (x::AbsVec) -> (x .- trans.shift) ./ trans.scale
+
+(trans::NormalTransform{<:NamedTuple})(xs::NamedTuple) =
+    map(trans.shift, trans.scale, xs) do shift, scale, x
+        x .* scale .+ shift
+    end
+Base.inv(trans::NormalTransform{<:NamedTuple}) =
+    (xs::NamedTuple) -> map(trans.shift, trans.scale, xs) do shift, scale, x
+        (x .- shift) ./ scale
+    end
 ##-----------------------------------------------------------
 # utility functions
 export hcatreduce, vcatreduce
@@ -166,7 +188,7 @@ count_len(iters) = count(_ -> true, iters)
 get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
 get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
 
-function normalize_transform(xs::AbstractVector)
+function normalize_transform(xs)
     σ = std(xs)
     μ = mean(xs)
     σ = map(σ) do s

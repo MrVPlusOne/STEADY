@@ -1,6 +1,6 @@
 # posterior smoother based on variational inference
 using Flux: Flux
-using Flux: Dense, Chain, LayerNorm, SkipConnection
+using Flux: Dense, Chain, LayerNorm, SkipConnection, BatchNorm
 using Flux: @functor, softplus
 using Random
 using TimerOutputs
@@ -512,12 +512,59 @@ function (guide::VIGuide)(
     (; trajectory, logp)
 end
 
-function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
+function compute_normal_transforms(
+    sketch::BatchedMotionSketch,
+    sample_states::Vector{<:BatchTuple},
+    sample_controls::Vector{<:BatchTuple},
+    sample_observations::Vector{<:BatchTuple},
+    Δt::Real,
+)
+    function from_batches(batches)
+        template = batches[1]
+        ks = keys(template.val)
+        @unzip_named (shifts, :shift), (scales, :scale) = map(ks) do k
+            data = map(batches) do b
+                eachcol(b.val[k])
+            end |> Iterators.flatten |> collect
+            NormalTransform(data)
+        end
+        NormalTransform(NamedTuple{ks}(shifts), NamedTuple{ks}(scales))
+    end
+
+    state_trans = from_batches(sample_states)
+    control_trans = from_batches(sample_controls)
+    obs_trans = from_batches(sample_observations)
+    core_in_trans = map(sample_states, sample_controls) do x, u
+        sketch.state_to_input(x, u)
+    end |> from_batches
+
+    core_out_trans =
+        map(sample_states[1:(end - 1)], sample_states[2:end]) do x, x1
+            sketch.output_from_state(x, x1, Δt)
+        end |> from_batches
+
+    (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans)
+end
+
+function mk_guide(;
+    sketch::BatchedMotionSketch,
+    h_dim,
+    y_dim,
+    sample_states::Vector{<:BatchTuple},
+    sample_controls::Vector{<:BatchTuple},
+    sample_observations::Vector{<:BatchTuple},
+    Δt::Real,
+    min_σ=1.0f-3,
+)
     mlp(n_in, n_out, out_activation=identity) = Chain(
         SkipConnection(Dense(n_in, h_dim, tanh), vcat),
         Dense(h_dim + n_in, n_out, out_activation),
     )
     # mlp(n_in, n_out, out_activation=identity) = (Dense(n_in, n_out, out_activation))
+
+    (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans) = compute_normal_transforms(
+        sketch, sample_states, sample_controls, sample_observations, Δt
+    )
 
     core_in_dim = sum(sketch.input_vars)
     core_out_dim = sum(sketch.output_vars)
@@ -538,7 +585,7 @@ function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
         (future::BatchTuple) -> begin
             local input = future.val.future_info
             local x_enc, logp = sample_normal((center(input), scale(input)))
-            local x_new = split_components(x_enc, sketch.state_vars)
+            local x_new = state_trans(split_components(x_enc, sketch.state_vars))
             BatchTuple(future.tconf, future.batch_size, x_new), logp
         end
     end
@@ -552,11 +599,21 @@ function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
     ) do (; center, scale)
         (core_input::BatchTuple, future::BatchTuple) -> begin
             local batch_size = common_batch_size(core_input, future)
-            local input = vcat_bc(core_input.val..., future.val...; batch_size)
-            local μs, σs = center(input), scale(input)
-            map((; μs, σs)) do data
-                tconf = core_input.tconf
-                BatchTuple(tconf, batch_size, split_components(data, sketch.output_vars))
+            local core_val = inv(core_in_trans)(core_input.val)
+            local input = vcat_bc(core_val..., future.val...; batch_size)
+            local μ_data, σ_data = center(input), scale(input)
+            local μs = map(
+                (x, y) -> x .+ y,
+                split_components(μ_data, sketch.output_vars),
+                core_out_trans.shift,
+            )
+            local σs = map(
+                (x, y) -> x .+ y,
+                split_components(σ_data, sketch.output_vars),
+                core_out_trans.scale,
+            )
+            map((; μs, σs)) do nt
+                BatchTuple(core_input.tconf, batch_size, nt)
             end
         end
     end
@@ -566,8 +623,8 @@ function mk_guide(; sketch::BatchedMotionSketch, h_dim, y_dim, min_σ=1.0f-3)
         (u_encoder=mlp(u_dim, y_enc_dim, tanh), y_encoder=mlp(y_dim, u_enc_dim, tanh)),
     ) do (; u_encoder, y_encoder)
         (obs::BatchTuple, control::BatchTuple) -> begin
-            local y_enc = y_encoder(vcat(obs.val...))
-            local u_enc = u_encoder(vcat(control.val...))
+            local y_enc = y_encoder(vcat(inv(obs_trans)(obs.val)...))
+            local u_enc = u_encoder(vcat(inv(control_trans)(control.val)...))
             vcat_bc(y_enc, u_enc; batch_size=common_batch_size(obs, control))
         end
     end
@@ -607,8 +664,9 @@ function train_guide!(
     n_steps::Int,
     n_samples_f::Function,
     anneal_schedule::Function=step -> 1.0,
+    lr_schedule=nothing,
     callback::Function=_ -> nothing,
-    weight_decay=1f-4,
+    weight_decay=1.0f-4,
 )
     guide_time = log_joint_time = 0.0
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
@@ -637,6 +695,9 @@ function train_guide!(
         (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
         elbo = -val
         if isfinite(elbo)
+            if lr_schedule !== nothing
+                optimizer.eta = lr_schedule(step)
+            end
             Flux.update!(optimizer, all_ps, grad) # update parameters
             for p in reg_ps
                 p .-= weight_decay * p
@@ -644,7 +705,7 @@ function train_guide!(
         else
             @warn "elbo is not finite: $elbo, skip a gradient step."
         end
-        callback((; step, elbo, batch_size, annealing=w))
+        callback((; step, elbo, batch_size, annealing=w, lr=optimizer.eta))
     end
     time_stats = (; guide_time, log_joint_time)
     time_stats
@@ -691,13 +752,16 @@ regular_params(layer::Dense) = (layer.weight,)
 
 regular_params(layer::Flux.GRUCell) = (layer.Wi, layer.Wh)
 
-regular_params(::Union{BatchedMotionSketch,Function}) = tuple()
+regular_params(::Union{BatchedMotionSketch,Function,BatchNorm}) = tuple()
+
+regular_params(tp::Union{Tuple,NamedTuple}) = Iterators.flatten(map(regular_params, tp))
+
 
 """
 A wrapper over a trainalbe array parameter that carries the information about whether it 
 requires regularization.
 """
-struct Trainable{regular, M<:AbstractArray}
+struct Trainable{regular,M<:AbstractArray}
     is_regular::Val{regular}
     array::M
 end
@@ -705,7 +769,7 @@ Trainable(regular::Bool, a::AbstractArray) = Trainable(Val(regular), a)
 
 Flux.@functor Trainable
 
-Base.show(io::IO, x::Trainable{regular}) where regular = begin
+Base.show(io::IO, x::Trainable{regular}) where {regular} = begin
     print(io, "Trainable($(regular), $(x.array))")
 end
 

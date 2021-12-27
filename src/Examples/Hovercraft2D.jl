@@ -237,7 +237,7 @@ function simulation_controller(sce::HovercraftScenario; noise=0.5)
     if rand() < 0.6
         ul_f, ur_f = ur_f, ul_f
     end
-    (s, obs, t::Float64) -> begin
+    (s, obs, t::Real) -> begin
         (ul=ul_f(t), ur=ur_f(t))
     end
 end
