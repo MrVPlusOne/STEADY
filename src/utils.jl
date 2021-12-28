@@ -14,27 +14,36 @@ using Logging: Logging
 export @unzip, @unzip_named, @smart_assert, @use_short_show
 
 """
-Like @assert, but try to print out additional information about the arguments.
+Like @assert, but try to also print out additional information about the arguments.
+Note that each argument is only evaluated once, so there is no extra overhead compared 
+to a normal assert.
 ## Examples
 ```julia
-julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+julia> let a=4, b=2; @smart_assert(a < b, "Some extra info.") end
 
-ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+ERROR: LoadError: AssertionError: Some extra info. | Caused by: Condition `a < b` failed due to:
+        `a` evaluates to 4
+        `b` evaluates to 2
 Stacktrace:
 ...
 ```
 """
 macro smart_assert(ex, msg=nothing)
     has_msg = msg !== nothing
-    if @capture(ex, op_(lhs_, rhs_)) || @capture(ex, (lhs_ <: rhs_))
+    if @capture(ex, op_(args__)) && !any(a -> a isa Expr && a.head == :kw, args)
         ex_q = QuoteNode(ex)
-        lhs_q = QuoteNode(lhs)
-        rhs_q = QuoteNode(rhs)
+        args_q = Expr(:tuple, QuoteNode.(args)...)
+        arg_names = [gensym("arg$i") for i in 1:length(args)]
+        f_name = gensym("f")
+        call_ex = Expr(:call, f_name, arg_names...)
+        assigns = Expr(:block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...)
+        args_tuple = Expr(:tuple, arg_names...)
         quote
-            lv = $(esc(lhs))
-            rv = $(esc(rhs))
-            if !$(esc(ex))
-                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+            $assigns
+            $f_name = $(esc(op))
+            if !$(call_ex)
+                eval_string = join(["\t`$ex` evaluates to $val" for (ex, val) in zip($args_q, $args_tuple)], "\n")
+                reason_text = "Condition `$($ex_q)` failed due to:\n" * eval_string
                 if $has_msg
                     msg_v = $(esc(msg))
                     throw(AssertionError("$msg_v | Caused by: $reason_text"))
