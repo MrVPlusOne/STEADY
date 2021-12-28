@@ -4,6 +4,7 @@ authors = ["Jiayi Wei <wjydzh1@gmail.com>"]
 version = "0.2.0"
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
 AutoHashEquals = "15f4f7f2-30c1-5605-9d31-71845cf9641f"
 BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"

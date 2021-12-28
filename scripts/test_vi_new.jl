@@ -9,6 +9,7 @@ using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 using TensorBoardLogger: TBLogger
 using ProgressMeter
+using Serialization: serialize, deserialize
 
 !true && begin
     include("../src/SEDL.jl")  # reloads the module
@@ -23,6 +24,7 @@ if !@isdefined is_quick_test
 end
 is_quick_test && @info "Quick testing VI..."
 
+should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
 use_gpu = true
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 device = use_gpu ? Flux.gpu : Flux.cpu
@@ -85,22 +87,27 @@ end
 
 SEDL.plot_batched_series(times, TensorConfig(false).(sim_en.states)) |> display
 ##-----------------------------------------------------------
-# set up the VI model
+# set up the NN models
 h_dim = 128
 y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
-guide = @time SEDL.mk_guide(;
-    sketch,
-    h_dim,
-    y_dim,
-    sample_states=(sim_en.states),
-    sample_observations=(sim_en.observations),
-    sample_controls=(sim_en.controls),
-    Δt,
-) |> device
+normal_transforms = SEDL.compute_normal_transforms(
+    sketch, sim_en.states, sim_en.controls, sim_en.observations, Δt
+)
+guide = @time SEDL.mk_guide(; sketch, h_dim, y_dim, normal_transforms) |> device
+
+vi_motion_model = if should_train_dynamics
+    nn_motion_model = SEDL.mk_nn_motion_model(; sketch, tconf, h_dim, normal_transforms)
+    @smart_assert !isempty(Flux.params(nn_motion_model))
+    nn_motion_model
+else
+    motion_model
+end
 
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
-save_dir = SEDL.data_dir(savename("test_vi", (; h_dim); connector="-"))
+save_dir = SEDL.data_dir(
+    savename("test_vi", (; h_dim, should_train_dynamics); connector="-")
+)
 if isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
@@ -133,7 +140,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
                 test_x0_batch, test_sim.observations, test_sim.controls, Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
-                motion_model, test_trajs, test_sim.controls, Δt
+                vi_motion_model, test_trajs, test_sim.controls, Δt
             )
             test_lp_obs = SEDL.observation_logp(
                 obs_model, test_trajs, test_sim.observations
@@ -186,7 +193,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
     @info "Training the guide..."
     train_result = @time SEDL.train_guide!(
         guide,
-        motion_model,
+        vi_motion_model,
         obs_model,
         sim_en.states[1],
         sim_en.observations,
@@ -204,3 +211,11 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
 end
 ##-----------------------------------------------------------
 plot(elbo_history[500:end]; title="ELBO (training)") |> display
+serialize(
+    joinpath(save_dir, "models.serial"),
+    (vi_motion_model=Flux.cpu(vi_motion_model), guide=Flux.cpu(guide)),
+)
+deserialize(joinpath(save_dir, "models.serial"))
+
+run(`ls -lh $save_dir/`)
+##-----------------------------------------------------------

@@ -6,6 +6,7 @@ using Random
 using TimerOutputs
 using Zygote: Zygote
 using Setfield
+using Adapt: Adapt
 ##-----------------------------------------------------------
 
 export TensorConfig, tensor_type, check_type
@@ -37,6 +38,12 @@ end
 @inline function tensor_type(::TensorConfig{on_gpu,ftype}) where {on_gpu,ftype}
     (on_gpu ? CUDA.CuArray : Array){ftype}
 end
+
+Adapt.adapt_storage(::Flux.FluxCPUAdaptor, tf::TensorConfig{true,ftype}) where {ftype} =
+    TensorConfig{false,ftype}()
+
+Adapt.adapt_storage(::Flux.FluxCUDAAdaptor, tf::TensorConfig{false,ftype}) where {ftype} =
+    TensorConfig{true,ftype}()
 
 (tconf::TensorConfig{on_gpu,ftype})(v::Real) where {on_gpu,ftype} = convert(ftype, v)
 (tconf::TensorConfig{on_gpu,ftype})(a::AbstractArray{<:Real}) where {on_gpu,ftype} =
@@ -181,7 +188,7 @@ function inflate_batch(batch::BatchTuple)
     bs = batch.batch_size
     @set batch.val = map(batch.val) do v
         if size(v)[end] == 1
-            repeat(v, ntuple(Returns(1), ndims(v)-1)..., bs)
+            repeat(v, ntuple(Returns(1), ndims(v) - 1)..., bs)
         else
             @smart_assert size(v)[end] == bs
             v
@@ -383,6 +390,7 @@ See also: [`transition_logp`](@ref), [`observation_logp`](@ref)
     core::Core
 end
 @use_short_show BatchedMotionModel
+Flux.@functor BatchedMotionModel
 
 Flux.trainable(bmm::BatchedMotionModel) = Flux.trainable(bmm.core)
 
@@ -426,8 +434,8 @@ function (motion_model::BatchedMotionModel{TC})(
         (lp2, out_batch2) = compute_logp(x1)
         check_approx(out_batch1, out_batch2)
         @smart_assert(
-            isapprox(lp1, lp2, rtol=0.001),
-            "relative diff: $(norm(lp1-lp2)/max(norm(lp1),norm(lp2)))"
+            isapprox(sum(lp1), sum(lp2), rtol=1e-3, atol=1e-2),
+            "abs diff: $(lp1-lp2)\nrelative diff: $(norm(lp1-lp2)/max(norm(lp1),norm(lp2)))"
         )
     end
 
@@ -453,7 +461,7 @@ end
 
 ##-----------------------------------------------------------
 # VI Guide
-export VIGuide, mk_guide, train_guide!
+export VIGuide, mk_guide, train_guide!, mk_nn_motion_model
 """
     guide(obs_seq, control_seq, Δt) -> (; trajectory, logp)
 
@@ -548,32 +556,25 @@ function compute_normal_transforms(
     (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans)
 end
 
-function mk_guide(;
-    sketch::BatchedMotionSketch,
-    h_dim,
-    y_dim,
-    sample_states::Vector{<:BatchTuple},
-    sample_controls::Vector{<:BatchTuple},
-    sample_observations::Vector{<:BatchTuple},
-    Δt::Real,
-    min_σ=1.0f-3,
-)
-    mlp(n_in, n_out, out_activation=identity) =
-        FluxLayer(
-            Val(:mlp),
-            (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 * 3 + n_in, n_out)),
-        ) do (; layer1, layer2)
-            x -> begin
-                local y1 = layer1(x)
-                local a1 = vcat(x, sin.(y1), tanh.(y1), relu.(y1))
-                out_activation.(layer2(a1))
-            end
+mlp_with_skip(n_in, n_out, out_activation=identity; h_dim) =
+    FluxLayer(
+        Val(:mlp),
+        (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 * 3 + n_in, n_out)),
+    ) do (; layer1, layer2)
+        x -> begin
+            local y1 = layer1(x)
+            local a1 = vcat(x, sin.(y1), tanh.(y1), relu.(y1))
+            out_activation.(layer2(a1))
         end
-    # mlp(n_in, n_out, out_activation=identity) = (Dense(n_in, n_out, out_activation))
+    end
 
-    (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans) = compute_normal_transforms(
-        sketch, sample_states, sample_controls, sample_observations, Δt
-    )
+function mk_guide(;
+    sketch::BatchedMotionSketch, h_dim, y_dim, normal_transforms, min_σ=1.0f-3
+)
+    (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans) =
+        normal_transforms
+
+    mlp(args...) = mlp_with_skip(args...; h_dim)
 
     core_in_dim = sum(sketch.input_vars)
     core_out_dim = sum(sketch.output_vars)
@@ -617,12 +618,12 @@ function mk_guide(;
             local input = vcat_bc(core_val..., x_val..., future.val...; batch_size)
             local μ_data, σ_data = center(input), scale(input)
             local μs = map(
-                (x, y) -> x .+ y,
+                (x, sh) -> x .+ sh,
                 split_components(μ_data, sketch.output_vars),
                 core_out_trans.shift,
             )
             local σs = map(
-                (x, y) -> x .+ y,
+                (x, s) -> x .* s,
                 split_components(σ_data, sketch.output_vars),
                 core_out_trans.scale,
             )
@@ -651,6 +652,47 @@ function mk_guide(;
         rnn_h0=Trainable(false, 0.01randn(Float32, rnn_dim)),
         obs_encoder,
     )
+end
+
+function mk_nn_motion_model(;
+    sketch::BatchedMotionSketch, tconf, h_dim, normal_transforms, min_σ=1.0f-3
+)
+    mlp(args...) = mlp_with_skip(args...; h_dim)
+
+    core_in_dim = sum(sketch.input_vars)
+    core_out_dim = sum(sketch.output_vars)
+
+    (; core_in_trans, core_out_trans) = normal_transforms
+
+    core =
+        FluxLayer(
+            Val(:nn_motion_model),
+            (
+                center=mlp(core_in_dim, core_out_dim),
+                scale=mlp(core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ)),
+            ),
+        ) do (; center, scale)
+            (core_input::BatchTuple) -> begin
+                local (; batch_size) = core_input
+                local core_val = inv(core_in_trans)(core_input.val)
+                local input = vcat_bc(core_val...; batch_size)
+                local μ_data, σ_data = center(input), scale(input)
+                local μs = map(
+                    (x, sh) -> x .+ sh,
+                    split_components(μ_data, sketch.output_vars),
+                    core_out_trans.shift,
+                )
+                local σs = map(
+                    (x, s) -> x .* s,
+                    split_components(σ_data, sketch.output_vars),
+                    core_out_trans.scale,
+                )
+                map((; μs, σs)) do nt
+                    BatchTuple(core_input.tconf, batch_size, nt)
+                end
+            end
+        end |> (tconf.on_gpu ? Flux.gpu : Flux.cpu)
+    BatchedMotionModel(tconf, sketch, core)
 end
 
 """
@@ -688,6 +730,7 @@ function train_guide!(
     T = length(obs_seq)
 
     all_ps = Flux.params((guide, motion_model))
+    @info "total number of param tensors: $(length(all_ps))"
     reg_ps = Flux.Params(collect(regular_params(guide)))
 
     for step in 1:n_steps
@@ -792,7 +835,7 @@ Trainable(regular::Bool, a::AbstractArray) = Trainable(Val(regular), a)
 Flux.@functor Trainable
 
 Base.show(io::IO, x::Trainable{regular}) where {regular} = begin
-    print(io, "Trainable($(regular), $(x.array))")
+    print(io, "Trainable(regular=$(regular), $(summary(x.array)))")
 end
 
 regular_params(layer::Trainable{true}) = (layer.array,)
