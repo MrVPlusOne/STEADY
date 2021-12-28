@@ -181,7 +181,7 @@ function inflate_batch(batch::BatchTuple)
     bs = batch.batch_size
     @set batch.val = map(batch.val) do v
         if size(v)[end] == 1
-            repeat(v, bs)
+            repeat(v, ntuple(Returns(1), ndims(v)-1)..., bs)
         else
             @smart_assert size(v)[end] == bs
             v
@@ -464,7 +464,7 @@ to train the guide using variational inference.
     sketch::SK
     "x0_sampler(future_batch_1) -> (x0_batch, logp)"
     x0_sampler::X0S
-    "guide_core(core_in_batch, future_batch) -> core_out_batch"
+    "guide_core(core_in_batch, x_batch, future_batch) -> core_out_batch"
     guide_core::GC
     rnn::RNN
     rnn_h0::H0
@@ -475,6 +475,7 @@ Flux.@functor VIGuide
 @use_short_show VIGuide
 
 function (guide::VIGuide)(
+    x0::BatchTuple{TC},
     obs_seq::TimeSeries{<:BatchTuple{TC}},
     control_seq::TimeSeries{<:BatchTuple{TC}},
     Δt::Real;
@@ -496,15 +497,16 @@ function (guide::VIGuide)(
             end for t in length(obs_seq):-1:1
         ] |> reverse
 
-    future1 = inflate_batch(future_info[1])
-    x0, logp = x0_sampler(future1)
+    # future1 = inflate_batch(future_info[1])
+    logp = 0
+    x0 = inflate_batch(x0)
     x::BatchTuple{TC} = x0
     trans = map(2:length(future_info)) do t
-        core = inputs -> guide.guide_core(inputs::BatchTuple, future_info[t])
+        core = inputs -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
         mm_t = BatchedMotionModel(tconf, guide.sketch, core)
         x_dist = mm_t(x, control_seq[t - 1], Δt; test_consistency)
         x = rand(rng, x_dist)
-        logp += logpdf(x_dist, x)
+        logp = logp .+ logpdf(x_dist, x)
         x
     end
     trajectory = vcat([x0], trans)
@@ -556,10 +558,17 @@ function mk_guide(;
     Δt::Real,
     min_σ=1.0f-3,
 )
-    mlp(n_in, n_out, out_activation=identity) = Chain(
-        SkipConnection(Dense(n_in, h_dim, tanh), vcat),
-        Dense(h_dim + n_in, n_out, out_activation),
-    )
+    mlp(n_in, n_out, out_activation=identity) =
+        FluxLayer(
+            Val(:mlp),
+            (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 * 3 + n_in, n_out)),
+        ) do (; layer1, layer2)
+            x -> begin
+                local y1 = layer1(x)
+                local a1 = vcat(x, sin.(y1), tanh.(y1), relu.(y1))
+                out_activation.(layer2(a1))
+            end
+        end
     # mlp(n_in, n_out, out_activation=identity) = (Dense(n_in, n_out, out_activation))
 
     (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans) = compute_normal_transforms(
@@ -593,14 +602,19 @@ function mk_guide(;
     guide_core = FluxLayer(
         Val(:guide_core),
         (
-            center=mlp(core_in_dim + rnn_dim, core_out_dim),
-            scale=mlp(core_in_dim + rnn_dim, core_out_dim, x -> max.(softplus.(x), min_σ)),
+            center=mlp(core_in_dim + x_dim + rnn_dim, core_out_dim),
+            scale=mlp(
+                core_in_dim + x_dim + rnn_dim,
+                core_out_dim,
+                x -> max.(softplus.(x), min_σ),
+            ),
         ),
     ) do (; center, scale)
-        (core_input::BatchTuple, future::BatchTuple) -> begin
-            local batch_size = common_batch_size(core_input, future)
+        (core_input::BatchTuple, state::BatchTuple, future::BatchTuple) -> begin
+            local batch_size = common_batch_size(core_input, state, future)
             local core_val = inv(core_in_trans)(core_input.val)
-            local input = vcat_bc(core_val..., future.val...; batch_size)
+            local x_val = inv(state_trans)(state.val)
+            local input = vcat_bc(core_val..., x_val..., future.val...; batch_size)
             local μ_data, σ_data = center(input), scale(input)
             local μs = map(
                 (x, y) -> x .+ y,
@@ -620,7 +634,7 @@ function mk_guide(;
 
     obs_encoder = FluxLayer(
         Val(:obs_encoder),
-        (u_encoder=mlp(u_dim, y_enc_dim, tanh), y_encoder=mlp(y_dim, u_enc_dim, tanh)),
+        (u_encoder=mlp(u_dim, y_enc_dim), y_encoder=mlp(y_dim, u_enc_dim)),
     ) do (; u_encoder, y_encoder)
         (obs::BatchTuple, control::BatchTuple) -> begin
             local y_enc = y_encoder(vcat(inv(obs_trans)(obs.val)...))
@@ -656,45 +670,53 @@ end
 
 function train_guide!(
     guide::VIGuide,
-    log_joint,
+    motion_model,
+    obs_model,
+    x0_batch,
     obs_seq,
     control_seq,
     Δt;
     optimizer,
     n_steps::Int,
-    n_samples_f::Function,
     anneal_schedule::Function=step -> 1.0,
     lr_schedule=nothing,
     callback::Function=_ -> nothing,
     weight_decay=1.0f-4,
 )
-    guide_time = log_joint_time = 0.0
+    guide_time = dynamics_time = obs_time = 0.0
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
     T = length(obs_seq)
 
-    all_ps = Flux.params(guide)
+    all_ps = Flux.params((guide, motion_model))
     reg_ps = Flux.Params(collect(regular_params(guide)))
 
     for step in 1:n_steps
         # batch_size = n_samples_f(step)::Int  fixme
         w = anneal_schedule(step)
         @smart_assert 0 ≤ w ≤ 1
+        elbo = Ref{Any}(missing)
 
         loss(; test_consistency=false) = begin
             guide_time += @elapsed begin
-                traj_seq, lp_guide = guide(obs_seq, control_seq, Δt; test_consistency)
+                traj_seq, lp_guide = guide(x0_batch, obs_seq, control_seq, Δt; test_consistency)
             end
-            log_joint_time += @elapsed begin
-                lp_joint = log_joint(traj_seq)
+            dynamics_time += @elapsed begin
+                lp_dynamics = transition_logp(motion_model, traj_seq, control_seq, Δt)
+            end
+            obs_time += @elapsed begin
+                lp_obs = observation_logp(obs_model, traj_seq, obs_seq)
             end
             @smart_assert size(lp_guide) == (1, batch_size)
-            @smart_assert size(lp_joint) == (1, batch_size)
-            (w * sum(lp_guide) - sum(lp_joint)) / (batch_size * T)
+            @smart_assert size(lp_dynamics) == (1, batch_size)
+            @smart_assert size(lp_obs) == (1, batch_size)
+            obs_term = sum(lp_obs) / (batch_size * T)
+            transition_term = (sum(lp_dynamics) - sum(lp_guide)) / (batch_size * T)
+            elbo[] = obs_term + transition_term
+            -(obs_term + w * transition_term)
         end
         step == 1 && loss(; test_consistency=true)  # just for testing
         (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
-        elbo = -val
-        if isfinite(elbo)
+        if isfinite(val)
             if lr_schedule !== nothing
                 optimizer.eta = lr_schedule(step)
             end
@@ -705,9 +727,9 @@ function train_guide!(
         else
             @warn "elbo is not finite: $elbo, skip a gradient step."
         end
-        callback((; step, elbo, batch_size, annealing=w, lr=optimizer.eta))
+        callback((; step, loss=val, elbo=elbo[], batch_size, annealing=w, lr=optimizer.eta))
     end
-    time_stats = (; guide_time, log_joint_time)
+    time_stats = (; guide_time, dynamics_time, obs_time)
     time_stats
 end
 

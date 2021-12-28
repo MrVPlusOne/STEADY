@@ -35,16 +35,11 @@ size(landmarks_tensor)
 linfo = SEDL.LandmarkInfo(; landmarks)
 sce = SEDL.HovercraftScenario(linfo)
 
-x0_batch = SEDL.BatchTuple(
-    tconf,
-    [
-        (;
-            pos=[0.5, 1.0] + 2randn(2),
-            vel=[0.25 + 0.3randn(), 0.1 + 0.2randn()],
-            θ=[π / 5 + π * randn()],
-            ω=[π / 50 + 0.1π * randn()],
-        ) for _ in 1:128
-    ],
+sample_x0() = (;
+    pos=[0.5, 1.0] + 2randn(2),
+    vel=[0.25 + 0.3randn(), 0.1 + 0.2randn()],
+    θ=[π / 5 + π * randn()],
+    ω=[π / 50 + 0.1π * randn()],
 )
 
 Δt = tconf(0.1)
@@ -54,6 +49,7 @@ obs_frames = 1:10:length(times)
 true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
 sketch = SEDL.batched_sketch(sce)
 motion_model = SEDL.BatchedMotionModel(tconf, sketch, SEDL.batched_core(sce, true_params))
+@smart_assert isempty(Flux.params(motion_model))
 
 # obs_model =
 #     state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, linfo.σ_bearing))
@@ -66,7 +62,13 @@ controller = let scontroller = SEDL.simulation_controller(sce)
     end
 end
 
+x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
+test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
+
 sim_en = SEDL.simulate_trajectory(times, x0_batch, (; motion_model, obs_model), controller)
+test_sim = SEDL.simulate_trajectory(
+    times, test_x0_batch, (; motion_model, obs_model), controller
+)
 # repeat_factor = 128
 # sim_en = map(sim_en) do seq
 #     map(b -> repeat(b, repeat_factor), seq)
@@ -84,7 +86,7 @@ end
 SEDL.plot_batched_series(times, TensorConfig(false).(sim_en.states)) |> display
 ##-----------------------------------------------------------
 # set up the VI model
-h_dim = 64
+h_dim = 128
 y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
 guide = @time SEDL.mk_guide(;
     sketch,
@@ -96,29 +98,17 @@ guide = @time SEDL.mk_guide(;
     Δt,
 ) |> device
 
-log_joint =
-    let u_seq = sim_en.controls, obs_seq = sim_en.observations, x1_truth = sim_en.states[1]
-        x_seq -> (
-            sum(
-                map(x1_truth.val, x_seq[1].val) do x, y
-                    SEDL.logpdf_normal(x, 0.01f0, y)
-                end,
-            ) +
-            SEDL.transition_logp(motion_model, x_seq, u_seq, Δt) +
-            SEDL.observation_logp(obs_model, x_seq, obs_seq)
-        )
-    end
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
 save_dir = SEDL.data_dir(savename("test_vi", (; h_dim); connector="-"))
 if isdir(save_dir)
     @warn "removing old data at $save_dir..."
-    rm(save_dir, recursive=true)
+    rm(save_dir; recursive=true)
 end
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
 
 elbo_history = []
-let (prior_trajs, _) = guide(sim_en.observations, sim_en.controls, Δt)
+let (prior_trajs, _) = guide(sim_en.states[1], sim_en.observations, sim_en.controls, Δt)
     SEDL.plot_batched_series(
         times, SEDL.TensorConfig(false).(prior_trajs); title="Guide prior"
     ) |> display
@@ -127,63 +117,85 @@ end
 # train the guide
 linear(from, to) = x -> from + (to - from) * x
 
-total_steps = 5000
-let n_steps = is_quick_test ? 2 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
-    test_n_traj = 100
-    test_data = map([1, 10]) do i
-        (
-            id=i,
-            test_true_states=map(b -> b[i], sim_en.states),
-            test_obs=map(b -> repeat(b[i], test_n_traj), sim_en.observations),
-            test_controls=map(b -> repeat(b[i], test_n_traj), sim_en.controls),
+total_steps = 10_000
+let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
+    n_visual_trajs = 100
+
+    callback(r) = begin
+        push!(elbo_history, r.elbo)
+        Base.with_logger(logger) do
+            @info "training" r.elbo r.loss r.lr r.annealing
+        end
+
+        # Compute test elbo and plot a few trajectories.
+        if r.step % 100 == 1
+            test_trajs, test_lp_guide = guide(
+                test_x0_batch, test_sim.observations, test_sim.controls, Δt
+            )
+            test_lp_dynamics = SEDL.transition_logp(
+                motion_model, test_trajs, test_sim.controls, Δt
+            )
+            test_lp_obs = SEDL.observation_logp(
+                obs_model, test_trajs, test_sim.observations
+            )
+            test_elbo =
+                sum(test_lp_dynamics + test_lp_obs - test_lp_guide) /
+                (length(test_trajs) * test_x0_batch.batch_size)
+
+            Base.with_logger(logger) do
+                @info "testing" elbo = test_elbo log_step_increment = 0
+            end
+
+            for name in ["training", "testing"], id in [1, 2]
+                sim_data = name == "training" ? sim_en : test_sim
+                visual_states = map(b -> b[id], sim_data.states)
+                visual_obs = map(b -> repeat(b[id], n_visual_trajs), sim_data.observations)
+                visual_controls = map(b -> repeat(b[id], n_visual_trajs), sim_data.controls)
+                test_trajs, _ = guide(
+                    repeat(visual_states[1], n_visual_trajs),
+                    visual_obs,
+                    visual_controls,
+                    Δt,
+                )
+                plt = SEDL.plot_batched_series(
+                    times,
+                    SEDL.TensorConfig(false).(test_trajs);
+                    truth=visual_states,
+                    title="$name traj $id (iter $(r.step))",
+                )
+                Base.with_logger(logger) do
+                    kv = [Symbol("traj_$id") => plt]
+                    @info name log_step_increment = 0 kv...
+                end
+                display(plt)
+            end
+        end
+
+        next!(
+            prog;
+            showvalues=[
+                (:elbo, r.elbo),
+                (:step, r.step),
+                (:batch_size, r.batch_size),
+                (:annealing, r.annealing),
+                (:learning_rate, r.lr),
+            ],
         )
     end
 
-    callback =
-        r -> begin
-            push!(elbo_history, r.elbo)
-            if r.step % 100 == 1
-                foreach(test_data) do (; id, test_true_states, test_obs, test_controls)
-                    test_trajs, _ = guide(test_obs, test_controls, Δt)
-                    plt = SEDL.plot_batched_series(
-                        times,
-                        SEDL.TensorConfig(false).(test_trajs);
-                        truth=test_true_states,
-                        title="Trajectory $id (iter $(r.step))",
-                    )
-                    Base.with_logger(logger) do
-                        kv = ["traj $id" => plt]
-                        @info "training" kv...
-                    end
-                    display(plt)
-                end
-            end
-            Base.with_logger(logger) do
-                @info "training" r.elbo r.batch_size r.annealing
-            end
-            next!(
-                prog;
-                showvalues=[
-                    (:elbo, r.elbo),
-                    (:step, r.step),
-                    (:batch_size, r.batch_size),
-                    (:annealing, r.annealing),
-                    (:learning_rate, r.lr),
-                ],
-            )
-        end
     @info "Training the guide..."
     train_result = @time SEDL.train_guide!(
         guide,
-        log_joint,
+        motion_model,
+        obs_model,
+        sim_en.states[1],
         sim_en.observations,
         sim_en.controls,
         Δt;
         optimizer=adam,
         n_steps,
-        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 3step / n_steps)),
+        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 4step / n_steps)),
         callback,
-        n_samples_f=step -> ceil(Int, linear(64, 256)(step / n_steps)),
         lr_schedule=let β = 100^2 / total_steps
             step -> 2e-3 / sqrt(β * step)
         end,

@@ -254,7 +254,7 @@ vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
 
 function rotate2d(θ, v::AbsMat)
-    @smart_assert size(θ)[end] == size(v)[end]
+    @smart_assert size(θ)[end] == 1 || size(θ)[end] == size(v)[end]
     x = @views v[1:1, :]
     y = @views v[2:2, :]
     s, c = sin.(θ), cos.(θ)
