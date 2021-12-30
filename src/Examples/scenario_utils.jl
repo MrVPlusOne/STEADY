@@ -50,25 +50,29 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
-function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
+function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_range))
     # simplified version, does not model angle warping.
     @smart_assert size(landmarks)[2] == 2
 
     (; pos, θ) = state.val
     (; tconf, batch_size) = state
-    σ = tconf(σ_bearing)
+    σ_range1, σ_bearing1 = tconf(σ_range), tconf(σ_bearing)
     check_type(tconf, landmarks)
 
     rel = landmarks .- reshape(pos, 1, 2, :)
     bearing_mean = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
+    range_mean = sqrt.(rel[:, 1, :].^2 + rel[:, 2, :].^2 .+ eps(σ_range1))
+    landmarks_loc = reshape(landmarks, :, 1)
 
     GenericSamplable(;
         rand_f=rng -> let
-            bearing = bearing_mean + σ .* Random.randn!(rng, zero(bearing_mean))
-            BatchTuple(tconf, batch_size, (; bearing))
+            bearing = bearing_mean + σ_bearing1 .* Random.randn!(rng, zero(bearing_mean))
+            range = range_mean + σ_range1 .* Random.randn!(rng, zero(range_mean))
+            BatchTuple(tconf, batch_size, (; bearing, range, landmarks_loc))
         end,
         log_pdf=(obs::BatchTuple) -> let
-            logpdf_normal(bearing_mean, σ, obs.val.bearing)
+            logpdf_normal(bearing_mean, σ_bearing1, obs.val.bearing) +
+            logpdf_normal(range_mean, σ_range1, obs.val.range)
         end,
     )
 end

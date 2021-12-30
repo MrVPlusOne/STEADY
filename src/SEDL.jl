@@ -29,6 +29,7 @@ RuntimeGeneratedFunctions.init(@__MODULE__)
 
 include("utils.jl")
 include("distributions_utils.jl")
+include("neural_utils.jl")
 include("samplers/samplers.jl")
 include("control_utils.jl")
 include("DSL.jl")

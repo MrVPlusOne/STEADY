@@ -162,7 +162,7 @@ function dynamics_core(::HovercraftScenario)
 end
 
 function batched_core(::HovercraftScenario, params)
-    input -> let
+    (input::BatchTuple) -> let
         (; tconf, batch_size) = input
         (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf, params)
 
@@ -173,7 +173,11 @@ function batched_core(::HovercraftScenario, params)
         loc_acc = vcat(a_x, a_y)
         @smart_assert size(loc_acc) == size(loc_v)
         μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
-        σs = BatchTuple(tconf, batch_size, (; loc_acc=σ_v, a_θ=σ_ω))
+        σs = BatchTuple(
+            tconf,
+            batch_size,
+            (; loc_acc=tconf(fill(σ_v, 1, 1)), a_θ=tconf(fill(σ_ω, 1, 1))),
+        )
         (; μs, σs)
     end
 end

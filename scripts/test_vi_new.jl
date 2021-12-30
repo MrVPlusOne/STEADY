@@ -3,7 +3,7 @@
 using DrWatson
 using Revise
 using Flux: Flux
-using CUDA: CUDA
+using CUDA: CUDA, CuArray
 CUDA.allowscalar(false)
 using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
@@ -26,6 +26,7 @@ is_quick_test && @info "Quick testing VI..."
 
 should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
 use_gpu = true
+use_simple_obs_model = false
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 device = use_gpu ? Flux.gpu : Flux.cpu
 
@@ -53,9 +54,13 @@ sketch = SEDL.batched_sketch(sce)
 motion_model = SEDL.BatchedMotionModel(tconf, sketch, SEDL.batched_core(sce, true_params))
 @smart_assert isempty(Flux.params(motion_model))
 
-# obs_model =
-#     state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, linfo.σ_bearing))
-obs_model = state -> SEDL.gaussian_obs_model(state, (pos=1.0, vel=1.0, θ=1.0, ω=1.0))
+obs_model = if use_simple_obs_model
+    state -> SEDL.gaussian_obs_model(state, (pos=1.0, vel=1.0, θ=1.0, ω=1.0))
+else
+    state -> SEDL.landmark_obs_model(
+        state, (; landmarks=landmarks_tensor, σ_bearing=20°, σ_range=4.0)
+    )
+end
 
 controller = let scontroller = SEDL.simulation_controller(sce)
     (args...) -> begin
@@ -85,15 +90,33 @@ let
     SEDL.plot_2d_trajectories!(sim_en.states, "forward simulation") |> display
 end
 
-SEDL.plot_batched_series(times, TensorConfig(false).(sim_en.states)) |> display
+SEDL.plot_batched_series(times, sim_en.states) |> display
+##-----------------------------------------------------------
+# test particle filtering
+pf_result = SEDL.batched_particle_filter(
+    repeat(x0_batch[1], 500_000),
+    (;
+        times,
+        obs_frames,
+        controls=map(b -> b[1], sim_en.controls),
+        observations=map(b -> b[1], sim_en.observations),
+    );
+    motion_model,
+    obs_model,
+)
+pf_trajs = SEDL.batched_trajectories(pf_result, 100)
+SEDL.plot_batched_series(times, pf_trajs; truth=getindex.(sim_en.states, 1)) |> display
 ##-----------------------------------------------------------
 # set up the NN models
 h_dim = 128
 y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
-normal_transforms = SEDL.compute_normal_transforms(
+normal_transforms = @time SEDL.compute_normal_transforms(
     sketch, sim_en.states, sim_en.controls, sim_en.observations, Δt
 )
-guide = @time SEDL.mk_guide(; sketch, h_dim, y_dim, normal_transforms) |> device
+guide =
+    SEDL.mk_guide(;
+        sketch, dynamics_core=motion_model.core, h_dim, y_dim, normal_transforms
+    ) |> device
 
 vi_motion_model = if should_train_dynamics
     nn_motion_model = SEDL.mk_nn_motion_model(; sketch, tconf, h_dim, normal_transforms)
@@ -105,15 +128,15 @@ end
 
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
-save_dir = SEDL.data_dir(
-    savename("test_vi", (; h_dim, should_train_dynamics); connector="-")
-)
+settings = (; h_dim, should_train_dynamics, use_simple_obs_model)
+save_dir = SEDL.data_dir(savename("test_vi", settings; connector="-"))
 if isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
+    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
 end
-logger = TBLogger(joinpath(save_dir, "tb_logs"))
 
+logger = TBLogger(joinpath(save_dir, "tb_logs"))
 elbo_history = []
 let (prior_trajs, _) = guide(sim_en.states[1], sim_en.observations, sim_en.controls, Δt)
     SEDL.plot_batched_series(
@@ -124,7 +147,7 @@ end
 # train the guide
 linear(from, to) = x -> from + (to - from) * x
 
-total_steps = 10_000
+total_steps = 6_000
 let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
     n_visual_trajs = 100
 
@@ -132,6 +155,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
         push!(elbo_history, r.elbo)
         Base.with_logger(logger) do
             @info "training" r.elbo r.loss r.lr r.annealing
+            @info "statistics" r.time_stats... log_step_increment = 0
         end
 
         # Compute test elbo and plot a few trajectories.
@@ -201,7 +225,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
         Δt;
         optimizer=adam,
         n_steps,
-        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 4step / n_steps)),
+        anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 3step / n_steps)),
         callback,
         lr_schedule=let β = 100^2 / total_steps
             step -> 2e-3 / sqrt(β * step)
@@ -209,13 +233,12 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
     )
     display(train_result)
 end
-##-----------------------------------------------------------
-plot(elbo_history[500:end]; title="ELBO (training)") |> display
+# save the model
 serialize(
     joinpath(save_dir, "models.serial"),
     (vi_motion_model=Flux.cpu(vi_motion_model), guide=Flux.cpu(guide)),
 )
 deserialize(joinpath(save_dir, "models.serial"))
-
+##-----------------------------------------------------------
 run(`ls -lh $save_dir/`)
 ##-----------------------------------------------------------

@@ -1,26 +1,18 @@
+using CUDA: @allowscalar
+
 effective_particles(weights::AbstractVector) = 1 / sum(abs2, weights)
 
-function systematic_resample!(indices, weights, bins_buffer)
+function systematic_resample!(indices, weights::AbsVec, bins_buffer::AbsVec)
     N = length(weights)
     M = length(indices)
     @smart_assert length(bins_buffer) == N
-    bins_buffer[1] = weights[1]
-    for i in 2:N
-        bins_buffer[i] = bins_buffer[i - 1] + weights[i]
+    cumsum!(bins_buffer, weights)
+    delta = @allowscalar bins_buffer[end] / M
+    r = delta * rand()
+    broadcast!(indices, 0:(M - 1)) do i
+        s = delta * i + r
+        searchsortedfirst(bins_buffer, s)
     end
-    r = rand() * bins_buffer[end] / M
-    s = r:(1 / M):(bins_buffer[end] + r) # Added r in the end to ensure correct length (r < 1/N)
-    bo = 1
-    for i in 1:M
-        @inbounds for b in bo:N
-            if s[i] < bins_buffer[b]
-                indices[i] = b
-                bo = b
-                break
-            end
-        end
-    end
-    Random.shuffle!(indices)
     return indices
 end
 
@@ -29,9 +21,87 @@ function systematic_resample(weights::AbstractArray{N}, n_samples::Integer) wher
         @error "Weights must be finite." weights
         throw(ArgumentError("Weights must be finite."))
     end
-    indices = collect(1:n_samples)
-    bins_buffer = fill(zero(N), length(weights))
+    indices = similar(weights, Int, n_samples)
+    indices .= 1:n_samples
+    bins_buffer = similar(weights)
     systematic_resample!(indices, weights, bins_buffer)
+end
+
+function batched_particle_filter(
+    x0::BatchTuple,
+    (; times, obs_frames, controls, observations);
+    motion_model,
+    obs_model,
+    resample_threshold::Float64=0.5,
+    showprogress=true,
+)
+    x0 = inflate_batch(x0)
+    tconf = x0.tconf
+    @smart_assert eltype(obs_frames) <: Integer
+    T, N = length(times), x0.batch_size
+    particles = Vector{typeof(x0)}(undef, T)
+    particles[1] = x0
+    id_type = tconf.on_gpu ? CuArray : Array
+    ancestors = fill(id_type(1:N), T)
+    n_resampled = 0
+
+    log_weights = new_array(tconf, N)
+    log_weights .= -log(N)
+    weights = exp.(log_weights)
+    log_obs = 0.0
+    bins_buffer = new_array(tconf, N)
+
+    progress = Progress(
+        T; desc="batched_particle_filter", output=stdout, enabled=showprogress
+    )
+    for t in 1:T
+        if t in obs_frames
+            lp = logpdf(obs_model(particles[t]), observations[t]::BatchTuple)
+            @smart_assert length(lp) == N
+            log_weights += reshape(lp, N)
+            log_z_t = logsumexp(log_weights)
+            log_weights .-= log_z_t
+            weights .= exp.(log_weights)
+            log_obs += log_z_t
+
+            # optionally resample
+            if effective_particles(weights) < N * resample_threshold
+                indices = copy(ancestors[t])
+                systematic_resample!(indices, weights, bins_buffer)
+                ancestors[t] = indices
+                log_weights .= -log(N)
+                particles[t] = particles[t][indices]
+                n_resampled += 1
+            end
+        end
+
+        if t < T
+            Δt = times[t + 1] - times[t]
+            particles[t + 1] =
+                rand(motion_model(particles[t], controls[t]::BatchTuple, Δt))::BatchTuple
+        end
+        next!(progress)
+    end
+
+    (; particles, weights, log_weights, ancestors, log_obs, n_resampled)
+end
+
+"""
+Sample full trajectories from a batched particle filter by tracing the ancestral lineages.
+"""
+function batched_trajectories(pf_result, n_trajs)
+    (; particles::Vector{<:BatchTuple}, ancestors::Vector{<:AbsVec}, weights::AbsVec) =
+        pf_result
+    # first sample indices at the last time step according to the final weights
+    indices = systematic_resample(weights, n_trajs)
+    T = length(particles)
+    trajectory = BatchTuple[particles[T][indices]]
+    for t in (T - 1):-1:1
+        indices = ancestors[t + 1][indices]
+        push!(trajectory, particles[t][indices])
+    end
+
+    reverse(trajectory)
 end
 
 """
@@ -72,7 +142,7 @@ function forward_filter(
         aux_indices = collect(1:N)
     end
 
-    progress = Progress(T - 1; desc="forward_filter", output=stdout, enabled=showprogress)
+    progress = Progress(T; desc="forward_filter", output=stdout, enabled=showprogress)
     for t in 1:T
         if t in obs_frames
             for i in 1:N

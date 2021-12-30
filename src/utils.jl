@@ -30,19 +30,36 @@ Stacktrace:
 """
 macro smart_assert(ex, msg=nothing)
     has_msg = msg !== nothing
-    if @capture(ex, op_(args__)) && !any(a -> a isa Expr && a.head == :kw, args)
+    is_type_assert = @capture(ex, t1_ <: t2_)
+    if is_type_assert
+        args = (t1, t2)
+        to_cond_ex = arg_names -> Expr(:(<:), arg_names...)
+    else
+        is_func_call =
+            @capture(ex, op_(args__)) && !any(a -> a isa Expr && a.head == :kw, args)
+        if is_func_call
+            to_cond_ex = arg_names -> Expr(:call, esc(op), arg_names...)
+        end
+    end
+    if is_type_assert || is_func_call
         ex_q = QuoteNode(ex)
         args_q = Expr(:tuple, QuoteNode.(args)...)
         arg_names = [gensym("arg$i") for i in 1:length(args)]
-        f_name = gensym("f")
-        call_ex = Expr(:call, f_name, arg_names...)
-        assigns = Expr(:block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...)
+        cond_ex = to_cond_ex(arg_names)
+        assigns = Expr(
+            :block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...
+        )
         args_tuple = Expr(:tuple, arg_names...)
         quote
             $assigns
-            $f_name = $(esc(op))
-            if !$(call_ex)
-                eval_string = join(["\t`$ex` evaluates to $val" for (ex, val) in zip($args_q, $args_tuple)], "\n")
+            if !$(cond_ex)
+                eval_string = join(
+                    [
+                        "\t`$ex` evaluates to $val" for
+                        (ex, val) in zip($args_q, $args_tuple)
+                    ],
+                    "\n",
+                )
                 reason_text = "Condition `$($ex_q)` failed due to:\n" * eval_string
                 if $has_msg
                     msg_v = $(esc(msg))
@@ -59,6 +76,10 @@ macro smart_assert(ex, msg=nothing)
             esc(:(@assert($ex)))
         end
     end
+end
+
+function test_smart_assert()
+    @smart_assert typeof(1) <: Int
 end
 
 """
