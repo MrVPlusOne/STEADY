@@ -12,6 +12,10 @@ end
     front_drive::Bool = true
 end
 
+function Base.summary(io::IO, sce::Car2dScenario)
+    print(io, "Car2d(front_drive=$(sce.car_dynamics.front_drive))")
+end
+
 variables(::Car2dScenario) = variable_tuple(
     # state
     :pos => ℝ2(PUnits.Length),
@@ -152,8 +156,8 @@ function dynamics_core(dyn::BicycleCarDyn)
         end
     else
         input -> let
-            (; loc_vx, loc_vy, ω, steer) = input
-            (; fraction_max, v̂, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
+            (; loc_vx, loc_vy, ω, steer, v̂) = input
+            (; fraction_max, mass, drag_x, drag_y, rot_mass, rot_drag, len) = input
 
             # assume that the tires have negligible inertia
             # and that only the rear tires are driven
@@ -170,6 +174,71 @@ function dynamics_core(dyn::BicycleCarDyn)
             f_y = fraction_front[2] + fraction_rear[2]
             f_θ = (fraction_front[2] - fraction_rear[2]) * len
             (; f_x, f_y, f_θ)
+        end
+    end
+end
+
+function batched_sketch(::Car2dScenario)
+    BatchedMotionSketch(;
+        state_vars=(; pos=2, vel=2, θ=1, ω=1),
+        control_vars=(; v̂=1, steer=1),
+        input_vars=(; loc_v=2, ω=1, θ=1, v̂=1, steer=1),
+        output_vars=(; loc_acc=2, a_θ=1),
+        state_to_input=state_to_input_SE2,
+        output_to_state=output_to_state_SE2,
+        output_from_state=output_from_state_SE2,
+    )
+end
+
+batched_core(sce::Car2dScenario, params) = batched_core(sce.car_dynamics, params)
+function batched_core(dyn::BicycleCarDyn, params)
+    if dyn.front_drive
+        # rear drive
+        (input::BatchTuple) -> let
+            (; tconf, batch_size) = input
+            (; loc_v, ω, steer, v̂) = input.val
+            (; fraction_max, mass, rot_mass, len, σ_v, σ_ω) = params
+
+            # assume that the tires have negligible inertia
+            # and that only the rear tires are driven
+            v_tire_front =
+                vcat(cos.(steer) .* v̂, sin.(steer) .* v̂ .- len .* ω) - loc_v
+
+            fraction_front = unit_R2(v_tire_front) * fraction_max
+
+            vy_tire_rear = @views loc_v[2:2, :] - len * ω
+            fraction_rear = -sign.(vy_tire_rear) .* fraction_max
+
+            loc_acc = (fraction_front + vcat(zero(fraction_rear), fraction_rear)) / mass
+            a_θ = @views (fraction_front[2:2, :] - fraction_rear) * len / rot_mass
+
+            μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
+            σs = BatchTuple(tconf, batch_size, (loc_acc=tconf([σ_v;;]), a_θ=tconf([σ_ω;;])))
+            (; μs, σs)
+        end
+    else
+        # rear drive
+        (input::BatchTuple) -> let
+            (; tconf, batch_size) = input
+            (; loc_v, ω, steer, v̂) = input.val
+            (; fraction_max, mass, rot_mass, len, σ_v, σ_ω) = params
+
+            # assume that the tires have negligible inertia
+            # and that only the rear tires are driven
+            v_tire_rear = vcat_bc(v̂, len * ω; batch_size) - loc_v
+            fraction_rear = unit_R2(v_tire_rear) * fraction_max
+
+            front_fraction_dir = [-sin.(steer); cos.(steer)]
+            v_loc_front = loc_v + [zero(ω); len * ω]
+            fraction_front =
+                -fraction_max * unit_R2(project_R2(v_loc_front, front_fraction_dir))
+
+            loc_acc = (fraction_front + fraction_rear) / mass
+            a_θ = @views (fraction_front[2:2, :] - fraction_rear[2:2, :]) * len / rot_mass
+
+            μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
+            σs = BatchTuple(tconf, batch_size, (loc_acc=tconf([σ_v;;]), a_θ=tconf([σ_ω;;])))
+            (; μs, σs)
         end
     end
 end
@@ -232,7 +301,7 @@ function simulation_controller(sce::Car2dScenario; noise=0.5)
     end
     v̂_f = LinearInterpolation(times, v̂_seq)
     steer_f = LinearInterpolation(times, steer_seq)
-    (s, obs, t::Float64) -> begin
+    (s, obs, t::Real) -> begin
         (v̂=v̂_f(t), steer=steer_f(t))
     end
 end

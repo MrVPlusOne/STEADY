@@ -5,6 +5,8 @@ The 2D hovercraft scenario.
     landmark_info::LI
 end)
 
+Base.summary(io::IO, ::HovercraftScenario) = "Hovercarft()"
+
 dummy_state(::HovercraftScenario) =
     (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())
 
@@ -107,7 +109,15 @@ function sindy_sketch(sce::HovercraftScenario)
 end
 
 function batched_sketch(::HovercraftScenario)
-    batched_sketch_SE2()
+    BatchedMotionSketch(;
+        state_vars=(; pos=2, vel=2, θ=1, ω=1),
+        control_vars=(; ul=1, ur=1),
+        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
+        output_vars=(; loc_acc=2, a_θ=1),
+        state_to_input=state_to_input_SE2,
+        output_to_state=output_to_state_SE2,
+        output_from_state=output_from_state_SE2,
+    )
 end
 
 function dynamics_sketch(sce::HovercraftScenario)
@@ -173,11 +183,7 @@ function batched_core(::HovercraftScenario, params)
         loc_acc = vcat(a_x, a_y)
         @smart_assert size(loc_acc) == size(loc_v)
         μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
-        σs = BatchTuple(
-            tconf,
-            batch_size,
-            (; loc_acc=tconf(fill(σ_v, 1, 1)), a_θ=tconf(fill(σ_ω, 1, 1))),
-        )
+        σs = BatchTuple(tconf, batch_size, (loc_acc=tconf([σ_v;;]), a_θ=tconf([σ_ω;;])))
         (; μs, σs)
     end
 end

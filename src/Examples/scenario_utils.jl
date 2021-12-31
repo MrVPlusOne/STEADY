@@ -94,47 +94,34 @@ function gaussian_obs_model(state::BatchTuple, σs::NamedTuple)
     )
 end
 
-function batched_sketch_SE2()
-    function state_to_input(state::BatchTuple, control::BatchTuple)
-        local bs = common_batch_size(state.batch_size, control.batch_size)
-        (; vel, θ, ω) = state.val
-        (; ul, ur) = control.val
-        local loc_v = rotate2d(-θ, vel)
-        BatchTuple(state.tconf, bs, (; loc_v, ω, θ, ul, ur))
-    end
+function state_to_input_SE2(state::BatchTuple, control::BatchTuple)
+    local bs = common_batch_size(state.batch_size, control.batch_size)
+    (; vel, θ, ω) = state.val
+    local loc_v = rotate2d(-θ, vel)
+    BatchTuple(state.tconf, bs, (; loc_v, ω, θ, control.val...))
+end
 
-    function output_to_state(state::BatchTuple, output::BatchTuple, Δt)
-        local bs = common_batch_size(state.batch_size, output.batch_size)
-        local (; pos, vel, θ, ω) = state.val
-        local (; loc_acc, a_θ) = output.val
-        local acc = rotate2d(θ, loc_acc)
-        BatchTuple(
-            state.tconf,
-            bs,
-            (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt),
-        )
-    end
-
-    function output_from_state(state::BatchTuple, next_state::BatchTuple, Δt)
-        @smart_assert state.batch_size == next_state.batch_size
-        local (; θ) = state.val
-        local derivatives = map(state.val, next_state.val) do x, x′
-            (x′ - x) / Δt
-        end
-        local acc, a_θ = derivatives.vel, derivatives.ω
-        local loc_acc = rotate2d(-θ, acc)
-        BatchTuple(state.tconf, state.batch_size, (; loc_acc, a_θ))
-    end
-
-    BatchedMotionSketch(;
-        state_vars=(; pos=2, vel=2, θ=1, ω=1),
-        control_vars=(; ul=1, ur=1),
-        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
-        output_vars=(; loc_acc=2, a_θ=1),
-        state_to_input,
-        output_to_state,
-        output_from_state,
+function output_to_state_SE2(state::BatchTuple, output::BatchTuple, Δt)
+    local bs = common_batch_size(state.batch_size, output.batch_size)
+    local (; pos, vel, θ, ω) = state.val
+    local (; loc_acc, a_θ) = output.val
+    local acc = rotate2d(θ, loc_acc)
+    BatchTuple(
+        state.tconf,
+        bs,
+        (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt),
     )
+end
+
+function output_from_state_SE2(state::BatchTuple, next_state::BatchTuple, Δt)
+    @smart_assert state.batch_size == next_state.batch_size
+    local (; θ) = state.val
+    local derivatives = map(state.val, next_state.val) do x, x′
+        (x′ - x) / Δt
+    end
+    local acc, a_θ = derivatives.vel, derivatives.ω
+    local loc_acc = rotate2d(-θ, acc)
+    BatchTuple(state.tconf, state.batch_size, (; loc_acc, a_θ))
 end
 
 """

@@ -12,7 +12,7 @@ using ProgressMeter
 using Serialization: serialize, deserialize
 
 !true && begin
-    include("../src/SEDL.jl")  # reloads the module
+    include("../src/SEDL.jl")
     using .SEDL
 end
 using SEDL: SEDL
@@ -37,6 +37,7 @@ size(landmarks_tensor)
 
 linfo = SEDL.LandmarkInfo(; landmarks)
 sce = SEDL.HovercraftScenario(linfo)
+# sce = SEDL.Car2dScenario(linfo, SEDL.BicycleCarDyn(; front_drive=false))
 
 sample_x0() = (;
     pos=[0.5, 1.0] + 2randn(2),
@@ -58,14 +59,14 @@ obs_model = if use_simple_obs_model
     state -> SEDL.gaussian_obs_model(state, (pos=1.0, vel=1.0, θ=1.0, ω=1.0))
 else
     state -> SEDL.landmark_obs_model(
-        state, (; landmarks=landmarks_tensor, σ_bearing=20°, σ_range=4.0)
+        state, (; landmarks=landmarks_tensor, σ_bearing=15°, σ_range=2.0)
     )
 end
 
 controller = let scontroller = SEDL.simulation_controller(sce)
     (args...) -> begin
-        (; ul, ur) = scontroller(args...)
-        SEDL.BatchTuple(tconf, [(ul=[ul], ur=[ur])])
+        control = scontroller(args...)
+        SEDL.BatchTuple(tconf, [map(v -> [v], control)])
     end
 end
 
@@ -82,7 +83,8 @@ test_sim = SEDL.simulate_trajectory(
 # end
 
 let
-    first_states = [Flux.cpu(b[1].val) for b in sim_en.states]
+    visual_id = 5
+    first_states = [Flux.cpu(b[visual_id].val) for b in sim_en.states]
     landmark_obs = [((; landmarks=fill(true, length(landmarks)))) for _ in first_states]
     obs_data = (; obs_frames, observations=landmark_obs)
     plot()
@@ -93,19 +95,22 @@ end
 SEDL.plot_batched_series(times, sim_en.states) |> display
 ##-----------------------------------------------------------
 # test particle filtering
+sample_id = 2
 pf_result = SEDL.batched_particle_filter(
-    repeat(x0_batch[1], 500_000),
+    repeat(x0_batch[sample_id], 500_000),
     (;
         times,
-        obs_frames,
-        controls=map(b -> b[1], sim_en.controls),
-        observations=map(b -> b[1], sim_en.observations),
+        obs_frames=1:10:100,
+        controls=map(b -> b[sample_id], sim_en.controls),
+        observations=map(b -> b[sample_id], sim_en.observations),
     );
     motion_model,
     obs_model,
 )
+@show pf_result.log_obs
 pf_trajs = SEDL.batched_trajectories(pf_result, 100)
-SEDL.plot_batched_series(times, pf_trajs; truth=getindex.(sim_en.states, 1)) |> display
+SEDL.plot_batched_series(times, pf_trajs; truth=getindex.(sim_en.states, sample_id)) |>
+display
 ##-----------------------------------------------------------
 # set up the NN models
 h_dim = 128
@@ -113,10 +118,6 @@ y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
 normal_transforms = @time SEDL.compute_normal_transforms(
     sketch, sim_en.states, sim_en.controls, sim_en.observations, Δt
 )
-guide =
-    SEDL.mk_guide(;
-        sketch, dynamics_core=motion_model.core, h_dim, y_dim, normal_transforms
-    ) |> device
 
 vi_motion_model = if should_train_dynamics
     nn_motion_model = SEDL.mk_nn_motion_model(; sketch, tconf, h_dim, normal_transforms)
@@ -126,9 +127,14 @@ else
     motion_model
 end
 
+guide =
+    SEDL.mk_guide(;
+        sketch, dynamics_core=vi_motion_model.core, h_dim, y_dim, normal_transforms
+    ) |> device
+
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
-settings = (; h_dim, should_train_dynamics, use_simple_obs_model)
+settings = (; scenario=summary(sce), h_dim, should_train_dynamics, use_simple_obs_model)
 save_dir = SEDL.data_dir(savename("test_vi", settings; connector="-"))
 if isdir(save_dir)
     @warn "removing old data at $save_dir..."
@@ -242,3 +248,6 @@ deserialize(joinpath(save_dir, "models.serial"))
 ##-----------------------------------------------------------
 run(`ls -lh $save_dir/`)
 ##-----------------------------------------------------------
+using BenchmarkTools
+@benchmark $(CUDA.ones(256, 1000)) * $(CUDA.ones(1000, 200))
+@benchmark $(CUDA.ones(Float64, 256, 1000)) * $(CUDA.ones(Float64, 1000, 200))

@@ -77,10 +77,19 @@ function (motion_model::BatchedMotionModel{TC})(
         (x1, out_batch1, lp1) = sample_next_state(Random.GLOBAL_RNG)
         (lp2, out_batch2) = compute_logp(x1)
         check_approx(out_batch1, out_batch2)
-        @smart_assert(
-            isapprox(sum(lp1), sum(lp2), rtol=1e-3, atol=1e-2),
-            "abs diff: $(lp1-lp2)\nrelative diff: $(norm(lp1-lp2)/max(norm(lp1),norm(lp2)))"
-        )
+        if !isapprox(sum(lp1), sum(lp2); rtol=1e-3, atol=1e-2)
+            bad_id = findmax(abs.(lp1[:] - lp2[:]))[2]
+            @allowscalar begin
+                @error "bad_id: $bad_id"
+                @error "out_batch1: $(out_batch1[bad_id].val)"
+                @error "out_batch2: $(out_batch2[bad_id].val)"
+                @error "μs: $(μs[bad_id].val)"
+                @error "σs: $(σs[bad_id].val)"
+                @error "lp1: $(lp1[bad_id])"
+                @error "lp2: $(lp2[bad_id])"
+            end
+            error("Inconsistent logp detected.")
+        end
     end
 
     GenericSamplable(rng -> sample_next_state(rng)[1], x1 -> compute_logp(x1)[1])
@@ -235,20 +244,21 @@ function mk_guide(;
     u_enc_dim = h_dim ÷ 2
     y_enc_dim = rnn_dim - u_enc_dim
 
-    x0_sampler = FluxLayer(
-        Val(:x0_sampler),
-        (
-            center=mlp(rnn_dim, x_dim),
-            scale=mlp(rnn_dim, x_dim, x -> max.(softplus.(x), min_σ)),
-        ),
-    ) do (; center, scale)
-        (future::BatchTuple) -> begin
-            local input = future.val.future_info
-            local x_enc, logp = sample_normal((center(input), scale(input)))
-            local x_new = state_trans(split_components(x_enc, sketch.state_vars))
-            BatchTuple(future.tconf, future.batch_size, x_new), logp
-        end
-    end
+    # x0_sampler = FluxLayer(
+    #     Val(:x0_sampler),
+    #     (
+    #         center=mlp(rnn_dim, x_dim),
+    #         scale=mlp(rnn_dim, x_dim, x -> max.(softplus.(x), min_σ)),
+    #     ),
+    # ) do (; center, scale)
+    #     (future::BatchTuple) -> begin
+    #         local input = future.val.future_info
+    #         local x_enc, logp = sample_normal((center(input), scale(input)))
+    #         local x_new = state_trans(split_components(x_enc, sketch.state_vars))
+    #         BatchTuple(future.tconf, future.batch_size, x_new), logp
+    #     end
+    # end
+    x0_sampler = nothing
 
     guide_core = FluxLayer(
         Val(:guide_core),
@@ -283,7 +293,7 @@ function mk_guide(;
             local μs = map(
                 .+,
                 dy_μs.val,
-                map(.*, core_out_trans.scale, split_components(μ_data, sketch.output_vars)),
+                map(v -> 0.1f0v, split_components(μ_data, sketch.output_vars)),
             )
             local σs = map(.*, dy_σs.val, split_components(σ_data, sketch.output_vars))
             map((; μs, σs)) do nt
@@ -342,16 +352,8 @@ function mk_nn_motion_model(;
                 local core_val = inv(core_in_trans)(core_input.val)
                 local input = vcat_bc(core_val...; batch_size)
                 local μ_data, σ_data = center(input), scale(input)
-                local μs = map(
-                    (x, sh) -> x .+ sh,
-                    split_components(μ_data, sketch.output_vars),
-                    core_out_trans.shift,
-                )
-                local σs = map(
-                    (x, s) -> x .* s,
-                    split_components(σ_data, sketch.output_vars),
-                    core_out_trans.scale,
-                )
+                local μs = split_components(μ_data, sketch.output_vars)
+                local σs = split_components(σ_data, sketch.output_vars)
                 map((; μs, σs)) do nt
                     BatchTuple(core_input.tconf, batch_size, nt)
                 end
@@ -395,7 +397,7 @@ function train_guide!(
     T = length(obs_seq)
 
     all_ps = Flux.params((guide, motion_model))
-    @info "total number of param tensors: $(length(all_ps))"
+    @info "total number of array parameters: $(length(all_ps))"
     reg_ps = Flux.Params(collect(regular_params(guide)))
 
     for step in 1:n_steps
@@ -433,7 +435,7 @@ function train_guide!(
                 p .-= weight_decay * p
             end
         else
-            @warn "elbo is not finite: $elbo, skip a gradient step."
+            error("ELBO is not finite: $val")
         end
         time_stats = (; guide_time, dynamics_time, obs_time, callback_time)
         cb_args = (;
@@ -461,6 +463,11 @@ function logpdf_normal(μ, σ, x)
         vs
     end
 end
+
+# function logpdf_normal(μ::AbstractArray{Float32}, σ::AbstractArray{Float32}, x::AbstractArray{Float32})
+#     # avoid numerical inaccruacies
+#     logpdf_normal(Flux.f64(μ), Flux.f64(σ), Flux.f64(x)) |> Flux.f32
+# end
 
 let s = (5, 2), μ = randn(s), σ = abs.(randn(s)), x = randn(s)
     @smart_assert sum(logpdf_normal(μ, σ, x)) ≈

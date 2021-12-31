@@ -81,13 +81,21 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
     BatchTuple(
         tconf::TensorConfig{on_gpu}, batch_size::Int, val::NamedTuple
     ) where {on_gpu} = begin
-        map(keys(val)) do k
+        foreach(keys(val)) do k
             v = getproperty(val, k)
             check_type(tconf, v)
-            v isa Real ||
+            if v isa Real
+                return nothing
+            else
+                @smart_assert(
+                    ndims(v) >= 2,
+                    "Batch values should have at least 2 dimensions, with the last one \
+                    being the batch dimension."
+                )
                 size(v)[end] == 1 ||
-                size(v)[end] == batch_size ||
-                error("Element $k has size $(size(v)), but batch size is $batch_size")
+                    size(v)[end] == batch_size ||
+                    error("Element $k has size $(size(v)), but batch size is $batch_size")
+            end
         end
         new{typeof(tconf),typeof(val)}(tconf, batch_size, val)
     end
@@ -126,7 +134,7 @@ function (tconf::TensorConfig)(batch::BatchTuple)
     end
 end
 
-function batch_subset(m::Union{Real,AbstractArray}, ids)
+function batch_subset(m::Union{Real,AbstractArray}, ids::Union{Integer, UnitRange})
     r = if m isa Real
         m
     else
@@ -392,4 +400,4 @@ regular_params(layer::Union{Flux.GRUCell,Flux.LSTMCell}) = (layer.Wi, layer.Wh)
 
 regular_params(tp::Union{Tuple,NamedTuple}) = Iterators.flatten(map(regular_params, tp))
 
-regular_params(::Union{Function,BatchNorm}) = tuple()
+regular_params(::Union{Function,BatchNorm,Nothing}) = tuple()
