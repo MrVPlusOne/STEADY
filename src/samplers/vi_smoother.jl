@@ -11,10 +11,10 @@ export BatchedMotionSketch, BatchedMotionModel, transition_logp, observation_log
     output_vars::NamedNTuple{outputs,Int}
     "state_to_input(state, control) -> core_input"
     state_to_input::F1
-    "output_to_state(state, core_output, Δt) -> new_state"
-    output_to_state::F2
-    "output_from_state(state, next_state, Δt) -> core_output"
-    output_from_state::F3
+    "output_to_state_rate(state, core_output) -> state_derivative"
+    output_to_state_rate::F2
+    "output_from_state_rate(state, state_derivative) -> core_output"
+    output_from_state_rate::F3
 end
 @use_short_show BatchedMotionSketch
 
@@ -40,69 +40,41 @@ Flux.trainable(bmm::BatchedMotionModel) = Flux.trainable(bmm.core)
 
 
 function (motion_model::BatchedMotionModel{TC})(
-    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency::Bool=false
+    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency=false,
 ) where {TC}
     bs = common_batch_size(x.batch_size, u.batch_size)
     sketch, core = motion_model.sketch, motion_model.core
 
-    inputs = sketch.state_to_input(x, u)::BatchTuple{TC}
-    check_components(inputs, sketch.input_vars)
+    core_input = sketch.state_to_input(x, u)::BatchTuple{TC}
+    check_components(core_input, sketch.input_vars)
 
-    (; μs, σs) = core(inputs)
-    μs::BatchTuple{TC}
-    σs::BatchTuple{TC}
+    (; μs::BatchTuple{TC}, σs::BatchTuple{TC}) = core(core_input)
 
-    sample_next_state(rng) =
-        let
-            @unzip out, lps = map(μs.val, σs.val) do μ, σ
-                sample_normal(rng, μ, σ)
-            end
-            out_batch = BatchTuple(x.tconf, bs, out)
-            check_components(out_batch, sketch.output_vars)
-            next_state = sketch.output_to_state(x, out_batch, x.tconf(Δt))::BatchTuple{TC}
-            (; next_state, out_batch, lp=sum(lps))
-        end
-
-    compute_logp(next_state::BatchTuple{TC}) =
-        let
-            out_batch = sketch.output_from_state(x, next_state, x.tconf(Δt))::BatchTuple{TC}
-            check_components(out_batch, sketch.output_vars)
-            lp = map(μs.val, σs.val, out_batch.val) do μ, σ, o
-                logpdf_normal(μ, σ, o)
-            end |> sum
-            (; lp, out_batch)
-        end
-
+    @unzip out, lps = map(sample_normal, μs.val, σs.val)
+    out_batch = BatchTuple(x.tconf, bs, out)
+    check_components(out_batch, sketch.output_vars)
+    derivative = sketch.output_to_state_rate(x, out_batch)::BatchTuple{TC}
     if test_consistency
-        (x1, out_batch1, lp1) = sample_next_state(Random.GLOBAL_RNG)
-        (lp2, out_batch2) = compute_logp(x1)
-        check_approx(out_batch1, out_batch2)
-        if !isapprox(sum(lp1), sum(lp2); rtol=1e-3, atol=1e-2)
-            bad_id = findmax(abs.(lp1[:] - lp2[:]))[2]
-            @allowscalar begin
-                @error "bad_id: $bad_id"
-                @error "out_batch1: $(out_batch1[bad_id].val)"
-                @error "out_batch2: $(out_batch2[bad_id].val)"
-                @error "μs: $(μs[bad_id].val)"
-                @error "σs: $(σs[bad_id].val)"
-                @error "lp1: $(lp1[bad_id])"
-                @error "lp2: $(lp2[bad_id])"
-            end
-            error("Inconsistent logp detected.")
+        out_batch2 = sketch.output_from_state_rate(x, derivative)::BatchTuple{TC}
+        foreach(out_batch.val, out_batch2.val) do v1, v2
+            @smart_assert v1 ≈ v2
         end
     end
-
-    GenericSamplable(rng -> sample_next_state(rng)[1], x1 -> compute_logp(x1)[1])
+    next_state = map(x, derivative) do xv, dv
+        xv .+ dv .* Δt
+    end
+    (; next_state, logp=sum(lps), core_input, core_output=out_batch)
 end
 
 function transition_logp(
-    model::BatchedMotionModel, x_seq::TimeSeries, u_seq::TimeSeries, Δt::Real
+    core, core_input_seq::TimeSeries, core_output_seq::TimeSeries
 )
-    @smart_assert length(x_seq) == length(u_seq)
-    T = length(x_seq)
+    @smart_assert length(core_input_seq) == length(core_output_seq)
+    T = length(core_input_seq)
     map(1:(T - 1)) do t
-        dist = model(x_seq[t], u_seq[t], Δt)
-        logpdf(dist, x_seq[t + 1])
+        (; μs::BatchTuple, σs::BatchTuple) = core(core_input_seq[t])
+        lps = map(logpdf_normal, μs.val, σs.val, core_output_seq[t].val)
+        sum(lps)::AbsMat
     end |> sum
 end
 
@@ -140,7 +112,6 @@ function (guide::VIGuide)(
     obs_seq::TimeSeries{<:BatchTuple{TC}},
     control_seq::TimeSeries{<:BatchTuple{TC}},
     Δt::Real;
-    rng=Random.GLOBAL_RNG,
     test_consistency::Bool=false,
 ) where {TC}
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
@@ -162,17 +133,17 @@ function (guide::VIGuide)(
     logp = 0
     x0 = inflate_batch(x0)
     x::BatchTuple{TC} = x0
-    trans = map(2:length(future_info)) do t
+    @unzip trans, core_in_seq, core_out_seq = map(2:length(future_info)) do t
         core = inputs -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
         mm_t = BatchedMotionModel(tconf, guide.sketch, core)
-        x_dist = mm_t(x, control_seq[t - 1], Δt; test_consistency)
-        x = rand(rng, x_dist)
-        logp = logp .+ logpdf(x_dist, x)
-        x
+        (x1, lp, core_in, core_out) = mm_t(x, control_seq[t - 1], Δt; test_consistency)
+        x = x1
+        logp = logp .+ lp
+        (x, core_in, core_out)
     end
     trajectory = vcat([x0], trans)
 
-    (; trajectory, logp)
+    (; trajectory, logp, core_in_seq, core_out_seq)
 end
 
 function compute_normal_transforms(
@@ -204,7 +175,10 @@ function compute_normal_transforms(
 
     core_out_trans =
         map(sample_states[1:(end - 1)], sample_states[2:end]) do x, x1
-            sketch.output_from_state(x, x1, Δt)
+            x_rate = map(x, x1) do x, x1
+                (x1 .- x) ./ Δt
+            end
+            sketch.output_from_state_rate(x, x_rate)
         end |> from_batches
 
     (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans)
@@ -379,7 +353,7 @@ end
 
 function train_guide!(
     guide::VIGuide,
-    motion_model,
+    motion_model_core,
     obs_model,
     x0_batch,
     obs_seq,
@@ -396,7 +370,7 @@ function train_guide!(
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
     T = length(obs_seq)
 
-    all_ps = Flux.params((guide, motion_model))
+    all_ps = Flux.params((guide, motion_model_core))
     @info "total number of array parameters: $(length(all_ps))"
     reg_ps = Flux.Params(collect(regular_params(guide)))
 
@@ -408,10 +382,12 @@ function train_guide!(
 
         loss(; test_consistency=false) = begin
             guide_time += @elapsed begin
-                traj_seq, lp_guide = guide(x0_batch, obs_seq, control_seq, Δt; test_consistency)
+                traj_seq, lp_guide, core_in_seq, core_out_seq = guide(
+                    x0_batch, obs_seq, control_seq, Δt; test_consistency
+                )
             end
             dynamics_time += @elapsed begin
-                lp_dynamics = transition_logp(motion_model, traj_seq, control_seq, Δt)
+                lp_dynamics = transition_logp(motion_model_core, core_in_seq, core_out_seq)
             end
             obs_time += @elapsed begin
                 lp_obs = observation_logp(obs_model, traj_seq, obs_seq)
@@ -483,6 +459,10 @@ function sample_normal(rng::Random.AbstractRNG, μ, σ)
     x = μ + σ .* randn!(rng, zero(μ))
     logp = logpdf_normal(μ, σ, x)
     (; val=x, logp)
+end
+
+function sample_normal(μ, σ)
+    sample_normal(Random.GLOBAL_RNG, μ, σ)
 end
 
 sample_normal((μ, σ)) = sample_normal(Random.GLOBAL_RNG, μ, σ)

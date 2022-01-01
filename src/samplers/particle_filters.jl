@@ -30,7 +30,7 @@ end
 function batched_particle_filter(
     x0::BatchTuple,
     (; times, obs_frames, controls, observations);
-    motion_model,
+    sample_next_state,
     obs_model,
     resample_threshold::Float64=0.5,
     showprogress=true,
@@ -78,7 +78,7 @@ function batched_particle_filter(
         if t < T
             Δt = times[t + 1] - times[t]
             particles[t + 1] =
-                rand(motion_model(particles[t], controls[t]::BatchTuple, Δt))::BatchTuple
+                sample_next_state(particles[t], controls[t]::BatchTuple, Δt)::BatchTuple
         end
         next!(progress)
     end

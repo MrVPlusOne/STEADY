@@ -73,9 +73,13 @@ end
 x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
 test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
 
-sim_en = SEDL.simulate_trajectory(times, x0_batch, (; motion_model, obs_model), controller)
+sample_next_state = (x -> x.next_state) ∘ motion_model
+sample_observation = rand ∘ obs_model
+sim_en = SEDL.simulate_trajectory(
+    times, x0_batch, sample_next_state, sample_observation, controller
+)
 test_sim = SEDL.simulate_trajectory(
-    times, test_x0_batch, (; motion_model, obs_model), controller
+    times, test_x0_batch, sample_next_state, sample_observation, controller
 )
 # repeat_factor = 128
 # sim_en = map(sim_en) do seq
@@ -104,7 +108,7 @@ pf_result = SEDL.batched_particle_filter(
         controls=map(b -> b[sample_id], sim_en.controls),
         observations=map(b -> b[sample_id], sim_en.observations),
     );
-    motion_model,
+    sample_next_state = (x -> x.next_state) ∘ motion_model,
     obs_model,
 )
 @show pf_result.log_obs
@@ -153,6 +157,8 @@ end
 # train the guide
 linear(from, to) = x -> from + (to - from) * x
 
+@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
+
 total_steps = 6_000
 let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
     n_visual_trajs = 100
@@ -166,11 +172,11 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
 
         # Compute test elbo and plot a few trajectories.
         if r.step % 100 == 1
-            test_trajs, test_lp_guide = guide(
+            test_trajs, test_lp_guide, test_core_in, test_core_out = guide(
                 test_x0_batch, test_sim.observations, test_sim.controls, Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
-                vi_motion_model, test_trajs, test_sim.controls, Δt
+                vi_motion_model.core, test_core_in, test_core_out
             )
             test_lp_obs = SEDL.observation_logp(
                 obs_model, test_trajs, test_sim.observations
@@ -223,7 +229,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
     @info "Training the guide..."
     train_result = @time SEDL.train_guide!(
         guide,
-        vi_motion_model,
+        vi_motion_model.core,
         obs_model,
         sim_en.states[1],
         sim_en.observations,
@@ -246,7 +252,9 @@ serialize(
 )
 deserialize(joinpath(save_dir, "models.serial"))
 ##-----------------------------------------------------------
-run(`ls -lh $save_dir/`)
+run(`ls -lh "$save_dir"/tb_logs`)
+run(`tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`)
+save_dir
 ##-----------------------------------------------------------
 using BenchmarkTools
 @benchmark $(CUDA.ones(256, 1000)) * $(CUDA.ones(1000, 200))

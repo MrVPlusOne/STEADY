@@ -61,7 +61,7 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_rang
 
     rel = landmarks .- reshape(pos, 1, 2, :)
     bearing_mean = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
-    range_mean = sqrt.(rel[:, 1, :].^2 + rel[:, 2, :].^2 .+ eps(σ_range1))
+    range_mean = sqrt.(rel[:, 1, :] .^ 2 + rel[:, 2, :] .^ 2 .+ eps(σ_range1))
     landmarks_loc = reshape(landmarks, :, 1)
 
     GenericSamplable(;
@@ -101,24 +101,18 @@ function state_to_input_SE2(state::BatchTuple, control::BatchTuple)
     BatchTuple(state.tconf, bs, (; loc_v, ω, θ, control.val...))
 end
 
-function output_to_state_SE2(state::BatchTuple, output::BatchTuple, Δt)
+function output_to_state_rate_SE2(state::BatchTuple, output::BatchTuple)
     local bs = common_batch_size(state.batch_size, output.batch_size)
     local (; pos, vel, θ, ω) = state.val
     local (; loc_acc, a_θ) = output.val
     local acc = rotate2d(θ, loc_acc)
-    BatchTuple(
-        state.tconf,
-        bs,
-        (pos=pos + vel * Δt, vel=vel + acc * Δt, θ=θ + ω * Δt, ω=ω + a_θ * Δt),
-    )
+    BatchTuple(state.tconf, bs, (pos=vel, vel=acc, θ=ω, ω=a_θ))
 end
 
-function output_from_state_SE2(state::BatchTuple, next_state::BatchTuple, Δt)
-    @smart_assert state.batch_size == next_state.batch_size
+function output_from_state_rate_SE2(state::BatchTuple, state_rate::BatchTuple)
+    @smart_assert state.batch_size == state_rate.batch_size
     local (; θ) = state.val
-    local derivatives = map(state.val, next_state.val) do x, x′
-        (x′ - x) / Δt
-    end
+    local derivatives = state_rate.val
     local acc, a_θ = derivatives.vel, derivatives.ω
     local loc_acc = rotate2d(-θ, acc)
     BatchTuple(state.tconf, state.batch_size, (; loc_acc, a_θ))

@@ -23,7 +23,7 @@ end
 
 export simulate_trajectory, states_log_score, data_log_score
 
-function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
+function simulate_trajectory(times, x0, sample_next_state, sample_obs, controller)
     T = length(times)
     state = x0
 
@@ -32,7 +32,7 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
     controls = []
 
     for t in 1:T
-        y = rand(obs_model(state))
+        y = sample_obs(state)
         u = controller(state, y, times[t])
 
         push!(states, state)
@@ -41,7 +41,7 @@ function simulate_trajectory(times, x0, (; motion_model, obs_model), controller)
 
         if t < T
             Δt = times[t + 1] - times[t]
-            state = rand(motion_model(state, u, Δt))
+            state = sample_next_state(state, u, Δt)
         end
     end
 

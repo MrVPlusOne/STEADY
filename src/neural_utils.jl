@@ -105,6 +105,11 @@ end
 Base.map(f, batch::BatchTuple) =
     BatchTuple(batch.tconf, batch.batch_size, map(f, batch.val))
 
+function Base.map(f, batches::BatchTuple{TC}...) where {TC}
+    bs = common_batch_size(batches...)
+    BatchTuple(TC(), bs, map(f, map(b -> b.val, batches)...))
+end
+
 """
 Create from a batch of values.
 """
@@ -134,7 +139,7 @@ function (tconf::TensorConfig)(batch::BatchTuple)
     end
 end
 
-function batch_subset(m::Union{Real,AbstractArray}, ids::Union{Integer, UnitRange})
+function batch_subset(m::Union{Real,AbstractArray}, ids::Union{Integer,AbsVec{<:Integer}})
     r = if m isa Real
         m
     else

@@ -185,8 +185,8 @@ function batched_sketch(::Car2dScenario)
         input_vars=(; loc_v=2, ω=1, θ=1, v̂=1, steer=1),
         output_vars=(; loc_acc=2, a_θ=1),
         state_to_input=state_to_input_SE2,
-        output_to_state=output_to_state_SE2,
-        output_from_state=output_from_state_SE2,
+        output_to_state_rate=output_to_state_rate_SE2,
+        output_from_state_rate=output_from_state_rate_SE2,
     )
 end
 

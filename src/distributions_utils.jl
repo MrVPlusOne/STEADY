@@ -372,8 +372,10 @@ function log_score(d::OptionalDistr, x)
 end
 
 @kwdef struct GenericSamplable{F,G}
+    "rand_f(rng) -> sample"
     rand_f::F
-    log_pdf::G
+    "log_pdf(sample) -> logp"
+    log_pdf::G=_ -> error("not implemented")
 end
 
 rand(rng::Random.AbstractRNG, s::GenericSamplable) = s.rand_f(rng)

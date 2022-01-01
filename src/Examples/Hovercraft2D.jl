@@ -5,7 +5,7 @@ The 2D hovercraft scenario.
     landmark_info::LI
 end)
 
-Base.summary(io::IO, ::HovercraftScenario) = "Hovercarft()"
+Base.summary(io::IO, ::HovercraftScenario) = print(io, "Hovercarft()")
 
 dummy_state(::HovercraftScenario) =
     (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())
@@ -115,8 +115,8 @@ function batched_sketch(::HovercraftScenario)
         input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
         output_vars=(; loc_acc=2, a_θ=1),
         state_to_input=state_to_input_SE2,
-        output_to_state=output_to_state_SE2,
-        output_from_state=output_from_state_SE2,
+        output_to_state_rate=output_to_state_rate_SE2,
+        output_from_state_rate=output_from_state_rate_SE2,
     )
 end
 
