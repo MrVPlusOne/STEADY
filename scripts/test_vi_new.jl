@@ -71,7 +71,7 @@ controller = let scontroller = SEDL.simulation_controller(sce)
 end
 
 x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
-test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
+test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:64])
 
 sample_next_state = (x -> x.next_state) ∘ motion_model
 sample_observation = rand ∘ obs_model
@@ -99,22 +99,34 @@ end
 SEDL.plot_batched_series(times, sim_en.states) |> display
 ##-----------------------------------------------------------
 # test particle filtering
-sample_id = 2
-pf_result = SEDL.batched_particle_filter(
-    repeat(x0_batch[sample_id], 500_000),
-    (;
-        times,
-        obs_frames=1:10:100,
-        controls=map(b -> b[sample_id], sim_en.controls),
-        observations=map(b -> b[sample_id], sim_en.observations),
-    );
-    sample_next_state = (x -> x.next_state) ∘ motion_model,
-    obs_model,
+function plot_pf_posterior(
+    motion_model,
+    sim_result,
+    sample_id;
+    n_particles=100_000,
+    obs_frames=obs_frames,
+    plot_args...,
 )
-@show pf_result.log_obs
-pf_trajs = SEDL.batched_trajectories(pf_result, 100)
-SEDL.plot_batched_series(times, pf_trajs; truth=getindex.(sim_en.states, sample_id)) |>
-display
+    pf_result = SEDL.batched_particle_filter(
+        repeat(sim_result.states[1][sample_id], n_particles),
+        (;
+            times,
+            obs_frames,
+            controls=getindex.(sim_result.controls, sample_id),
+            observations=getindex.(sim_result.observations, sample_id),
+        );
+        motion_model,
+        obs_model,
+    )
+    @show pf_result.log_obs
+    pf_trajs = SEDL.batched_trajectories(pf_result, 100)
+    GC.gc()
+    SEDL.plot_batched_series(
+        times, pf_trajs; truth=getindex.(sim_result.states, sample_id), plot_args...
+    )
+end
+
+plot_pf_posterior(motion_model, sim_en, 1; title="true posterior")
 ##-----------------------------------------------------------
 # set up the NN models
 h_dim = 128
@@ -123,7 +135,7 @@ normal_transforms = @time SEDL.compute_normal_transforms(
     sketch, sim_en.states, sim_en.controls, sim_en.observations, Δt
 )
 
-vi_motion_model = if should_train_dynamics
+learned_motion_model = if should_train_dynamics
     nn_motion_model = SEDL.mk_nn_motion_model(; sketch, tconf, h_dim, normal_transforms)
     @smart_assert !isempty(Flux.params(nn_motion_model))
     nn_motion_model
@@ -131,10 +143,9 @@ else
     motion_model
 end
 
-guide =
-    SEDL.mk_guide(;
-        sketch, dynamics_core=vi_motion_model.core, h_dim, y_dim, normal_transforms
-    ) |> device
+plot_pf_posterior(
+    learned_motion_model, sim_en, 1; obs_frames=1:2, title="Motion model prior (initial)"
+) |> display
 
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
@@ -147,24 +158,108 @@ if isdir(save_dir)
 end
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
-elbo_history = []
-let (prior_trajs, _) = guide(sim_en.states[1], sim_en.observations, sim_en.controls, Δt)
-    SEDL.plot_batched_series(
-        times, SEDL.TensorConfig(false).(prior_trajs); title="Guide prior"
-    ) |> display
+@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
+
+# guide =
+#     SEDL.mk_guide(;
+#         sketch, dynamics_core=learned_motion_model.core, h_dim, y_dim, normal_transforms
+#     ) |> device
+
+# let (prior_trajs, _) = guide(sim_en.states[1], sim_en.observations, sim_en.controls, Δt)
+#     SEDL.plot_batched_series(
+#         times, SEDL.TensorConfig(false).(prior_trajs); title="Guide posterior (initial)"
+#     ) |> display
+# end
+##-----------------------------------------------------------
+# train the model using expectation maximization
+
+function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_every=100)
+    prog = Progress(n_steps; showspeed=true)
+    function (r)
+        Base.with_logger(logger) do
+            @info "training" r.log_obs r.loss r.lr
+            @info "statistics" r.time_stats... log_step_increment = 0
+        end
+
+        # Compute test log_obs and plot a few trajectories.
+        if r.step % test_every == 1
+            test_scores = @showprogress "testing..." map(1:(test_x0_batch.batch_size)) do i
+                pf_result = SEDL.batched_particle_filter(
+                    test_x0_batch[i],
+                    (;
+                        times,
+                        obs_frames,
+                        controls=getindex.(test_sim.controls, i),
+                        observations=getindex.(test_sim.observations, i),
+                    );
+                    motion_model=learned_motion_model,
+                    obs_model,
+                    showprogress=false,
+                )
+                pf_result.log_obs
+            end
+
+            Base.with_logger(logger) do
+                @info "testing" log_obs = mean(test_scores) log_step_increment = 0
+            end
+
+            for name in ["training", "testing"], id in [1]
+                sim_data = name == "training" ? sim_en : test_sim
+                plt = plot_pf_posterior(
+                    learned_motion_model,
+                    sim_data,
+                    id;
+                    title="$name traj $id (iter $(r.step))",
+                )
+
+                Base.with_logger(logger) do
+                    kv = [Symbol("traj_$id") => plt]
+                    @info name log_step_increment = 0 kv...
+                end
+                display(plt)
+            end
+        end
+
+        next!(
+            prog;
+            showvalues=[
+                (:log_obs, r.log_obs),
+                (:loss, r.loss),
+                (:step, r.step),
+                (:learning_rate, r.lr),
+            ],
+        )
+    end
+end
+
+total_steps = 8_000
+let n_steps = is_quick_test ? 3 : total_steps + 1
+    @info "Training the dynamics using EM"
+    SEDL.train_dynamics_em!(
+        learned_motion_model,
+        obs_model,
+        sim_en.states[1],
+        sim_en.observations,
+        sim_en.controls,
+        (; times, obs_frames);
+        optimizer=adam,
+        n_steps,
+        minibatch=4,
+        callback=em_callback(learned_motion_model; n_steps, test_every=500),
+        sampling_model=motion_model, # FIXME
+        # lr_schedule=let β = 20^2 / total_steps
+        #     step -> 1e-3 / sqrt(β * step)
+        # end,
+    )
 end
 ##-----------------------------------------------------------
-# train the guide
-linear(from, to) = x -> from + (to - from) * x
-
-@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
+# train the guide using variational inference
 
 total_steps = 6_000
 let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; showspeed=true)
     n_visual_trajs = 100
 
     callback(r) = begin
-        push!(elbo_history, r.elbo)
         Base.with_logger(logger) do
             @info "training" r.elbo r.loss r.lr r.annealing
             @info "statistics" r.time_stats... log_step_increment = 0
@@ -176,7 +271,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
                 test_x0_batch, test_sim.observations, test_sim.controls, Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
-                vi_motion_model.core, test_core_in, test_core_out
+                learned_motion_model.core, test_core_in, test_core_out
             )
             test_lp_obs = SEDL.observation_logp(
                 obs_model, test_trajs, test_sim.observations
@@ -189,7 +284,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            for name in ["training", "testing"], id in [1, 2]
+            for name in ["training", "testing"], id in [1]
                 sim_data = name == "training" ? sim_en : test_sim
                 visual_states = map(b -> b[id], sim_data.states)
                 visual_obs = map(b -> repeat(b[id], n_visual_trajs), sim_data.observations)
@@ -229,7 +324,7 @@ let n_steps = is_quick_test ? 3 : total_steps + 1, prog = Progress(n_steps; show
     @info "Training the guide..."
     train_result = @time SEDL.train_guide!(
         guide,
-        vi_motion_model.core,
+        learned_motion_model.core,
         obs_model,
         sim_en.states[1],
         sim_en.observations,
@@ -248,12 +343,11 @@ end
 # save the model
 serialize(
     joinpath(save_dir, "models.serial"),
-    (vi_motion_model=Flux.cpu(vi_motion_model), guide=Flux.cpu(guide)),
+    (learned_motion_model=Flux.cpu(learned_motion_model), guide=Flux.cpu(guide)),
 )
 deserialize(joinpath(save_dir, "models.serial"))
 ##-----------------------------------------------------------
 run(`ls -lh "$save_dir"/tb_logs`)
-run(`tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`)
 save_dir
 ##-----------------------------------------------------------
 using BenchmarkTools

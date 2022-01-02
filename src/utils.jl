@@ -1,6 +1,6 @@
 export specific_elems, count_len
-export max_by, sort_by
-export rotate2d, rotation2D, °
+export max_by, sort_by, mean, std
+export rotate2d, rotation2D, °, linear
 export Optional, map_optional
 
 using MacroTools: @capture
@@ -625,6 +625,8 @@ function parallel_map(
 end
 
 sigmoid(x::Real) = one(x) / (one(x) + exp(-x))
+
+linear(from, to) = x -> from + (to - from) * x
 
 """
 Combine a named tuple of functions into a function that returns a named tuple.

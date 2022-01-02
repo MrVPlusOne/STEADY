@@ -12,3 +12,5 @@ include("em_synthesis.jl")
 include("sindy_regression.jl")
 include("symbolic_regression.jl")
 include("neural_regression.jl")
+
+include("batched_em.jl")

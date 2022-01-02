@@ -102,19 +102,31 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
 end
 @use_short_show BatchTuple
 
+"""
+Create from a batch of values.
+"""
+function BatchTuple(tconf::TensorConfig, values::Vector{<:NamedTuple})
+    BatchTuple(tconf, length(values), map(tconf, hcatreduce(values)))
+end
+
+function BatchTuple(template::BatchTuple, val::NamedTuple)
+    BatchTuple(template.tconf, template.batch_size, val)
+end
+
+function BatchTuple(batches::AbsVec{<:BatchTuple})
+    BatchTuple(
+        batches[1].tconf,
+        sum(x -> x.batch_size, batches),
+        hcatreduce((x -> inflate_batch(x).val).(batches)),
+    )
+end
+
 Base.map(f, batch::BatchTuple) =
     BatchTuple(batch.tconf, batch.batch_size, map(f, batch.val))
 
 function Base.map(f, batches::BatchTuple{TC}...) where {TC}
     bs = common_batch_size(batches...)
     BatchTuple(TC(), bs, map(f, map(b -> b.val, batches)...))
-end
-
-"""
-Create from a batch of values.
-"""
-function BatchTuple(tconf::TensorConfig, values::Vector{<:NamedTuple})
-    BatchTuple(tconf, length(values), map(tconf, hcatreduce(values)))
 end
 
 function Base.length(batch::BatchTuple)
@@ -147,9 +159,9 @@ function batch_subset(m::Union{Real,AbstractArray}, ids::Union{Integer,AbsVec{<:
         if s[end] == 1
             m
         else
-            colons = map(_ -> :, s)
+            colons = ntuple(_ -> :, ndims(m) - 1)
             ids1 = ids isa Integer ? (ids:ids) : ids
-            m[colons[1:(end - 1)]..., ids1]
+            m[colons..., ids1]
         end
     end
     r::typeof(m)

@@ -183,7 +183,7 @@ function batched_core(::HovercraftScenario, params)
         loc_acc = vcat(a_x, a_y)
         @smart_assert size(loc_acc) == size(loc_v)
         μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
-        σs = BatchTuple(tconf, batch_size, (loc_acc=tconf([σ_v;;]), a_θ=tconf([σ_ω;;])))
+        σs = BatchTuple(input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 1, 1))))
         (; μs, σs)
     end
 end

@@ -1,5 +1,6 @@
 # posterior smoother based on variational inference
 using Random
+using CUDA
 ##-----------------------------------------------------------
 # batched motion model
 export BatchedMotionSketch, BatchedMotionModel, transition_logp, observation_logp
@@ -19,7 +20,8 @@ end
 @use_short_show BatchedMotionSketch
 
 """
-    motion_model(state::BatchTuple, control::BatchTuple, Δt) -> distribution_of_next_state
+    motion_model(state::BatchTuple, control::BatchTuple, Δt) -> 
+        (; next_state, logp, core_input, core_output)
 
 A probabilistic motion model that can be used to sample new states in batch.
 The motion model is constructed from a sketch and a core. Sampling of the new state is 
@@ -40,7 +42,7 @@ Flux.trainable(bmm::BatchedMotionModel) = Flux.trainable(bmm.core)
 
 
 function (motion_model::BatchedMotionModel{TC})(
-    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency=false,
+    x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency=false
 ) where {TC}
     bs = common_batch_size(x.batch_size, u.batch_size)
     sketch, core = motion_model.sketch, motion_model.core
@@ -66,9 +68,7 @@ function (motion_model::BatchedMotionModel{TC})(
     (; next_state, logp=sum(lps), core_input, core_output=out_batch)
 end
 
-function transition_logp(
-    core, core_input_seq::TimeSeries, core_output_seq::TimeSeries
-)
+function transition_logp(core, core_input_seq::TimeSeries, core_output_seq::TimeSeries)
     @smart_assert length(core_input_seq) == length(core_output_seq)
     T = length(core_input_seq)
     map(1:(T - 1)) do t
@@ -84,6 +84,129 @@ function observation_logp(obs_model, x_seq::TimeSeries, obs_seq)
     end |> sum
 end
 
+##-----------------------------------------------------------
+# batched particle filtering
+function batched_particle_filter(
+    x0::BatchTuple,
+    (; times, obs_frames, controls, observations);
+    motion_model::BatchedMotionModel,
+    obs_model,
+    record_io=false,
+    resample_threshold::Float64=0.5,
+    showprogress=true,
+)
+    x0 = inflate_batch(x0)
+    tconf = x0.tconf
+    @smart_assert eltype(obs_frames) <: Integer
+    T, N = length(times), x0.batch_size
+    particles = Vector{typeof(x0)}(undef, T)
+    particles[1] = x0
+    if record_io
+        core_inputs = []
+        core_outputs = []
+    end
+    id_type = tconf.on_gpu ? CuArray : Array
+    ancestors = fill(id_type(1:N), T)
+    n_resampled = 0
+
+    log_weights = new_array(tconf, N)
+    log_weights .= -log(N)
+    weights = exp.(log_weights)
+    log_obs = 0.0
+    bins_buffer = new_array(tconf, N)
+
+    progress = Progress(
+        T; desc="batched_particle_filter", output=stdout, enabled=showprogress
+    )
+    for t in 1:T
+        if t in obs_frames
+            lp = logpdf(obs_model(particles[t]), observations[t]::BatchTuple)
+            @smart_assert length(lp) == N
+            log_weights += reshape(lp, N)
+            log_z_t = logsumexp(log_weights)
+            log_weights .-= log_z_t
+            weights .= exp.(log_weights)
+            log_obs += log_z_t
+
+            # optionally resample
+            if effective_particles(weights) < N * resample_threshold
+                indices = copy(ancestors[t])
+                systematic_resample!(indices, weights, bins_buffer)
+                # @smart_assert all(i -> 1 <= i <= N, collect(indices)) "Bad indices!"
+                ancestors[t] = indices
+                log_weights .= -log(N)
+                particles[t] = particles[t][indices]
+                if record_io && t > 1
+                    core_inputs[t - 1] = core_inputs[t - 1][indices]
+                    core_outputs[t - 1] = core_outputs[t - 1][indices]
+                end
+                n_resampled += 1
+            end
+        end
+
+        if t < T
+            Δt = times[t + 1] - times[t]
+            (; next_state, core_input, core_output) = motion_model(
+                particles[t], controls[t]::BatchTuple, Δt
+            )
+            particles[t + 1] = next_state
+            if record_io
+                push!(core_inputs, core_input)
+                push!(core_outputs, core_output)
+            end
+        end
+        next!(progress)
+    end
+
+    out = (; particles, weights, log_weights, ancestors, log_obs, n_resampled)
+    if record_io
+        merge(out, (; core_inputs, core_outputs))
+    else
+        out
+    end
+end
+
+# This is used to replace the logsumexp that causes trouble on GPU
+function simple_logsumexp(xs)
+    mx = maximum(xs)
+    log(sum(exp.(xs .- mx))) .+ mx
+end
+
+let rx = randn(100)
+    @smart_assert simple_logsumexp(rx * 100) ≈ logsumexp(rx * 100)
+end
+
+"""
+Sample full trajectories from a batched particle filter by tracing the ancestral lineages.
+"""
+function batched_trajectories(pf_result, n_trajs; record_io=false)
+    (; particles::Vector{<:BatchTuple}, ancestors::Vector{<:AbsVec}, weights::AbsVec) =
+        pf_result
+    if record_io
+        (; core_inputs, core_outputs) = pf_result
+        core_input_seq = []
+        core_output_seq = []
+    end
+    # first sample indices at the last time step according to the final weights
+    indices = systematic_resample(weights, n_trajs)
+    T = length(particles)
+    trajectory = BatchTuple[particles[T][indices]]
+    for t in (T - 1):-1:1
+        indices = ancestors[t + 1][indices]
+        push!(trajectory, particles[t][indices])
+        if record_io && t > 1
+            push!(core_input_seq, core_inputs[t - 1][indices])
+            push!(core_output_seq, core_outputs[t - 1][indices])
+        end
+    end
+
+    trajectory = reverse(trajectory)
+    if record_io
+        (; trajectory, core_input_seq, core_output_seq)
+    else
+        trajectory
+    end
+end
 ##-----------------------------------------------------------
 # VI Guide
 export VIGuide, mk_guide, train_guide!, mk_nn_motion_model
@@ -186,15 +309,15 @@ end
 
 mlp_with_skip(n_in, n_out, out_activation=identity; h_dim) =
     FluxLayer(
-        Val(:mlp),
-        (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 * 3 + n_in, n_out)),
+        Val(:mlp), (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 + n_in, n_out))
     ) do (; layer1, layer2)
         x -> begin
             local y1 = layer1(x)
-            local a1 = vcat(x, sin.(y1), tanh.(y1), relu.(y1))
+            local a1 = vcat(x, relu.(y1))
             out_activation.(layer2(a1))
         end
     end
+# Chain(Dense(n_in, h_dim, relu), Dense(h_dim, n_out, out_activation))
 
 function mk_guide(;
     sketch::BatchedMotionSketch,
@@ -318,16 +441,23 @@ function mk_nn_motion_model(;
             Val(:nn_motion_model),
             (
                 center=mlp(core_in_dim, core_out_dim),
-                scale=mlp(core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ)),
+                # scale=mlp(core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ)),
+                scale=Trainable(Val(false), zeros(core_out_dim)),
             ),
         ) do (; center, scale)
             (core_input::BatchTuple) -> begin
                 local (; batch_size) = core_input
                 local core_val = inv(core_in_trans)(core_input.val)
+                local core_val = core_input.val
                 local input = vcat_bc(core_val...; batch_size)
-                local μ_data, σ_data = center(input), scale(input)
-                local μs = split_components(μ_data, sketch.output_vars)
-                local σs = split_components(σ_data, sketch.output_vars)
+                local μ_data = center(input)
+                local σ_data = reshape(max.(softplus.(scale.array), min_σ), core_out_dim, 1)
+                local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
+                local σs = map(
+                    .*,
+                    core_out_trans.scale,
+                    split_components(σ_data, sketch.output_vars),
+                )
                 map((; μs, σs)) do nt
                     BatchTuple(core_input.tconf, batch_size, nt)
                 end
@@ -366,8 +496,8 @@ function train_guide!(
     callback::Function=_ -> nothing,
     weight_decay=1.0f-4,
 )
-    guide_time = dynamics_time = obs_time = callback_time = 0.0
-    batch_size = common_batch_size(obs_seq[1], control_seq[1])
+    guide_time = dynamics_time = optimization_time = obs_time = callback_time = 0.0
+    batch_size = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
     T = length(obs_seq)
 
     all_ps = Flux.params((guide, motion_model_core))
@@ -402,19 +532,20 @@ function train_guide!(
         end
         step == 1 && loss(; test_consistency=true)  # just for testing
         (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
-        if isfinite(val)
-            if lr_schedule !== nothing
-                optimizer.eta = lr_schedule(step)
-            end
+        isfinite(val) || error("Loss is not finite: $val")
+        if lr_schedule !== nothing
+            optimizer.eta = lr_schedule(step)
+        end
+        optimization_time += @elapsed begin
             Flux.update!(optimizer, all_ps, grad) # update parameters
             for p in reg_ps
-                p .-= weight_decay * p
+                p .-= weight_decay .* p
             end
-        else
-            error("ELBO is not finite: $val")
         end
-        time_stats = (; guide_time, dynamics_time, obs_time, callback_time)
-        cb_args = (;
+        time_stats = (;
+            guide_time, dynamics_time, obs_time, optimization_time, callback_time
+        )
+        callback_args = (;
             step,
             loss=val,
             elbo=elbo[],
@@ -423,10 +554,9 @@ function train_guide!(
             lr=optimizer.eta,
             time_stats,
         )
-        callback_time += @elapsed callback(cb_args)
+        callback_time += @elapsed callback(callback_args)
     end
-    time_stats = (; guide_time, dynamics_time, obs_time)
-    time_stats
+    @info "Training finished ($n_steps steps)."
 end
 
 function logpdf_normal(μ, σ, x)
@@ -456,7 +586,9 @@ Sample a noramlly distributed value along with the corresponding log probability
 """
 function sample_normal(rng::Random.AbstractRNG, μ, σ)
     σ = max.(σ, eps(eltype(σ)))
-    x = μ + σ .* randn!(rng, zero(μ))
+    # if μ isa CuArray
+    #     μ .+ σ .* CUDA.randn(size(μ))
+    x = μ .+ σ .* randn!(zero(μ))
     logp = logpdf_normal(μ, σ, x)
     (; val=x, logp)
 end
