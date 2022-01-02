@@ -68,22 +68,23 @@ function (motion_model::BatchedMotionModel{TC})(
     (; next_state, logp=sum(lps), core_input, core_output=out_batch)
 end
 
-function transition_logp(core, core_input_seq::TimeSeries, core_output_seq::TimeSeries)
+function transition_logp(
+    core,
+    core_input_seq::TimeSeries{<:BatchTuple},
+    core_output_seq::TimeSeries{<:BatchTuple},
+)::Real
     @smart_assert length(core_input_seq) == length(core_output_seq)
-    T = length(core_input_seq)
-    map(1:(T - 1)) do t
-        (; μs::BatchTuple, σs::BatchTuple) = core(core_input_seq[t])
-        lps = map(logpdf_normal, μs.val, σs.val, core_output_seq[t].val)
-        sum(lps)::AbsMat
-    end |> sum
+    (; μs::BatchTuple, σs::BatchTuple) = core(BatchTuple(core_input_seq))
+    lps = map(logpdf_normal, μs.val, σs.val, BatchTuple(core_output_seq).val)
+    sum(sum(lps)::AbsMat)
 end
 
-function observation_logp(obs_model, x_seq::TimeSeries, obs_seq)
-    map(x_seq, obs_seq) do x, o
-        logpdf(obs_model(x), o)
-    end |> sum
+function observation_logp(
+    obs_model, x_seq::TimeSeries{<:BatchTuple}, obs_seq::TimeSeries{<:BatchTuple}
+)::Real
+    @smart_assert length(x_seq) == length(obs_seq)
+    sum(logpdf(obs_model(BatchTuple(x_seq)), BatchTuple(obs_seq))::AbsMat)
 end
-
 ##-----------------------------------------------------------
 # batched particle filtering
 function batched_particle_filter(
@@ -308,16 +309,16 @@ function compute_normal_transforms(
 end
 
 mlp_with_skip(n_in, n_out, out_activation=identity; h_dim) =
-    FluxLayer(
-        Val(:mlp), (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 + n_in, n_out))
-    ) do (; layer1, layer2)
-        x -> begin
-            local y1 = layer1(x)
-            local a1 = vcat(x, relu.(y1))
-            out_activation.(layer2(a1))
-        end
-    end
-# Chain(Dense(n_in, h_dim, relu), Dense(h_dim, n_out, out_activation))
+# FluxLayer(
+#     Val(:mlp), (layer1=Dense(n_in, h_dim ÷ 2), layer2=Dense(h_dim ÷ 2 + n_in, n_out))
+# ) do (; layer1, layer2)
+#     x -> begin
+#         local y1 = layer1(x)
+#         local a1 = vcat(x, relu.(y1))
+#         out_activation.(layer2(a1))
+#     end
+# end
+    Chain(Dense(n_in, h_dim, relu), Dense(h_dim, n_out, out_activation))
 
 function mk_guide(;
     sketch::BatchedMotionSketch,
@@ -360,39 +361,34 @@ function mk_guide(;
     guide_core = FluxLayer(
         Val(:guide_core),
         (
-            # dynamics_core=dynamics_core,
-            center=mlp(core_in_dim + 2core_out_dim + x_dim + rnn_dim, core_out_dim),
-            scale=mlp(
-                core_in_dim + 2core_out_dim + x_dim + rnn_dim,
-                core_out_dim,
-                sigmoid, # x -> max.(softplus.(x), min_σ),
+            gate=Chain(Dense(h_dim, h_dim, relu), Dense(h_dim, core_out_dim, sigmoid)),
+            propose_left=mlp(core_in_dim, h_dim, tanh),
+            propose_right=mlp(rnn_dim + x_dim, h_dim, tanh),
+            mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
+            mean2=Dense(h_dim, core_out_dim; init=zero_init),
+            scale=Dense(
+                h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
             ),
         ),
-    ) do (; center, scale)
+    ) do (; gate, propose_left, propose_right, mean1, mean2, scale)
         (core_input::BatchTuple, state::BatchTuple, future::BatchTuple) -> begin
             local batch_size = common_batch_size(core_input, state, future)
-            local dy_μs, dy_σs = dynamics_core(core_input)
 
-            local μs_val = inv(core_out_trans)(dy_μs.val)
-            local σs_val = map(./, dy_σs.val, core_out_trans.scale)
-            local core_val = inv(core_in_trans)(core_input.val)
-            local x_val = inv(state_trans)(state.val)
+            local left_input = vcat_bc(inv(core_in_trans)(core_input.val)...; batch_size)
+            local right_input = vcat_bc(
+                inv(state_trans)(state.val)..., future.val...; batch_size
+            )
+            local prop = propose_left(left_input) + propose_right(right_input)
+            local g = gate(prop)
+            local μ_data = (1 .- g) .* mean1(left_input) .+ g .* mean2(prop)
+            local σ_data = scale(prop)
 
-            local input = vcat_bc(
-                μs_val...,
-                σs_val...,
-                core_val...,
-                x_val...,
-                future.val...;
-                batch_size,
+            local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
+            local σs = map(
+                .*,
+                core_out_trans.scale,
+                split_components(σ_data, sketch.output_vars),
             )
-            local μ_data, σ_data = center(input), scale(input)
-            local μs = map(
-                .+,
-                dy_μs.val,
-                map(v -> 0.1f0v, split_components(μ_data, sketch.output_vars)),
-            )
-            local σs = map(.*, dy_σs.val, split_components(σ_data, sketch.output_vars))
             map((; μs, σs)) do nt
                 BatchTuple(core_input.tconf, batch_size, nt)
             end
@@ -426,6 +422,8 @@ function mk_guide(;
     )
 end
 
+zero_init(args...) = Flux.identity_init(args...; gain=0)
+
 function mk_nn_motion_model(;
     sketch::BatchedMotionSketch, tconf, h_dim, normal_transforms, min_σ=1.0f-3
 )
@@ -436,33 +434,39 @@ function mk_nn_motion_model(;
 
     (; core_in_trans, core_out_trans) = normal_transforms
 
-    core =
-        FluxLayer(
-            Val(:nn_motion_model),
-            (
-                center=mlp(core_in_dim, core_out_dim),
-                # scale=mlp(core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ)),
-                scale=Trainable(Val(false), zeros(core_out_dim)),
+    core = FluxLayer(
+        Val(:nn_motion_model),
+        (
+            gate=Chain(
+                Dense(core_in_dim, h_dim, relu), Dense(h_dim, core_out_dim, sigmoid)
             ),
-        ) do (; center, scale)
-            (core_input::BatchTuple) -> begin
-                local (; batch_size) = core_input
-                local core_val = inv(core_in_trans)(core_input.val)
-                local core_val = core_input.val
-                local input = vcat_bc(core_val...; batch_size)
-                local μ_data = center(input)
-                local σ_data = reshape(max.(softplus.(scale.array), min_σ), core_out_dim, 1)
-                local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
-                local σs = map(
-                    .*,
-                    core_out_trans.scale,
-                    split_components(σ_data, sketch.output_vars),
-                )
-                map((; μs, σs)) do nt
-                    BatchTuple(core_input.tconf, batch_size, nt)
-                end
+            propose=mlp(core_in_dim, h_dim, relu),
+            mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
+            mean2=Dense(h_dim, core_out_dim; init=zero_init),
+            scale=Dense(
+                h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
+            ),
+        ),
+    ) do (; gate, propose, mean1, mean2, scale)
+        (core_input::BatchTuple) -> begin
+            local (; batch_size) = core_input
+            local core_val = inv(core_in_trans)(core_input.val)
+            local input = vcat_bc(core_val...; batch_size)
+            local g = gate(input)
+            local prop = propose(input)
+            local μ_data = (1 .- g) .* mean1(input) .+ g .* mean2(prop)
+            local σ_data = scale(prop)
+            local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
+            local σs = map(
+                .*,
+                core_out_trans.scale,
+                split_components(σ_data, sketch.output_vars),
+            )
+            map((; μs, σs)) do nt
+                BatchTuple(core_input.tconf, batch_size, nt)
             end
-        end |> (tconf.on_gpu ? Flux.gpu : Flux.cpu)
+        end
+    end
     BatchedMotionModel(tconf, sketch, core)
 end
 
@@ -496,13 +500,14 @@ function train_guide!(
     callback::Function=_ -> nothing,
     weight_decay=1.0f-4,
 )
-    guide_time = dynamics_time = optimization_time = obs_time = callback_time = 0.0
+    guide_time = dynamics_time = gradient_time = obs_time = callback_time = 0.0
     batch_size = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
     T = length(obs_seq)
 
     all_ps = Flux.params((guide, motion_model_core))
     @info "total number of array parameters: $(length(all_ps))"
-    reg_ps = Flux.Params(collect(regular_params(guide)))
+    reg_ps = Flux.params((collect ∘ regular_params).((guide, motion_model_core)))
+    @info "total number of regular parameters: $(length(reg_ps))"
 
     for step in 1:n_steps
         # batch_size = n_samples_f(step)::Int  fixme
@@ -517,34 +522,33 @@ function train_guide!(
                 )
             end
             dynamics_time += @elapsed begin
-                lp_dynamics = transition_logp(motion_model_core, core_in_seq, core_out_seq)
+                lp_dynamics =
+                    transition_logp(motion_model_core, core_in_seq, core_out_seq)::Real
             end
             obs_time += @elapsed begin
-                lp_obs = observation_logp(obs_model, traj_seq, obs_seq)
+                lp_obs = observation_logp(obs_model, traj_seq, obs_seq)::Real
             end
             @smart_assert size(lp_guide) == (1, batch_size)
-            @smart_assert size(lp_dynamics) == (1, batch_size)
-            @smart_assert size(lp_obs) == (1, batch_size)
-            obs_term = sum(lp_obs) / (batch_size * T)
-            transition_term = (sum(lp_dynamics) - sum(lp_guide)) / (batch_size * T)
+            obs_term = lp_obs / (batch_size * T)
+            transition_term = (lp_dynamics - sum(lp_guide)) / (batch_size * T)
             elbo[] = obs_term + transition_term
             -(obs_term + w * transition_term)
         end
         step == 1 && loss(; test_consistency=true)  # just for testing
-        (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
+        gradient_time += @elapsed begin
+            (; val, grad) = Flux.withgradient(loss, all_ps) # compute gradient
+        end
+
         isfinite(val) || error("Loss is not finite: $val")
         if lr_schedule !== nothing
             optimizer.eta = lr_schedule(step)
         end
-        optimization_time += @elapsed begin
-            Flux.update!(optimizer, all_ps, grad) # update parameters
-            for p in reg_ps
-                p .-= weight_decay .* p
-            end
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        for p in reg_ps
+            p .-= weight_decay .* p
         end
-        time_stats = (;
-            guide_time, dynamics_time, obs_time, optimization_time, callback_time
-        )
+        
+        time_stats = (; guide_time, dynamics_time, obs_time, gradient_time, callback_time)
         callback_args = (;
             step,
             loss=val,

@@ -214,7 +214,7 @@ function batched_core(dyn::BicycleCarDyn, params)
 
             μs = BatchTuple(input, (; loc_acc, a_θ))
             σs = BatchTuple(
-                input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 2, 1)))
+                input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 1, 1)))
             )
             (; μs, σs)
         end
@@ -240,7 +240,7 @@ function batched_core(dyn::BicycleCarDyn, params)
 
             μs = BatchTuple(input, (; loc_acc, a_θ))
             σs = BatchTuple(
-                input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 2, 1)))
+                input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 1, 1)))
             )
             (; μs, σs)
         end
