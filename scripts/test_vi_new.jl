@@ -12,6 +12,7 @@ using ProgressMeter
 using Serialization: serialize, deserialize
 using DataFrames: DataFrame
 using Alert
+using Random
 
 !true && begin
     include("../src/SEDL.jl")
@@ -26,10 +27,13 @@ if !@isdefined is_quick_test
 end
 is_quick_test && @info "Quick testing VI..."
 
+Random.seed!(123)
+
 should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
 use_gpu = true
 use_simple_obs_model = false
 train_method = :EM  # :VI or :EM
+n_train_ex = 16
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 device = use_gpu ? Flux.gpu : Flux.cpu
 
@@ -73,8 +77,8 @@ controller = let scontroller = SEDL.simulation_controller(sce)
     end
 end
 
-x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:128])
 test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:64])
+x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:n_train_ex])
 
 sample_next_state = (x -> x.next_state) ∘ motion_model
 sample_observation = rand ∘ obs_model
@@ -194,21 +198,6 @@ plot_pf_posterior(
     learned_motion_model, sim_en, 1; obs_frames=1:2, title="Motion model prior (initial)"
 ) |> display
 
-# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
-adam = Flux.ADAM(1e-4)
-settings = (;
-    scenario=summary(sce), train_method, h_dim, should_train_dynamics, use_simple_obs_model
-)
-save_dir = SEDL.data_dir(savename("test_vi", settings; connector="-"))
-if isdir(save_dir)
-    @warn "removing old data at $save_dir..."
-    rm(save_dir; recursive=true)
-    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
-end
-
-logger = TBLogger(joinpath(save_dir, "tb_logs"))
-@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
-
 if train_method == :VI
     guide =
         SEDL.mk_guide(;
@@ -221,6 +210,26 @@ if train_method == :VI
         ) |> display
     end
 end
+
+# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
+adam = Flux.ADAM(1e-4)
+settings = (;
+    scenario=summary(sce),
+    train_method,
+    h_dim,
+    should_train_dynamics,
+    use_simple_obs_model,
+    n_train_ex,
+)
+save_dir = SEDL.data_dir(savename("test_vi", settings; connector="-"))
+if isdir(save_dir)
+    @warn "removing old data at $save_dir..."
+    rm(save_dir; recursive=true)
+    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
+end
+
+logger = TBLogger(joinpath(save_dir, "tb_logs"))
+@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
 ##-----------------------------------------------------------
 # train the model using expectation maximization
 
@@ -413,7 +422,7 @@ plot_pf_posterior(
     motion_model, sim_en, 1; obs_frames=1:1, title="Open-loop prediction (true model)"
 ) |> display
 
-perf_table=let
+perf_table = let
     @info "Testing dynamics model performance on the test set"
     rows = [
         merge((name="learned",), estimate_logp_pf(learned_motion_model, test_sim)),
@@ -421,7 +430,7 @@ perf_table=let
     ]
     DataFrame(rows)
 end
-write(joinpath(save_dir, "logp_obs_table.bson"), perf_table)
+wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf_table)
 display(perf_table)
 ##-----------------------------------------------------------
 run(`ls -lh "$save_dir"/tb_logs`)

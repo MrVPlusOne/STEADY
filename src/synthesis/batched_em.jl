@@ -51,10 +51,9 @@ function train_dynamics_em!(
             end
         end
         log_obs = mean(log_obs_set)
+        n_trans = sum(x -> x.batch_size, core_in_set)
 
-        loss() =
-            -transition_logp(motion_model.core, core_in_set, core_out_set) /
-            length(core_in_set)
+        loss() = -transition_logp(motion_model.core, core_in_set, core_out_set) / n_trans
 
         step == 1 && loss() # just for testing
         gradient_time += @elapsed CUDA.@sync begin
