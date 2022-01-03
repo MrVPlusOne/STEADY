@@ -11,7 +11,7 @@ function train_dynamics_em!(
     lr_schedule=nothing,
     n_particles=100_000,
     minibatch=32, # the number of examples in each learning step
-    trajs_per_ex = 10,
+    trajs_per_ex=10,
     callback::Function=_ -> nothing,
     weight_decay=1.0f-4,
 )
@@ -51,17 +51,13 @@ function train_dynamics_em!(
             end
         end
         log_obs = mean(log_obs_set)
-        core_inputs = BatchTuple(core_in_set)
-        core_outputs = BatchTuple(core_out_set)
 
-        loss() = begin
-            (; μs::BatchTuple, σs::BatchTuple) = motion_model.core(core_inputs)
-            lps = map(logpdf_normal, μs.val, σs.val, core_outputs.val)
-            -mean(sum(lps)::AbsMat)
-        end
+        loss() =
+            -transition_logp(motion_model.core, core_in_set, core_out_set) /
+            length(core_in_set)
 
         step == 1 && loss() # just for testing
-        gradient_time += @elapsed begin
+        gradient_time += @elapsed CUDA.@sync begin
             (; val, grad) = Flux.withgradient(loss, all_ps)
             isfinite(val) || error("Loss is not finite: $val")
         end
@@ -77,7 +73,6 @@ function train_dynamics_em!(
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
         callback_args = (; step, loss=val, log_obs, lr=optimizer.eta, time_stats)
         callback_time += @elapsed callback(callback_args)
-        CUDA.synchronize(; blocking=true)
     end
     @info "Training finished ($n_steps steps)."
 end

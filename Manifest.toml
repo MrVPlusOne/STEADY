@@ -43,6 +43,18 @@ git-tree-sha1 = "0a655e9a59ee1c8bafc3af18e96d90f980b08600"
 uuid = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
 version = "0.3.2"
 
+[[deps.Alert]]
+deps = ["Base64", "Dates", "Logging", "MacroTools", "Printf", "REPL"]
+git-tree-sha1 = "89a6ecff5408002c45e04db5aab395ba5915c81e"
+uuid = "28312eec-4d86-447d-83ad-bc2b262de792"
+version = "1.2.0"
+
+[[deps.AlertPushover]]
+deps = ["Alert", "HTTP"]
+git-tree-sha1 = "04b5b61d25bbb53af6b7b717a9ee8207961935a5"
+uuid = "19f6540d-ecb3-4e88-b99d-153996aa3b9b"
+version = "1.0.0"
+
 [[deps.ArgCheck]]
 git-tree-sha1 = "dedbbb2ddb876f899585c4ec4433265e3017215a"
 uuid = "dce04be8-c92d-5529-be00-80e4d2c0e197"

@@ -46,6 +46,7 @@ function simulate_trajectory(times, x0, sample_next_state, sample_obs, controlle
     end
 
     (
+        times=times,
         states=specific_elems(states),
         observations=specific_elems(observations),
         controls=specific_elems(controls),

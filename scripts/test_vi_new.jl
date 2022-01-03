@@ -11,6 +11,7 @@ using TensorBoardLogger: TBLogger
 using ProgressMeter
 using Serialization: serialize, deserialize
 using DataFrames: DataFrame
+using Alert
 
 !true && begin
     include("../src/SEDL.jl")
@@ -27,8 +28,8 @@ is_quick_test && @info "Quick testing VI..."
 
 should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
 use_gpu = true
-use_simple_obs_model = true
-train_method = :VI  # :VI or :EM
+use_simple_obs_model = false
+train_method = :EM  # :VI or :EM
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 device = use_gpu ? Flux.gpu : Flux.cpu
 
@@ -50,7 +51,7 @@ sample_x0() = (;
 
 Δt = tconf(0.1)
 times = 0:Δt:10
-obs_frames = 1:10:length(times)
+obs_frames = eachindex(times)
 
 true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
 sketch = SEDL.batched_sketch(sce)
@@ -58,10 +59,10 @@ motion_model = SEDL.BatchedMotionModel(tconf, sketch, SEDL.batched_core(sce, tru
 @smart_assert isempty(Flux.params(motion_model))
 
 obs_model = if use_simple_obs_model
-    state -> SEDL.gaussian_obs_model(state, (pos=1.0, vel=1.0, θ=1.0, ω=1.0))
+    state -> SEDL.gaussian_obs_model(state, (pos=0.1, vel=1.0, θ=5°, ω=1.0))
 else
     state -> SEDL.landmark_obs_model(
-        state, (; landmarks=landmarks_tensor, σ_bearing=15°, σ_range=2.0)
+        state, (; landmarks=landmarks_tensor, σ_bearing=15°, σ_range=5.0)
     )
 end
 
@@ -102,13 +103,14 @@ function plot_pf_posterior(
     sim_result,
     sample_id;
     n_particles=100_000,
-    obs_frames=obs_frames,
+    obs_frames=nothing,
     plot_args...,
 )
+    isnothing(obs_frames) && (obs_frames = eachindex(sim_result.times))
     pf_result = SEDL.batched_particle_filter(
         repeat(sim_result.states[1][sample_id], n_particles),
         (;
-            times,
+            sim_result.times,
             obs_frames,
             controls=getindex.(sim_result.controls, sample_id),
             observations=getindex.(sim_result.observations, sample_id),
@@ -131,27 +133,27 @@ function plot_guide_posterior(
     obs_frames=obs_frames,
     plot_args...,
 )
-    guide_trajs = guide(
-        repeat(sim_result.states[1][sample_id], n_particles),
-        getindex.(sim_result.observations, sample_id),
-        getindex.(sim_result.controls, sample_id),
-        Δt,
-    ).trajectory
+    guide_trajs =
+        guide(
+            repeat(sim_result.states[1][sample_id], n_particles),
+            getindex.(sim_result.observations, sample_id),
+            getindex.(sim_result.controls, sample_id),
+            Δt,
+        ).trajectory
 
     SEDL.plot_batched_series(
         times, guide_trajs; truth=getindex.(sim_result.states, sample_id), plot_args...
     )
 end
 
-function estimate_logp_pf(
-    motion_model, sim_result; n_particles=100_000, obs_frames=obs_frames
-)
+function estimate_logp_pf(motion_model, sim_result; obs_frames=nothing, n_particles=100_000)
+    isnothing(obs_frames) && (obs_frames = eachindex(sim_result.times))
     n_ex = sim_result.states[1].batch_size
     log_obs_values = @showprogress 0.1 "estimate_logp_pf" map(1:n_ex) do sample_id
         pf_result = SEDL.batched_particle_filter(
             repeat(sim_result.states[1][sample_id], n_particles),
             (;
-                times,
+                sim_result.times,
                 obs_frames,
                 controls=getindex.(sim_result.controls, sample_id),
                 observations=getindex.(sim_result.observations, sample_id),
@@ -251,7 +253,7 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                     kv = [Symbol("traj_$id") => plt]
                     @info name log_step_increment = 0 kv...
                 end
-                display(plt)
+                # display(plt)
             end
         end
 
@@ -268,7 +270,8 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 end
 
 if train_method == :EM
-    let total_steps = 8_000
+    try
+        total_steps = 8_000
         n_steps = is_quick_test ? 3 : total_steps + 1
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
@@ -281,11 +284,15 @@ if train_method == :EM
             optimizer=adam,
             n_steps,
             minibatch=4,
+            # sampling_model=motion_model,
             callback=em_callback(learned_motion_model; n_steps, test_every=500),
             # lr_schedule=let β = 20^2 / total_steps
             #     step -> 1e-3 / sqrt(β * step)
             # end,
         )
+        alert("Training finished.")
+    catch e
+        alert("Training stopped due to exception.")
     end
     # save the model
     serialize(
@@ -339,7 +346,7 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                 )
 
                 guide_plt = plot_guide_posterior(
-                    guide, sim_data, id; title="$name traj $id (iter $(r.step))",
+                    guide, sim_data, id; title="$name traj $id (iter $(r.step))"
                 )
 
                 Base.with_logger(logger) do
@@ -365,7 +372,8 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 end
 
 if train_method == :VI
-    let total_steps = 6_000
+    try
+        total_steps = 6_000
         n_steps = is_quick_test ? 3 : total_steps + 1
 
         @info "Training the guide..."
@@ -379,13 +387,16 @@ if train_method == :VI
             Δt;
             optimizer=adam,
             n_steps,
-            anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 3step / n_steps)),
+            anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
             callback=vi_callback(learned_motion_model; n_steps),
             lr_schedule=let β = 40^2 / total_steps
                 step -> 1e-3 / sqrt(β * step)
             end,
         )
         display(train_result)
+        alert("Training finished.")
+    catch e
+        alert("Training stopped due to exception.")
     end
     # save the model
     serialize(
@@ -395,7 +406,14 @@ if train_method == :VI
     deserialize(joinpath(save_dir, "models.serial"))
 end
 ##-----------------------------------------------------------
-let
+plot_pf_posterior(
+    learned_motion_model, sim_en, 1; obs_frames=1:1, title="Open-loop prediction (learned)"
+) |> display
+plot_pf_posterior(
+    motion_model, sim_en, 1; obs_frames=1:1, title="Open-loop prediction (true model)"
+) |> display
+
+perf_table=let
     @info "Testing dynamics model performance on the test set"
     rows = [
         merge((name="learned",), estimate_logp_pf(learned_motion_model, test_sim)),
@@ -403,6 +421,8 @@ let
     ]
     DataFrame(rows)
 end
+write(joinpath(save_dir, "logp_obs_table.bson"), perf_table)
+display(perf_table)
 ##-----------------------------------------------------------
 run(`ls -lh "$save_dir"/tb_logs`)
 save_dir

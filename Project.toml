@@ -6,6 +6,8 @@ version = "0.2.0"
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 AdvancedHMC = "0bf59076-c3b1-5ca4-86bd-e02cd72cde3d"
+Alert = "28312eec-4d86-447d-83ad-bc2b262de792"
+AlertPushover = "19f6540d-ecb3-4e88-b99d-153996aa3b9b"
 AutoHashEquals = "15f4f7f2-30c1-5605-9d31-71845cf9641f"
 BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"

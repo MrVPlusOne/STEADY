@@ -361,7 +361,7 @@ function mk_guide(;
     guide_core = FluxLayer(
         Val(:guide_core),
         (
-            gate=Chain(Dense(h_dim, h_dim, relu), Dense(h_dim, core_out_dim, sigmoid)),
+            gate=Dense(h_dim, core_out_dim, sigmoid),
             propose_left=mlp(core_in_dim, h_dim, tanh),
             propose_right=mlp(rnn_dim + x_dim, h_dim, tanh),
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
@@ -437,25 +437,21 @@ function mk_nn_motion_model(;
     core = FluxLayer(
         Val(:nn_motion_model),
         (
-            gate=Chain(
-                Dense(core_in_dim, h_dim, relu), Dense(h_dim, core_out_dim, sigmoid)
-            ),
-            propose=mlp(core_in_dim, h_dim, relu),
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
-            mean2=Dense(h_dim, core_out_dim; init=zero_init),
+            mean2=Chain(
+                Dense(core_in_dim, h_dim, relu), Dense(h_dim, core_out_dim; init=zero_init)
+            ),
             scale=Dense(
-                h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
+                core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
             ),
         ),
-    ) do (; gate, propose, mean1, mean2, scale)
+    ) do (; mean1, mean2, scale)
         (core_input::BatchTuple) -> begin
             local (; batch_size) = core_input
             local core_val = inv(core_in_trans)(core_input.val)
             local input = vcat_bc(core_val...; batch_size)
-            local g = gate(input)
-            local prop = propose(input)
-            local μ_data = (1 .- g) .* mean1(input) .+ g .* mean2(prop)
-            local σ_data = scale(prop)
+            local μ_data = mean1(input) + mean2(input)
+            local σ_data = scale(input)
             local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
             local σs = map(
                 .*,
@@ -547,7 +543,7 @@ function train_guide!(
         for p in reg_ps
             p .-= weight_decay .* p
         end
-        
+
         time_stats = (; guide_time, dynamics_time, obs_time, gradient_time, callback_time)
         callback_args = (;
             step,

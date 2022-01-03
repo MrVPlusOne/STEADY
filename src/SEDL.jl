@@ -24,6 +24,7 @@ using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups
 using TimerOutputs
+using Alert, AlertPushover # for notifications
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
