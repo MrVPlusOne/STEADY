@@ -74,8 +74,16 @@ function transition_logp(
     core_output_seq::TimeSeries{<:BatchTuple},
 )::Real
     @smart_assert length(core_input_seq) == length(core_output_seq)
-    (; μs::BatchTuple, σs::BatchTuple) = core(BatchTuple(core_input_seq))
-    lps = map(logpdf_normal, μs.val, σs.val, BatchTuple(core_output_seq).val)
+    transition_logp(core, BatchTuple(core_input_seq), BatchTuple(core_output_seq))
+end
+
+function transition_logp(
+    core,
+    core_input::BatchTuple,
+    core_output::BatchTuple,
+)::Real
+    (; μs::BatchTuple, σs::BatchTuple) = core(core_input)
+    lps = map(logpdf_normal, μs.val, σs.val, core_output.val)
     sum(sum(lps)::AbsMat)
 end
 
