@@ -1,11 +1,9 @@
 """
 The 2D hovercraft scenario.
 """
-@kwdef(struct HovercraftScenario{LI<:LandmarkInfo} <: Scenario
-    landmark_info::LI
-end)
+struct HovercraftScenario <: Scenario end
 
-Base.summary(io::IO, ::HovercraftScenario) = print(io, "Hovercarft()")
+Base.summary(io::IO, ::HovercraftScenario) = print(io, "HovercraftScenario")
 
 dummy_state(::HovercraftScenario) =
     (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())

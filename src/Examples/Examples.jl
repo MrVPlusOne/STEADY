@@ -44,6 +44,7 @@ function generate_data(
 end
 
 include("scenario_utils.jl")
+include("RealCar2D.jl")
 include("Car1D.jl")
 include("Car2D.jl")
 include("Hovercraft2D.jl")

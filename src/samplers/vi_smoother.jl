@@ -44,6 +44,7 @@ Flux.trainable(bmm::BatchedMotionModel) = Flux.trainable(bmm.core)
 function (motion_model::BatchedMotionModel{TC})(
     x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency=false
 ) where {TC}
+    check_type(TC(), Δt)
     bs = common_batch_size(x.batch_size, u.batch_size)
     sketch, core = motion_model.sketch, motion_model.core
 
@@ -77,11 +78,7 @@ function transition_logp(
     transition_logp(core, BatchTuple(core_input_seq), BatchTuple(core_output_seq))
 end
 
-function transition_logp(
-    core,
-    core_input::BatchTuple,
-    core_output::BatchTuple,
-)::Real
+function transition_logp(core, core_input::BatchTuple, core_output::BatchTuple)::Real
     (; μs::BatchTuple, σs::BatchTuple) = core(core_input)
     lps = map(logpdf_normal, μs.val, σs.val, core_output.val)
     sum(sum(lps)::AbsMat)
@@ -286,7 +283,7 @@ function compute_normal_transforms(
     Δt::Real,
 )
     function from_batches(batches)
-        template = batches[1]
+        template = batches[1]::BatchTuple
         ks = keys(template.val)
         @unzip_named (shifts, :shift), (scales, :scale) = map(ks) do k
             data = map(batches) do b
@@ -302,7 +299,7 @@ function compute_normal_transforms(
     control_trans = from_batches(sample_controls)
     obs_trans = from_batches(sample_observations)
     core_in_trans = map(sample_states, sample_controls) do x, u
-        sketch.state_to_input(x, u)
+        sketch.state_to_input(x, u)::BatchTuple
     end |> from_batches
 
     core_out_trans =
@@ -447,10 +444,14 @@ function mk_nn_motion_model(;
         (
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
             mean2=Chain(
-                Dense(core_in_dim, h_dim, relu), Dense(h_dim, core_out_dim; init=zero_init)
+                Dense(core_in_dim, h_dim, relu),
+                Dense(h_dim, core_out_dim; init=zero_init),
             ),
             scale=Dense(
-                core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
+                core_in_dim,
+                core_out_dim,
+                x -> max.(softplus.(x), min_σ);
+                init=zero_init,
             ),
         ),
     ) do (; mean1, mean2, scale)

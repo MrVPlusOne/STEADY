@@ -100,7 +100,15 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
         new{typeof(tconf),typeof(val)}(tconf, batch_size, val)
     end
 end
-@use_short_show BatchTuple
+
+function Base.show(io::IO, ::Type{T}) where {T <: BatchTuple}
+    if T isa UnionAll || T.parameters[2] isa UnionAll
+        print(io, "BatchTuple")
+    else
+        names = T.parameters[2].parameters[1]
+        print(io, "BatchTuple{keys=$names}")
+    end
+end
 
 """
 Create from a batch of values.
@@ -119,6 +127,11 @@ function BatchTuple(batches::AbsVec{<:BatchTuple})
         sum(x -> x.batch_size, batches),
         hcatreduce((x -> inflate_batch(x).val).(batches)),
     )
+end
+
+function BatchTuple(f::Function, batches::BatchTuple{TC}...) where TC
+    bs = common_batch_size(batches...)
+    BatchTuple(TC(), bs, f(getfield.(batches, :val)...)::NamedTuple)
 end
 
 Base.map(f, batch::BatchTuple) =

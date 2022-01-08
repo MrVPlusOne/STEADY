@@ -77,45 +77,47 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_rang
     )
 end
 
-function gaussian_obs_model(state::BatchTuple, σs::NamedTuple)
+function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {names}
     (; tconf, batch_size) = state
     σs1 = map(tconf, σs)
 
     GenericSamplable(;
         rand_f=rng -> let
-            y = map(state.val, σs1) do x, σ
-                x + σ .* Random.randn!(rng, zero(x))
+            ys = map(names) do k
+                x = state.val[k]
+                x + σs1[k] .* Random.randn!(rng, zero(x))
             end
-            BatchTuple(tconf, batch_size, y)
+            BatchTuple(tconf, batch_size, NamedTuple{names}(ys))
         end,
         log_pdf=(obs::BatchTuple) -> let
-            sum(map(logpdf_normal, state.val, σs1, obs.val))
+            map(names) do k
+                logpdf_normal(state.val[k], σs1[k], obs.val[k])
+            end |> sum
         end,
     )
 end
 
 function state_to_input_SE2(state::BatchTuple, control::BatchTuple)
-    local bs = common_batch_size(state.batch_size, control.batch_size)
-    (; vel, θ, ω) = state.val
-    local loc_v = rotate2d(-θ, vel)
-    BatchTuple(state.tconf, bs, (; loc_v, ω, θ, control.val...))
+    BatchTuple(state, control) do (; vel, θ, ω), u
+        loc_v = rotate2d(-θ, vel)
+        (; loc_v, ω, θ, u...)
+    end
 end
 
 function output_to_state_rate_SE2(state::BatchTuple, output::BatchTuple)
-    local bs = common_batch_size(state.batch_size, output.batch_size)
-    local (; pos, vel, θ, ω) = state.val
-    local (; loc_acc, a_θ) = output.val
-    local acc = rotate2d(θ, loc_acc)
-    BatchTuple(state.tconf, bs, (pos=vel, vel=acc, θ=ω, ω=a_θ))
+    BatchTuple(state, output) do (; pos, vel, θ, ω), (; loc_acc, a_θ)
+        acc = rotate2d(θ, loc_acc)
+        (pos=vel, vel=acc, θ=ω, ω=a_θ)
+    end
 end
 
 function output_from_state_rate_SE2(state::BatchTuple, state_rate::BatchTuple)
     @smart_assert state.batch_size == state_rate.batch_size
-    local (; θ) = state.val
-    local derivatives = state_rate.val
-    local acc, a_θ = derivatives.vel, derivatives.ω
-    local loc_acc = rotate2d(-θ, acc)
-    BatchTuple(state.tconf, state.batch_size, (; loc_acc, a_θ))
+    BatchTuple(state, state_rate) do (; θ), derivatives
+        acc, a_θ = derivatives.vel, derivatives.ω
+        loc_acc = rotate2d(-θ, acc)
+        (; loc_acc, a_θ)
+    end
 end
 
 """
@@ -135,6 +137,17 @@ NamedTuple{(:a, :v), Tuple{Main.SEDL.Var, Main.SEDL.Var}}
 """
 function variable_tuple(vars::Pair{Symbol,PType}...)::NamedTuple
     NamedTuple(v => Var(v, ty) for (v, ty) in vars)
+end
+
+function extract_θ_2d(state::T)::Real where {T}
+    if :θ in fieldnames(T)
+        state.θ
+    elseif :angle_2d in fieldnames(T)
+        x, y = state.angle_2d
+        atan(y, x)
+    else
+        error("type $T does not contain θ or angle_2d.")
+    end
 end
 
 """
@@ -168,7 +181,8 @@ function plot_2d_scenario!(
         @unzip xs, ys = map(x -> x.pos, markers)
         xs::AbsVec{<:Real}
         dirs = map(markers) do x
-            rotate2d(x.θ[1], @SVector [marker_len, 0.0])
+            θ = extract_θ_2d(x)
+            rotate2d(θ, @SVector [marker_len, 0.0])
         end
         @unzip us, vs = dirs
         quiver!(

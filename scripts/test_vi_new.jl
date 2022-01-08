@@ -14,12 +14,9 @@ using DataFrames: DataFrame
 using Alert
 using Random
 
-!true && begin
-    include("../src/SEDL.jl")
-    using .SEDL
-end
-using SEDL
-##---------------------------------------------------------- 
+include("process_data.jl")
+include("data_from_source.jl")
+##-----------------------------------------------------------
 # set up scenario and simulate some data
 if !@isdefined is_quick_test
     is_quick_test = false
@@ -30,75 +27,65 @@ Random.seed!(123)
 
 should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
 use_gpu = true
-use_simple_obs_model = false
-train_method = :EM  # :VI or :EM or :Supervised
-n_train_ex = 4
+use_simple_obs_model = true
 tconf = SEDL.TensorConfig(use_gpu, Float32)
+data_source = RealData(
+    SEDL.data_dir("real_data", "simple_loop"),
+    SEDL.data_dir("real_data", "simple_loop_test"),
+)
+# data_source = SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
+train_method = :Supervised  # :VI or :EM or :Supervised
 device = use_gpu ? Flux.gpu : Flux.cpu
+use_sim_data = data_source isa SimulationData
 
 landmarks = [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
 landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
 @smart_assert size(landmarks_tensor) == (length(landmarks), 2, 1)
-size(landmarks_tensor)
 
 linfo = SEDL.LandmarkInfo(; landmarks)
-# sce = SEDL.HovercraftScenario(linfo)
-sce = SEDL.Car2dScenario(linfo, SEDL.BicycleCarDyn(; front_drive=false))
-
-sample_x0() = (;
-    pos=[0.5, 1.0] + 2randn(2),
-    vel=[0.25 + 0.3randn(), 0.1 + 0.2randn()],
-    θ=[π / 5 + π * randn()],
-    ω=[π / 50 + 0.1π * randn()],
-)
-
-Δt = tconf(0.1)
-times = 0:Δt:10
-obs_frames = eachindex(times)
-
-true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
-sketch = SEDL.batched_sketch(sce)
-motion_model = SEDL.BatchedMotionModel(tconf, sketch, SEDL.batched_core(sce, true_params))
-@smart_assert isempty(Flux.params(motion_model))
-
-obs_model = if use_simple_obs_model
-    state -> SEDL.gaussian_obs_model(state, (pos=0.1, vel=1.0, θ=5°, ω=1.0))
+sce = if use_sim_data
+    SEDL.HovercraftScenario()
+    # sce = SEDL.Car2dScenario(linfo, SEDL.BicycleCarDyn(; front_drive=false))
 else
+    SEDL.RealCarScenario()
+end
+
+sketch = SEDL.batched_sketch(sce)
+obs_model = if use_simple_obs_model
+    let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
+        state -> SEDL.gaussian_obs_model(state, σs)
+    end
+else
+    # TODO: fix this for angle_2d
     state -> SEDL.landmark_obs_model(
         state, (; landmarks=landmarks_tensor, σ_bearing=15°, σ_range=5.0)
     )
 end
 
-controller = let scontroller = SEDL.simulation_controller(sce)
-    (args...) -> begin
-        control = scontroller(args...)
-        SEDL.BatchTuple(tconf, [map(v -> [v], control)])
-    end
+data_train, data_test = if data_source isa SimulationData
+    true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
+    motion_model = SEDL.BatchedMotionModel(
+        tconf, sketch, SEDL.batched_core(sce, true_params)
+    )
+    data_from_source(data_source, tconf; motion_model, obs_model)
+else
+    data_from_source(data_source, tconf)
 end
 
-test_x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:64])
-x0_batch = SEDL.BatchTuple(tconf, [sample_x0() for _ in 1:n_train_ex])
-
-sample_next_state = (x -> x.next_state) ∘ motion_model
-sample_observation = rand ∘ obs_model
-sim_en = SEDL.simulate_trajectory(
-    times, x0_batch, sample_next_state, sample_observation, controller
-)
-test_sim = SEDL.simulate_trajectory(
-    times, test_x0_batch, sample_next_state, sample_observation, controller
-)
+n_train_ex = data_train.states[1].batch_size
+obs_frames = eachindex(data_train.times)
 
 let
     visual_id = 1
-    first_states = [Flux.cpu(b[visual_id].val) for b in sim_en.states]
+    first_states = [Flux.cpu(b[visual_id].val) for b in data_train.states]
     landmark_obs = [((; landmarks=fill(true, length(landmarks)))) for _ in first_states]
-    obs_data = (; obs_frames, observations=landmark_obs)
+    obs_data = (; obs_frames=1:10:length(data_train.times), observations=landmark_obs)
     plot()
     SEDL.plot_2d_scenario!(first_states, obs_data, "Ground truth"; landmarks)
-    SEDL.plot_2d_trajectories!(sim_en.states, "forward simulation") |> display
+    SEDL.plot_2d_trajectories!(data_train.states, "forward simulation") |> display
 end
 
-SEDL.plot_batched_series(times, sim_en.states) |> display
+SEDL.plot_batched_series(data_train.times, data_train.states) |> display
 ##-----------------------------------------------------------
 # test particle filtering
 function plot_pf_posterior(
@@ -124,7 +111,10 @@ function plot_pf_posterior(
     )
     pf_trajs = SEDL.batched_trajectories(pf_result, 100)
     SEDL.plot_batched_series(
-        times, pf_trajs; truth=getindex.(sim_result.states, sample_id), plot_args...
+        sim_result.times,
+        pf_trajs;
+        truth=getindex.(sim_result.states, sample_id),
+        plot_args...,
     )
 end
 
@@ -141,11 +131,14 @@ function plot_guide_posterior(
             repeat(sim_result.states[1][sample_id], n_particles),
             getindex.(sim_result.observations, sample_id),
             getindex.(sim_result.controls, sample_id),
-            Δt,
+            sim_result.Δt,
         ).trajectory
 
     SEDL.plot_batched_series(
-        times, guide_trajs; truth=getindex.(sim_result.states, sample_id), plot_args...
+        sim_result.times,
+        guide_trajs;
+        truth=getindex.(sim_result.states, sample_id),
+        plot_args...,
     )
 end
 
@@ -185,13 +178,15 @@ function with_alert(task::Function, task_name::String)
     end
 end
 
-plot_pf_posterior(motion_model, sim_en, 1; title="true posterior") |> display
+if use_sim_data
+    plot_pf_posterior(motion_model, data_train, 1; title="true posterior") |> display
+end
 ##-----------------------------------------------------------
 # set up the NN models
 h_dim = 64
-y_dim = sum(m -> size(m, 1), sim_en.observations[1].val)
+y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 normal_transforms = @time SEDL.compute_normal_transforms(
-    sketch, sim_en.states, sim_en.controls, sim_en.observations, Δt
+    sketch, data_train.states, data_train.controls, data_train.observations, data_train.Δt
 )
 
 learned_motion_model = if should_train_dynamics
@@ -204,7 +199,11 @@ else
 end
 
 plot_pf_posterior(
-    learned_motion_model, sim_en, 1; obs_frames=1:2, title="Motion model prior (initial)"
+    learned_motion_model,
+    data_train,
+    1;
+    obs_frames=1:2,
+    title="Motion model prior (initial)",
 ) |> display
 
 if train_method == :VI
@@ -213,9 +212,16 @@ if train_method == :VI
             sketch, dynamics_core=learned_motion_model.core, h_dim, y_dim, normal_transforms
         ) |> device
 
-    let (prior_trajs, _) = guide(sim_en.states[1], sim_en.observations, sim_en.controls, Δt)
+    let (prior_trajs, _) = guide(
+            data_train.states[1],
+            data_train.observations,
+            data_train.controls,
+            data_train.Δt,
+        )
         SEDL.plot_batched_series(
-            times, SEDL.TensorConfig(false).(prior_trajs); title="Guide posterior (initial)"
+            data_train.times,
+            SEDL.TensorConfig(false).(prior_trajs);
+            title="Guide posterior (initial)",
         ) |> display
     end
 end
@@ -224,6 +230,7 @@ end
 adam = Flux.ADAM(1e-4)
 settings = (;
     scenario=summary(sce),
+    use_sim_data,
     train_method,
     h_dim,
     should_train_dynamics,
@@ -238,7 +245,10 @@ if isdir(save_dir)
 end
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
-@info """To view tensorboard logs, use `tensorboard --host 0.0.0.0 --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"`"""
+@info """To view tensorboard logs, use the following command: 
+```
+tensorboard --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"
+```"""
 ##-----------------------------------------------------------
 # train the model using expectation maximization
 
@@ -252,14 +262,14 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
-            test_scores = estimate_logp_pf(learned_motion_model, test_sim)
+            test_scores = estimate_logp_pf(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info "testing" log_obs = test_scores.mean log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
-                sim_data = name == "training" ? sim_en : test_sim
+                sim_data = name == "training" ? data_train : data_test
                 plt = plot_pf_posterior(
                     learned_motion_model,
                     sim_data,
@@ -289,16 +299,16 @@ end
 
 if train_method == :EM
     with_alert("EM training") do
-        total_steps = 8_000
+        total_steps = 10_000
         n_steps = is_quick_test ? 3 : total_steps + 1
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
             learned_motion_model,
             obs_model,
-            sim_en.states[1],
-            sim_en.observations,
-            sim_en.controls,
-            (; times, obs_frames);
+            data_train.states[1],
+            data_train.observations,
+            data_train.controls,
+            (; data_train.times, obs_frames);
             optimizer=adam,
             n_steps,
             trajs_per_step=1,
@@ -323,7 +333,7 @@ function supervised_callback(
 )
     prog = Progress(n_steps; showspeed=true)
     test_in_set, test_out_set = SEDL.input_output_from_trajectory(
-        learned_motion_model.sketch, test_sim.states, test_sim.controls, test_sim.times
+        learned_motion_model.sketch, data_test.states, data_test.controls, data_test.times
     )
     test_input = BatchTuple(test_in_set)
     test_output = BatchTuple(test_out_set)
@@ -344,14 +354,14 @@ function supervised_callback(
             end
         end
         if r.step % plot_every == 1
-            test_scores = estimate_logp_pf(learned_motion_model, test_sim)
+            test_scores = estimate_logp_pf(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info("testing", log_obs = test_scores.mean, log_step_increment = 0)
             end
 
             for name in ["training", "testing"], id in [1, 2]
-                sim_data = name == "training" ? sim_en : test_sim
+                sim_data = name == "training" ? data_train : data_test
                 plt = plot_pf_posterior(
                     learned_motion_model,
                     sim_data,
@@ -371,28 +381,36 @@ function supervised_callback(
 end
 
 (train_method == :Supervised) && let
-    # core_in_set, core_out_set = SEDL.input_output_from_trajectory(motion_model.sketch, x_seq, control_seq, times)
-    # core_input = BatchTuple(core_in_set)
-    # core_output = BatchTuple(core_out_set)
-
-    core_in_set, core_out_set = BatchTuple[], BatchTuple[]
-    @showprogress for ex_id in 1:(x0_batch.batch_size)
-        x0 = repeat(x0_batch[ex_id], 100_000)
-        controls = getindex.(sim_en.controls, ex_id)
-        observations = getindex.(sim_en.observations, ex_id)
-        local pf_result = SEDL.batched_particle_filter(
-            x0,
-            (; times, obs_frames, controls, observations);
-            motion_model,
-            obs_model,
-            record_io=true,
-            showprogress=false,
+    use_ground_truth = true
+    if use_ground_truth
+        core_in_set, core_out_set = SEDL.input_output_from_trajectory(
+            learned_motion_model.sketch,
+            data_train.states,
+            data_train.controls,
+            data_train.times,
         )
-        (; core_input_seq, core_output_seq) = SEDL.batched_trajectories(
-            pf_result, 1; record_io=true
-        )
-        append!(core_in_set, core_input_seq)
-        append!(core_out_set, core_output_seq)
+    else
+        core_in_set, core_out_set = BatchTuple[], BatchTuple[]
+        x0_batch = data_train.states[1]
+        times = data_train.times
+        @showprogress for ex_id in 1:(x0_batch.batch_size)
+            x0 = repeat(x0_batch[ex_id], 100_000)
+            controls = getindex.(data_train.controls, ex_id)
+            observations = getindex.(data_train.observations, ex_id)
+            local pf_result = SEDL.batched_particle_filter(
+                x0,
+                (; times, obs_frames, controls, observations);
+                motion_model,
+                obs_model,
+                record_io=true,
+                showprogress=false,
+            )
+            (; core_input_seq, core_output_seq) = SEDL.batched_trajectories(
+                pf_result, 1; record_io=true
+            )
+            append!(core_in_set, core_input_seq)
+            append!(core_out_set, core_output_seq)
+        end
     end
     @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
@@ -419,16 +437,17 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
             @info "statistics" r.time_stats... log_step_increment = 0
         end
 
+        test_x0_batch = data_test.states[1]
         # Compute test elbo and plot a few trajectories.
         if r.step % test_every == 1
             test_trajs, test_lp_guide, test_core_in, test_core_out = guide(
-                test_x0_batch, test_sim.observations, test_sim.controls, Δt
+                test_x0_batch, data_test.observations, data_test.controls, data_test.Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
                 learned_motion_model.core, test_core_in, test_core_out
             )
             test_lp_obs = SEDL.observation_logp(
-                obs_model, test_trajs, test_sim.observations
+                obs_model, test_trajs, data_test.observations
             )
             test_elbo =
                 (test_lp_dynamics + test_lp_obs - sum(test_lp_guide)) /
@@ -438,14 +457,14 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            test_scores = estimate_logp_pf(learned_motion_model, test_sim)
+            test_scores = estimate_logp_pf(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info "testing" log_obs = test_scores.mean log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
-                sim_data = name == "training" ? sim_en : test_sim
+                sim_data = name == "training" ? data_train : data_test
                 pf_plt = plot_pf_posterior(
                     learned_motion_model,
                     sim_data,
@@ -489,10 +508,10 @@ if train_method == :VI
             guide,
             learned_motion_model.core,
             obs_model,
-            sim_en.states[1],
-            sim_en.observations,
-            sim_en.controls,
-            Δt;
+            data_train.states[1],
+            data_train.observations,
+            data_train.controls,
+            data_train.Δt;
             optimizer=adam,
             n_steps,
             anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
@@ -512,18 +531,28 @@ if train_method == :VI
 end
 ##-----------------------------------------------------------
 plot_pf_posterior(
-    learned_motion_model, sim_en, 1; obs_frames=1:1, title="Open-loop prediction (learned)"
+    learned_motion_model,
+    data_train,
+    1;
+    obs_frames=1:1,
+    title="Open-loop prediction (learned)",
 ) |> display
-plot_pf_posterior(
-    motion_model, sim_en, 1; obs_frames=1:1, title="Open-loop prediction (true model)"
-) |> display
+if use_sim_data
+    plot_pf_posterior(
+        motion_model,
+        data_train,
+        1;
+        obs_frames=1:1,
+        title="Open-loop prediction (true model)",
+    ) |> display
+end
 
 perf_table = let
     @info "Testing dynamics model performance on the test set"
-    rows = [
-        merge((name="learned",), estimate_logp_pf(learned_motion_model, test_sim)),
-        merge((name="truth",), estimate_logp_pf(motion_model, test_sim)),
-    ]
+    rows = [merge((name="learned",), estimate_logp_pf(learned_motion_model, data_test))]
+    if use_sim_data
+        merge((name="truth",), estimate_logp_pf(motion_model, data_test)), push!(rows)
+    end
     DataFrame(rows)
 end
 wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf_table)
