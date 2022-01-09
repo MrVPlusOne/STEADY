@@ -139,7 +139,7 @@ function variable_tuple(vars::Pair{Symbol,PType}...)::NamedTuple
     NamedTuple(v => Var(v, ty) for (v, ty) in vars)
 end
 
-function extract_θ_2d(state::T)::Real where {T}
+function extract_θ_2d(state::T) where {T}
     if :θ in fieldnames(T)
         state.θ
     elseif :angle_2d in fieldnames(T)
@@ -181,7 +181,7 @@ function plot_2d_scenario!(
         @unzip xs, ys = map(x -> x.pos, markers)
         xs::AbsVec{<:Real}
         dirs = map(markers) do x
-            θ = extract_θ_2d(x)
+            θ = extract_θ_2d(x)[1]
             rotate2d(θ, @SVector [marker_len, 0.0])
         end
         @unzip us, vs = dirs

@@ -14,7 +14,13 @@ using DataFrames: DataFrame
 using Alert
 using Random
 
-include("process_data.jl")
+!true && begin
+    include("../src/SEDL.jl")
+    using .SEDL
+end
+using SEDL
+using .SEDL: @kwdef
+
 include("data_from_source.jl")
 ##-----------------------------------------------------------
 # set up scenario and simulate some data
@@ -34,7 +40,7 @@ data_source = RealData(
     SEDL.data_dir("real_data", "simple_loop_test"),
 )
 # data_source = SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
-train_method = :Supervised  # :VI or :EM or :Supervised
+train_method = :EM  # :VI or :EM or :Supervised
 device = use_gpu ? Flux.gpu : Flux.cpu
 use_sim_data = data_source isa SimulationData
 
@@ -67,9 +73,9 @@ data_train, data_test = if data_source isa SimulationData
     motion_model = SEDL.BatchedMotionModel(
         tconf, sketch, SEDL.batched_core(sce, true_params)
     )
-    data_from_source(data_source, tconf; motion_model, obs_model)
+    data_from_source(sce, data_source, tconf; motion_model, obs_model)
 else
-    data_from_source(data_source, tconf)
+    data_from_source(sce, data_source, tconf; obs_model)
 end
 
 n_train_ex = data_train.states[1].batch_size
@@ -77,7 +83,7 @@ obs_frames = eachindex(data_train.times)
 
 let
     visual_id = 1
-    first_states = [Flux.cpu(b[visual_id].val) for b in data_train.states]
+    first_states = [map(m -> m[:], Flux.cpu(b[visual_id].val)) for b in data_train.states]
     landmark_obs = [((; landmarks=fill(true, length(landmarks)))) for _ in first_states]
     obs_data = (; obs_frames=1:10:length(data_train.times), observations=landmark_obs)
     plot()
@@ -85,7 +91,7 @@ let
     SEDL.plot_2d_trajectories!(data_train.states, "forward simulation") |> display
 end
 
-SEDL.plot_batched_series(data_train.times, data_train.states) |> display
+SEDL.plot_batched_series(data_train.times, getindex.(data_train.states, 1)) |> display
 ##-----------------------------------------------------------
 # test particle filtering
 function plot_pf_posterior(
@@ -185,6 +191,7 @@ end
 # set up the NN models
 h_dim = 64
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
+@info "Computing normal transforms..."
 normal_transforms = @time SEDL.compute_normal_transforms(
     sketch, data_train.states, data_train.controls, data_train.observations, data_train.Δt
 )
@@ -387,7 +394,8 @@ end
             learned_motion_model.sketch,
             data_train.states,
             data_train.controls,
-            data_train.times,
+            data_train.times;
+            test_consistency=true,
         )
     else
         core_in_set, core_out_set = BatchTuple[], BatchTuple[]

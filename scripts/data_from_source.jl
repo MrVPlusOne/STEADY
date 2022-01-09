@@ -10,7 +10,9 @@ end
     test_data_path::String
 end
 
-function data_from_source(src::SimulationData, tconf::TensorConfig; motion_model, obs_model)
+function data_from_source(
+    sce::SEDL.Scenario, src::SimulationData, tconf::TensorConfig; motion_model, obs_model
+)
     (; n_train_ex, n_test_ex, times, Δt) = src
 
     sample_x0() = (;
@@ -44,12 +46,13 @@ function data_from_source(src::SimulationData, tconf::TensorConfig; motion_model
     (merge(data_train, (; Δt=tconf(Δt))), merge(data_test, (; Δt=tconf(Δt))))
 end
 
-function data_from_source(src::RealData, tconf::TensorConfig)
+function data_from_source(sce::SEDL.Scenario, src::RealData, tconf::TensorConfig; obs_model)
     (; train_data_path, test_data_path) = src
 
-    data_train = read_data_from_csv(train_data_path, tconf)
-    data_test = read_data_from_csv(test_data_path, tconf)
-    Δt1 = tconf(data_train.times[2] - data_train.times[1])
-    Δt2 = tconf(data_test.times[2] - data_test.times[1])
-    (merge(data_train, (; Δt=Δt1)), merge(data_test, (; Δt=Δt2)))
+    map((train_data_path, test_data_path)) do path
+        data = SEDL.Dataset.read_data_from_csv(sce, path, tconf)
+        observations = (x -> rand(obs_model(x))).(data.states)
+        Δt = tconf(data.times[2] - data.times[1])
+        merge(data, (; observations, Δt))
+    end
 end

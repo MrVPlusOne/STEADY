@@ -81,7 +81,8 @@ function input_output_from_trajectory(
     sketch::BatchedMotionSketch,
     state_seq::TimeSeries{<:BatchTuple},
     control_seq::TimeSeries{<:BatchTuple},
-    times,
+    times;
+    test_consistency=false,
 ) 
     @smart_assert length(state_seq) == length(control_seq)
 
@@ -89,10 +90,14 @@ function input_output_from_trajectory(
 
     for t in 1:length(state_seq)-1
         core_input = sketch.state_to_input(state_seq[t], control_seq[t])
-        state_rate = map(state_seq[t], state_seq[t+1]) do x, x1
-            (x1 .- x) ./ (times[t+1] - times[t])
+        Δt = times[t+1] - times[t]
+        core_output = sketch.output_from_state(state_seq[t], state_seq[t+1], Δt)
+        if test_consistency
+            state_pred = sketch.output_to_state(state_seq[t], core_output, Δt)
+            foreach(state_pred.val, state_seq[t+1].val) do x̂, x1
+                @smart_assert x̂ ≈ x1
+            end
         end
-        core_output = sketch.output_from_state_rate(state_seq[t], state_rate)
         push!(core_in, core_input)
         push!(core_out, core_output)
     end

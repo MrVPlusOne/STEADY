@@ -167,7 +167,7 @@ end
 
 ##-----------------------------------------------------------
 # types
-export Optional, AbsVec, AbsMat, NormalTransform
+export Optional, AbsVec, AbsMat, NamedNTuple, NormalTransform
 
 const Optional{X} = Union{X,Nothing}
 const AbsVec = AbstractVector
@@ -283,11 +283,16 @@ vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 
 rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
 
-function rotate2d(θ, v::AbsMat)
-    @smart_assert size(θ)[end] == 1 || size(θ)[end] == size(v)[end]
+function rotate2d(θ::AbsMat, v::AbsMat)
+    @smart_assert size(θ, 2) == 1 || size(θ, 2) == size(v,2)
     x = @views v[1:1, :]
     y = @views v[2:2, :]
-    s, c = sin.(θ), cos.(θ)
+    if size(θ, 1) == 1
+        # treat it as a scalar angle
+        s, c = sin.(θ), cos.(θ)
+    else
+        c, s = @views θ[1:1, :], @views θ[2:2, :]
+    end
     r = vcat((c .* x .- s .* y), (s .* x .+ c .* y))
     @smart_assert size(r) == size(v)
     r

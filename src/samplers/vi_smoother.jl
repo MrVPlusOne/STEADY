@@ -12,10 +12,10 @@ export BatchedMotionSketch, BatchedMotionModel, transition_logp, observation_log
     output_vars::NamedNTuple{outputs,Int}
     "state_to_input(state, control) -> core_input"
     state_to_input::F1
-    "output_to_state_rate(state, core_output) -> state_derivative"
-    output_to_state_rate::F2
-    "output_from_state_rate(state, state_derivative) -> core_output"
-    output_from_state_rate::F3
+    "output_to_state(state, core_output, Δt) -> next_state"
+    output_to_state::F2
+    "output_from_state(state, next_state, Δt) -> core_output"
+    output_from_state::F3
 end
 @use_short_show BatchedMotionSketch
 
@@ -56,15 +56,12 @@ function (motion_model::BatchedMotionModel{TC})(
     @unzip out, lps = map(sample_normal, μs.val, σs.val)
     out_batch = BatchTuple(x.tconf, bs, out)
     check_components(out_batch, sketch.output_vars)
-    derivative = sketch.output_to_state_rate(x, out_batch)::BatchTuple{TC}
+    next_state = sketch.output_to_state(x, out_batch, Δt)::BatchTuple{TC}
     if test_consistency
-        out_batch2 = sketch.output_from_state_rate(x, derivative)::BatchTuple{TC}
+        out_batch2 = sketch.output_from_state(x, next_state, Δt)::BatchTuple{TC}
         foreach(out_batch.val, out_batch2.val) do v1, v2
             @smart_assert v1 ≈ v2
         end
-    end
-    next_state = map(x, derivative) do xv, dv
-        xv .+ dv .* Δt
     end
     (; next_state, logp=sum(lps), core_input, core_output=out_batch)
 end
@@ -304,10 +301,7 @@ function compute_normal_transforms(
 
     core_out_trans =
         map(sample_states[1:(end - 1)], sample_states[2:end]) do x, x1
-            x_rate = map(x, x1) do x, x1
-                (x1 .- x) ./ Δt
-            end
-            sketch.output_from_state_rate(x, x_rate)
+            sketch.output_from_state(x, x1, Δt)
         end |> from_batches
 
     (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans)
