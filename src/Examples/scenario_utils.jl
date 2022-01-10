@@ -306,6 +306,40 @@ function simulate_scenario(
     (; true_systems, ex_data_list, obs_data_list, setups, save_dir)
 end
 
+"""
+Sample posterior trajectories using a particle fitler and evaluate their quality 
+against the ground truth.
+
+Returns (; log_obs, RMSE)
+"""
+function estimate_posterior_quality(
+    motion_model, obs_model, data; state_L2_loss, obs_frames=nothing, n_particles=100_000
+)
+    isnothing(obs_frames) && (obs_frames = eachindex(data.times))
+    n_ex = data.states[1].batch_size
+    metric_rows = @showprogress 0.1 "estimate_logp_pf" map(1:n_ex) do sample_id
+        pf_result = SEDL.batched_particle_filter(
+            repeat(data.states[1][sample_id], n_particles),
+            (;
+                data.times,
+                obs_frames,
+                controls=getindex.(data.controls, sample_id),
+                observations=getindex.(data.observations, sample_id),
+            );
+            motion_model,
+            showprogress=false,
+            obs_model,
+        )
+        post_traj = SEDL.batched_trajectories(pf_result, 1000)
+        true_traj = getindex.(data.states, sample_id)
+        local RMSE::Real = map(true_traj, post_traj) do x1, x2
+            state_L2_loss(x1, x2) |> mean
+        end |> mean |> sqrt
+        (; pf_result.log_obs, RMSE)
+    end
+    named_tuple_reduce(metric_rows, mean)
+end
+
 function test_posterior_sampling(
     scenario::Scenario,
     motion_model::Function,

@@ -209,7 +209,7 @@ Base.inv(trans::NormalTransform{<:NamedTuple}) =
     end
 ##-----------------------------------------------------------
 # utility functions
-export hcatreduce, vcatreduce
+export hcatreduce, vcatreduce, specific_elems
 
 specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
 
@@ -367,6 +367,24 @@ end
 
 subtuple(xs::NamedTuple, keys::Tuple) = begin
     NamedTuple{keys}(map(k -> getfield(xs, k), keys))
+end
+
+"""
+Given an array of NamedTuples, apply `reduce_f` to the arrays corresponding to 
+each componenet.
+
+## Examples
+```jldoctest
+julia> named_tuple_reduce([(a=1, b=2), (a=3, b=6)], sum)
+(a = 4, b = 8)
+```
+"""
+function named_tuple_reduce(xs::AbstractArray{<:NamedTuple{keys}}, reduce_f) where keys
+    @smart_assert length(xs) > 0
+    vals = map(keys) do k
+        reduce_f(map(x -> getfield(x, k), xs))
+    end
+    NamedTuple{keys}(vals)
 end
 
 """

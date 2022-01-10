@@ -13,6 +13,7 @@ using Serialization: serialize, deserialize
 using DataFrames: DataFrame
 using Alert
 using Random
+using Statistics
 
 !true && begin
     include("../src/SEDL.jl")
@@ -55,6 +56,7 @@ sce = if use_sim_data
 else
     SEDL.RealCarScenario()
 end
+state_L2_loss = SEDL.state_L2_loss_batched(sce)
 
 sketch = SEDL.batched_sketch(sce)
 obs_model = if use_simple_obs_model
@@ -148,31 +150,21 @@ function plot_guide_posterior(
     )
 end
 
-function estimate_logp_pf(motion_model, sim_result; obs_frames=nothing, n_particles=100_000)
-    isnothing(obs_frames) && (obs_frames = eachindex(sim_result.times))
-    n_ex = sim_result.states[1].batch_size
-    log_obs_values = @showprogress 0.1 "estimate_logp_pf" map(1:n_ex) do sample_id
-        pf_result = SEDL.batched_particle_filter(
-            repeat(sim_result.states[1][sample_id], n_particles),
-            (;
-                sim_result.times,
-                obs_frames,
-                controls=getindex.(sim_result.controls, sample_id),
-                observations=getindex.(sim_result.observations, sample_id),
-            );
-            motion_model,
-            showprogress=false,
-            obs_model,
+function posterior_metrics(
+    motion_model, data; n_repeats=1, obs_frames=nothing, n_particles=100_000
+)
+    rows = map(1:n_repeats) do _
+        SEDL.estimate_posterior_quality(
+            motion_model, obs_model, data; n_particles, obs_frames, state_L2_loss
         )
-        pf_result.log_obs
     end
-    (;
-        mean=mean(log_obs_values),
-        std=std(log_obs_values),
-        max=maximum(log_obs_values),
-        min=minimum(log_obs_values),
-    )
+    if n_repeats == 1
+        rows[1]
+    else
+        SEDL.named_tuple_reduce(rows, SEDL.to_measurement)
+    end
 end
+
 
 function with_alert(task::Function, task_name::String)
     try
@@ -269,7 +261,7 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
-            test_scores = estimate_logp_pf(learned_motion_model, data_test)
+            test_scores = posterior_metrics(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info "testing" log_obs = test_scores.mean log_step_increment = 0
@@ -361,7 +353,7 @@ function supervised_callback(
             end
         end
         if r.step % plot_every == 1
-            test_scores = estimate_logp_pf(learned_motion_model, data_test)
+            test_scores = posterior_metrics(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info("testing", log_obs = test_scores.mean, log_step_increment = 0)
@@ -465,7 +457,7 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            test_scores = estimate_logp_pf(learned_motion_model, data_test)
+            test_scores = posterior_metrics(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
                 @info "testing" log_obs = test_scores.mean log_step_increment = 0
@@ -555,11 +547,19 @@ if use_sim_data
     ) |> display
 end
 
+function evaluate_model(motion_model, data_test, name)
+    metrics = posterior_metrics(motion_model, data_test, n_repeats=5)
+    open_loop = posterior_metrics(motion_model, data_test, n_repeats=5, obs_frames=1:1).RMSE
+    (; name, metrics..., open_loop)
+end
+
 perf_table = let
     @info "Testing dynamics model performance on the test set"
-    rows = [merge((name="learned",), estimate_logp_pf(learned_motion_model, data_test))]
+    rows = [
+        evaluate_model(learned_motion_model, data_test, "EM"),
+    ]
     if use_sim_data
-        merge((name="truth",), estimate_logp_pf(motion_model, data_test)), push!(rows)
+        push!(rows, evaluate_model(motion_model, data_test, "true_model"))
     end
     DataFrame(rows)
 end

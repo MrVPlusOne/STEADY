@@ -47,6 +47,12 @@ function batched_sketch(::RealCarScenario)
     )
 end
 
+function state_L2_loss_batched(::RealCarScenario)
+    (state1::BatchTuple, state2::BatchTuple) -> map(state1.val, state2.val) do s1, s2
+        sum((s1 .- s2) .^ 2, dims=1)
+    end |> sum
+end
+
 module Dataset
 
 using CSV
