@@ -50,11 +50,19 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
+"""
+`landmarks` should be of shape (n_landmarks, 2, 1).
+"""
 function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_range))
     # simplified version, does not model angle warping.
     @smart_assert size(landmarks)[2] == 2
 
-    (; pos, θ) = state.val
+    (; pos) = state.val
+    if :angle_2d in keys(state.val)
+        θ = atan.(state.val.angle_2d[2:2, :], state.val.angle_2d[1:1, :])
+    else
+        θ = state.val.θ
+    end
     (; tconf, batch_size) = state
     σ_range1, σ_bearing1 = tconf(σ_range), tconf(σ_bearing)
     check_type(tconf, landmarks)
@@ -67,11 +75,13 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_rang
     GenericSamplable(;
         rand_f=rng -> let
             bearing = bearing_mean + σ_bearing1 .* Random.randn!(rng, zero(bearing_mean))
+            bearing = bearing .% 2.0f0π
             range = range_mean + σ_range1 .* Random.randn!(rng, zero(range_mean))
             BatchTuple(tconf, batch_size, (; bearing, range, landmarks_loc))
         end,
         log_pdf=(obs::BatchTuple) -> let
-            logpdf_normal(bearing_mean, σ_bearing1, obs.val.bearing) +
+            δθ = angle_diff(obs.val.bearing, bearing_mean)
+            logpdf_normal(0.0f0, σ_bearing1, δθ) +
             logpdf_normal(range_mean, σ_range1, obs.val.range)
         end,
     )
@@ -124,6 +134,44 @@ end
 The L2 loss defined on the SE(2) manifold.
 """
 L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
+
+"""
+Angle `y` minus angle `x`.
+"""
+function angle_2d_diff(y::NamedTuple, x::NamedTuple)
+    if :θ in keys(y)
+        angle_diff(y.θ, x.θ)
+    else
+        c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
+        c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
+        @. asin(c1 * s2 - c2 * s1)
+    end
+end
+
+function angle_diff(θ1::AbstractArray, θ2::AbstractArray)
+    diff = @. abs(θ1 - θ2)
+    @. min(diff, 2.0f0π - diff)
+end
+
+function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple; include_velocity=true)
+    if include_velocity
+        map((
+            (state1.val.pos .- state2.val.pos) .^ 2,
+            (state1.val.vel .- state2.val.vel) .^ 2,
+            angle_2d_diff(state1.val, state2.val) .^ 2,
+            (state1.val.ω .- state2.val.ω) .^ 2,
+        )) do diff
+            sum(diff; dims=1) |> mean
+        end |> sum
+    else
+        map((
+            (state1.val.pos .- state2.val.pos) .^ 2,
+            angle_2d_diff(state1.val, state2.val) .^ 2,
+        )) do diff
+            sum(diff; dims=1) |> mean
+        end |> sum
+    end
+end
 
 """
 ## Examples
@@ -333,9 +381,12 @@ function estimate_posterior_quality(
         post_traj = SEDL.batched_trajectories(pf_result, 1000)
         true_traj = getindex.(data.states, sample_id)
         local RMSE::Real = map(true_traj, post_traj) do x1, x2
-            state_L2_loss(x1, x2) |> mean
+            state_L2_loss(x1, x2, include_velocity=true) |> mean
         end |> mean |> sqrt
-        (; pf_result.log_obs, RMSE)
+        local RMSE_pos::Real = map(true_traj, post_traj) do x1, x2
+            state_L2_loss(x1, x2, include_velocity=false) |> mean
+        end |> mean |> sqrt
+        (; pf_result.log_obs, RMSE, RMSE_pos)
     end
     named_tuple_reduce(metric_rows, mean)
 end

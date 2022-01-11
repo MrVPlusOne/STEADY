@@ -14,6 +14,7 @@ using DataFrames: DataFrame
 using Alert
 using Random
 using Statistics
+using Setfield
 
 !true && begin
     include("../src/SEDL.jl")
@@ -25,31 +26,53 @@ using .SEDL: @kwdef
 include("data_from_source.jl")
 ##-----------------------------------------------------------
 # set up scenario and simulate some data
-if !@isdefined is_quick_test
-    is_quick_test = false
+
+if !isdefined(Main, :script_args)
+    # script_args can be used to override the default config parameters.
+    script_args = NamedTuple()
+end
+
+(;
+    is_quick_test,
+    should_train_dynamics,
+    gpu_id,
+    use_simple_obs_model,
+    use_sim_data,
+    train_method,
+) = let
+    config = (;
+        is_quick_test=false,
+        should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
+        gpu_id=nothing, # integer or nothing
+        use_simple_obs_model=true,
+        use_sim_data=true,
+        train_method=:EM, # :VI or :EM or :Supervised
+    )
+    merge(config, script_args::NamedTuple)
 end
 is_quick_test && @info "Quick testing VI..."
 
 Random.seed!(123)
 
-should_train_dynamics = true  # whether to train a NN motion model or use the ground truth
-use_gpu = true
-use_simple_obs_model = true
+use_gpu = gpu_id !== nothing
+if use_gpu
+    CUDA.device!(gpu_id)
+    @info "Using GPU #$(gpu_id)"
+else
+    @warn "No GPU specified, using CPU."
+end
 tconf = SEDL.TensorConfig(use_gpu, Float32)
-data_source = RealData(
-    SEDL.data_dir("real_data", "simple_loop"),
-    SEDL.data_dir("real_data", "simple_loop_test"),
-)
-# data_source = SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
-train_method = :VI  # :VI or :EM or :Supervised
 device = use_gpu ? Flux.gpu : Flux.cpu
-use_sim_data = data_source isa SimulationData
 
-landmarks = [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
-landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
-@smart_assert size(landmarks_tensor) == (length(landmarks), 2, 1)
+data_source = if use_sim_data
+    SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
+else
+    RealData(
+        SEDL.data_dir("real_data", "simple_loop"),
+        SEDL.data_dir("real_data", "simple_loop_test"),
+    )
+end
 
-linfo = SEDL.LandmarkInfo(; landmarks)
 sce = if use_sim_data
     SEDL.HovercraftScenario()
     # sce = SEDL.Car2dScenario(linfo, SEDL.BicycleCarDyn(; front_drive=false))
@@ -59,14 +82,22 @@ end
 state_L2_loss = SEDL.state_L2_loss_batched(sce)
 
 sketch = SEDL.batched_sketch(sce)
+
+landmarks = if use_sim_data
+    [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
+else
+    [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874]]
+end
+landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
+@smart_assert size(landmarks_tensor) == (length(landmarks), 2, 1)
+
 obs_model = if use_simple_obs_model
     let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
-    # TODO: fix this for angle_2d
     state -> SEDL.landmark_obs_model(
-        state, (; landmarks=landmarks_tensor, σ_bearing=15°, σ_range=5.0)
+        state, (; landmarks=landmarks_tensor, σ_bearing=10°, σ_range=5.0)
     )
 end
 
@@ -151,7 +182,12 @@ function plot_guide_posterior(
 end
 
 function posterior_metrics(
-    motion_model, data; n_repeats=1, obs_frames=nothing, n_particles=100_000
+    motion_model,
+    data;
+    n_repeats=1,
+    obs_frames=nothing,
+    n_particles=100_000,
+    include_velocity=true,
 )
     rows = map(1:n_repeats) do _
         SEDL.estimate_posterior_quality(
@@ -171,7 +207,7 @@ function with_alert(task::Function, task_name::String)
         task()
         alert("$task_name finished.")
     catch e
-        alert("$task_name stopped due to exception: $e.")
+        alert("$task_name stopped due to exception: $(summary(e)).")
         rethrow()
     end
 end
@@ -228,6 +264,7 @@ end
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(1e-4)
 settings = (;
+    is_quick_test,
     scenario=summary(sce),
     use_sim_data,
     train_method,
@@ -236,7 +273,7 @@ settings = (;
     use_simple_obs_model,
     n_train_ex,
 )
-save_dir = SEDL.data_dir(savename("test_vi", settings; connector="-"))
+save_dir = SEDL.data_dir(savename("train_models", settings; connector="-"))
 if isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
@@ -560,21 +597,14 @@ if use_sim_data
 end
 
 function evaluate_model(motion_model, data_test, name)
-    metrics = posterior_metrics(motion_model, data_test; n_repeats=5)
-    open_loop = posterior_metrics(motion_model, data_test; n_repeats=5, obs_frames=1:1).RMSE
+    n_repeats = is_quick_test ? 2 : 5
+    metrics = posterior_metrics(motion_model, data_test; n_repeats)
+    open_loop = posterior_metrics(motion_model, data_test; n_repeats, obs_frames=1:1).RMSE
     (; name, metrics..., open_loop)
 end
 
-perf_table = let
-    @info "Testing dynamics model performance on the test set"
-    rows = [evaluate_model(learned_motion_model, data_test, "learned")]
-    if use_sim_data
-        push!(rows, evaluate_model(motion_model, data_test, "true_model"))
-    end
-    DataFrame(rows)
-end
-wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf_table)
-display(perf_table)
+@info "Testing dynamics model performance on the test set"
+perf = evaluate_model(learned_motion_model, data_test, string(train_method))
+DataFrame([perf]) |> display
+wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf)
 ##-----------------------------------------------------------
-run(`ls -lh "$save_dir"/tb_logs`)
-save_dir

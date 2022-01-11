@@ -1,11 +1,17 @@
-using StatsPlots
-StatsPlots.default(; dpi=300, legend=:outerbottom)
-include("../src/SEDL.jl")  # reloads the module
-using .SEDL: SEDL
-##-----------------------------------------------------------
-experiment_results = SEDL.run_simulation_experiments(; is_test_run=false)
-for (name, r) in experiment_results
-    println("------- Scenario: $name -------")
-    display(r)
+
+my_include = include # to avoid mess up with VSCode linter
+
+perf_list = []
+for train_method in [:Supervised, :EM, :VI]
+    script_args = (;
+        is_quick_test=false,
+        gpu_id=0,
+        use_sim_data=false,
+        use_simple_obs_model=false,
+        train_method,
+    )
+    my_include("train_models.jl")
+    push!(perf_list, perf)
 end
-##-----------------------------------------------------------
+
+DataFrame(perf_list) |> display

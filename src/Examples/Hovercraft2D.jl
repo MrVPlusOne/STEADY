@@ -284,3 +284,7 @@ function hovercraft_scenario()
 end
 
 state_L2_loss(::HovercraftScenario) = L2_in_SE2
+
+function state_L2_loss_batched(::HovercraftScenario)
+    L2_in_SE2_batched
+end
