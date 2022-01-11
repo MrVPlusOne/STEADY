@@ -1,3 +1,20 @@
+@kwdef mutable struct EarlyStopping
+    max_iters_to_wait::Int
+    best_loss::Real=Inf
+    iters_waited::Int=0
+end
+
+function (early_stopping::EarlyStopping)(current_loss::Real)
+    if current_loss < early_stopping.best_loss
+        early_stopping.best_loss = current_loss
+        early_stopping.iters_waited = 0
+    else
+        early_stopping.iters_waited += 1
+    end
+    should_stop = early_stopping.iters_waited >= early_stopping.max_iters_to_wait
+    (; should_stop)
+end
+
 function train_dynamics_em!(
     motion_model::BatchedMotionModel,
     obs_model,
@@ -125,6 +142,7 @@ function train_dynamics_supervised!(
 
     loss() = -transition_logp(motion_core, core_input, core_output) / core_input.batch_size
 
+    steps_trained = 0
     for step in 1:n_steps
         step == 1 && loss() # just for testing
         gradient_time += @elapsed CUDA.@sync begin
@@ -142,7 +160,11 @@ function train_dynamics_supervised!(
         end
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
         callback_args = (; step, loss=val, lr=optimizer.eta, time_stats)
-        callback_time += @elapsed callback(callback_args)
+        callback_time += @elapsed begin 
+            to_stop = callback(callback_args).should_stop
+        end
+        steps_trained += 1
+        to_stop && break
     end
-    @info "Training finished ($n_steps steps)."
+    @info "Training finished ($steps_trained / $n_steps steps trained)."
 end

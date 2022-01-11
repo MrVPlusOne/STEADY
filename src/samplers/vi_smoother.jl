@@ -212,7 +212,7 @@ function batched_trajectories(pf_result, n_trajs; record_io=false)
 end
 ##-----------------------------------------------------------
 # VI Guide
-export VIGuide, mk_guide, train_guide!, mk_nn_motion_model
+export VIGuide, mk_guide, train_VI!, mk_nn_motion_model
 """
     guide(obs_seq, control_seq, Δt) -> (; trajectory, logp)
 
@@ -484,7 +484,7 @@ vcat_bc(xs::AbsMat...; batch_size) = begin
     vcat(xs...)
 end
 
-function train_guide!(
+function train_VI!(
     guide::VIGuide,
     motion_model_core,
     obs_model,
@@ -508,6 +508,7 @@ function train_guide!(
     reg_ps = Flux.params((collect ∘ regular_params).((guide, motion_model_core)))
     @info "total number of regular parameters: $(length(reg_ps))"
 
+    steps_trained = 0
     for step in 1:n_steps
         # batch_size = n_samples_f(step)::Int  fixme
         w = anneal_schedule(step)
@@ -557,9 +558,13 @@ function train_guide!(
             lr=optimizer.eta,
             time_stats,
         )
-        callback_time += @elapsed callback(callback_args)
+        callback_time += @elapsed begin 
+            to_stop = callback(callback_args).should_stop
+        end
+        steps_trained += 1
+        to_stop && break
     end
-    @info "Training finished ($n_steps steps)."
+    @info "Training finished ($steps_trained / $n_steps steps trained)."
 end
 
 function logpdf_normal(μ, σ, x)

@@ -41,7 +41,7 @@ data_source = RealData(
     SEDL.data_dir("real_data", "simple_loop_test"),
 )
 # data_source = SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
-train_method = :EM  # :VI or :EM or :Supervised
+train_method = :VI  # :VI or :EM or :Supervised
 device = use_gpu ? Flux.gpu : Flux.cpu
 use_sim_data = data_source isa SimulationData
 
@@ -264,7 +264,7 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
             test_scores = posterior_metrics(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
-                @info "testing" log_obs = test_scores.mean log_step_increment = 0
+                @info "testing" test_scores... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -328,7 +328,7 @@ end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
 function supervised_callback(
-    learned_motion_model::BatchedMotionModel; n_steps, test_every=100, plot_every=10_000
+    learned_motion_model::BatchedMotionModel; n_steps, test_every=100, plot_every=2_500
 )
     prog = Progress(n_steps; showspeed=true)
     test_in_set, test_out_set = SEDL.input_output_from_trajectory(
@@ -336,9 +336,11 @@ function supervised_callback(
     )
     test_input = BatchTuple(test_in_set)
     test_output = BatchTuple(test_out_set)
-    test_loss() =
+    compute_test_loss() =
         -SEDL.transition_logp(learned_motion_model.core, test_input, test_output) /
         test_input.batch_size
+
+    early_stopping = SEDL.EarlyStopping(; max_iters_to_wait=5)
 
     function (r)
         Base.with_logger(logger) do
@@ -348,15 +350,19 @@ function supervised_callback(
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
+            test_loss = compute_test_loss()
             Base.with_logger(logger) do
-                @info("testing", test_loss = test_loss(), log_step_increment = 0)
+                @info("testing", test_loss, log_step_increment = 0)
             end
+            should_stop = early_stopping(test_loss).should_stop
+        else
+            should_stop = false
         end
         if r.step % plot_every == 1
-            test_scores = posterior_metrics(learned_motion_model, data_test)
+            test_metrics = posterior_metrics(learned_motion_model, data_test)
 
             Base.with_logger(logger) do
-                @info("testing", log_obs = test_scores.mean, log_step_increment = 0)
+                @info("testing", test_metrics..., log_step_increment = 0)
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -376,6 +382,7 @@ function supervised_callback(
         end
 
         next!(prog; showvalues=[(:loss, r.loss), (:step, r.step), (:learning_rate, r.lr)])
+        (; should_stop)
     end
 end
 
@@ -431,6 +438,7 @@ end
 # train the guide using variational inference
 function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_every=200)
     prog = Progress(n_steps; showspeed=true)
+    early_stopping = SEDL.EarlyStopping(; max_iters_to_wait=5)
     function (r)
         Base.with_logger(logger) do
             @info "training" r.elbo r.loss r.lr r.annealing
@@ -458,9 +466,10 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
             end
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
+            should_stop = early_stopping(-test_elbo).should_stop
 
             Base.with_logger(logger) do
-                @info "testing" log_obs = test_scores.mean log_step_increment = 0
+                @info "testing" test_scores... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -483,6 +492,8 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                     @info "$name/particle" log_step_increment = 0 kv...
                 end
             end
+        else
+            should_stop = false
         end
 
         next!(
@@ -495,16 +506,17 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
                 (:learning_rate, r.lr),
             ],
         )
+        (; should_stop)
     end
 end
 
 if train_method == :VI
     with_alert("VI training") do
-        total_steps = 6_000
+        total_steps = 10_000
         n_steps = is_quick_test ? 3 : total_steps + 1
 
         @info "Training the guide..."
-        train_result = @time SEDL.train_guide!(
+        train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
             obs_model,
@@ -516,9 +528,9 @@ if train_method == :VI
             n_steps,
             anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
             callback=vi_callback(learned_motion_model; n_steps),
-            lr_schedule=let β = 40^2 / total_steps
-                step -> 1e-3 / sqrt(β * step)
-            end,
+            # lr_schedule=let β = 40^2 / total_steps
+            #     step -> 1e-3 / sqrt(β * step)
+            # end,
         )
         display(train_result)
     end
@@ -548,16 +560,14 @@ if use_sim_data
 end
 
 function evaluate_model(motion_model, data_test, name)
-    metrics = posterior_metrics(motion_model, data_test, n_repeats=5)
-    open_loop = posterior_metrics(motion_model, data_test, n_repeats=5, obs_frames=1:1).RMSE
+    metrics = posterior_metrics(motion_model, data_test; n_repeats=5)
+    open_loop = posterior_metrics(motion_model, data_test; n_repeats=5, obs_frames=1:1).RMSE
     (; name, metrics..., open_loop)
 end
 
 perf_table = let
     @info "Testing dynamics model performance on the test set"
-    rows = [
-        evaluate_model(learned_motion_model, data_test, "EM"),
-    ]
+    rows = [evaluate_model(learned_motion_model, data_test, "learned")]
     if use_sim_data
         push!(rows, evaluate_model(motion_model, data_test, "true_model"))
     end
