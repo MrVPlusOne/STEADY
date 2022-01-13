@@ -15,6 +15,7 @@ using Alert
 using Random
 using Statistics
 using Setfield
+using BSON: BSON
 
 !true && begin
     include("../src/SEDL.jl")
@@ -34,6 +35,7 @@ end
 
 (;
     is_quick_test,
+    load_trained,
     should_train_dynamics,
     gpu_id,
     use_simple_obs_model,
@@ -42,6 +44,7 @@ end
 ) = let
     config = (;
         is_quick_test=false,
+        load_trained=false,
         should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
         gpu_id=nothing, # integer or nothing
         use_simple_obs_model=true,
@@ -182,12 +185,7 @@ function plot_guide_posterior(
 end
 
 function posterior_metrics(
-    motion_model,
-    data;
-    n_repeats=1,
-    obs_frames=nothing,
-    n_particles=100_000,
-    include_velocity=true,
+    motion_model, data; n_repeats=1, obs_frames=nothing, n_particles=100_000
 )
     rows = map(1:n_repeats) do _
         SEDL.estimate_posterior_quality(
@@ -203,6 +201,7 @@ end
 
 
 function with_alert(task::Function, task_name::String)
+    is_quick_test && return nothing
     try
         task()
         alert("$task_name finished.")
@@ -216,9 +215,51 @@ if use_sim_data
     plot_pf_posterior(motion_model, data_train, 1; title="true posterior") |> display
 end
 ##-----------------------------------------------------------
-# set up the NN models
+# load or set up the NN models
+function save_model_weights!()
+    mm_weights = Flux.params(learned_motion_model)
+    serialize(joinpath(save_dir, "mm_weights.bson"), mm_weights)
+    if train_method == :VI
+        guide_weights = Flux.params(guide)
+        serialize(joinpath(save_dir, "guide_weights.bson"), guide_weights)
+    end
+end
+
+function load_model_weights!()
+    mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson")) 
+    Flux.loadparams!(learned_motion_model, mm_weights)
+    if train_method == :VI
+        guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
+        Flux.loadparams!(guide, guide_weights)
+    end
+end
+
 h_dim = 64
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
+
+settings = (;
+    is_quick_test,
+    scenario=summary(sce),
+    use_sim_data,
+    train_method,
+    h_dim,
+    should_train_dynamics,
+    use_simple_obs_model,
+    n_train_ex,
+)
+save_dir = SEDL.data_dir(savename("train_models", settings; connector="-"))
+if !load_trained && isdir(save_dir)
+    @warn "removing old data at $save_dir..."
+    rm(save_dir; recursive=true)
+    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
+end
+
+logger = TBLogger(joinpath(save_dir, "tb_logs"))
+@info """To view tensorboard logs, use the following command: 
+```
+tensorboard --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"
+```"""
+
 @info "Computing normal transforms..."
 normal_transforms = @time SEDL.compute_normal_transforms(
     sketch, data_train.states, data_train.controls, data_train.observations, data_train.Δt
@@ -261,30 +302,13 @@ if train_method == :VI
     end
 end
 
-# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
-adam = Flux.ADAM(1e-4)
-settings = (;
-    is_quick_test,
-    scenario=summary(sce),
-    use_sim_data,
-    train_method,
-    h_dim,
-    should_train_dynamics,
-    use_simple_obs_model,
-    n_train_ex,
-)
-save_dir = SEDL.data_dir(savename("train_models", settings; connector="-"))
-if isdir(save_dir)
-    @warn "removing old data at $save_dir..."
-    rm(save_dir; recursive=true)
-    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
+if load_trained
+    @warn "Loading motion model weights from file..."
+    load_model_weights!()
 end
 
-logger = TBLogger(joinpath(save_dir, "tb_logs"))
-@info """To view tensorboard logs, use the following command: 
-```
-tensorboard --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"
-```"""
+# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
+adam = Flux.ADAM(1e-4)
 ##-----------------------------------------------------------
 # train the model using expectation maximization
 
@@ -355,12 +379,7 @@ if train_method == :EM
             # end,
         )
     end
-    # save the model
-    serialize(
-        joinpath(save_dir, "models.serial"),
-        (learned_motion_model=Flux.cpu(learned_motion_model),),
-    )
-    deserialize(joinpath(save_dir, "models.serial"))
+    load_trained || save_model_weights!()
 end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
@@ -470,10 +489,13 @@ end
             callback=supervised_callback(learned_motion_model; n_steps),
         )
     end
+    load_trained || save_model_weights!()
 end
 ##-----------------------------------------------------------
 # train the guide using variational inference
-function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_every=200)
+function vi_callback(
+    learned_motion_model::BatchedMotionModel; n_steps, trajs_per_ex=10, test_every=200
+)
     prog = Progress(n_steps; showspeed=true)
     early_stopping = SEDL.EarlyStopping(; max_iters_to_wait=5)
     function (r)
@@ -482,18 +504,18 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
             @info "statistics" r.time_stats... log_step_increment = 0
         end
 
-        test_x0_batch = data_test.states[1]
+        test_x0_batch = repeat(data_test.states[1], trajs_per_ex)
+        repeated_obs_seq = repeat.(data_test.observations, trajs_per_ex)
+        repeated_control_seq = repeat.(data_test.controls, trajs_per_ex)
         # Compute test elbo and plot a few trajectories.
         if r.step % test_every == 1
             test_trajs, test_lp_guide, test_core_in, test_core_out = guide(
-                test_x0_batch, data_test.observations, data_test.controls, data_test.Δt
+                test_x0_batch, repeated_obs_seq, repeated_control_seq, data_test.Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
                 learned_motion_model.core, test_core_in, test_core_out
             )
-            test_lp_obs = SEDL.observation_logp(
-                obs_model, test_trajs, data_test.observations
-            )
+            test_lp_obs = SEDL.observation_logp(obs_model, test_trajs, repeated_obs_seq)
             test_elbo =
                 (test_lp_dynamics + test_lp_obs - sum(test_lp_guide)) /
                 (length(test_trajs) * test_x0_batch.batch_size)
@@ -503,7 +525,8 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
             end
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
-            should_stop = early_stopping(-test_elbo).should_stop
+            # should_stop = early_stopping(-test_elbo).should_stop
+            should_stop = false
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -548,35 +571,36 @@ function vi_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 end
 
 if train_method == :VI
-    with_alert("VI training") do
+    load_trained || with_alert("VI training") do
         total_steps = 10_000
         n_steps = is_quick_test ? 3 : total_steps + 1
+
+        n_repeat = 10
+        vi_x0 = repeat(data_train.states[1], n_repeat)
+        vi_obs_seq = repeat.(data_train.observations, n_repeat)
+        vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
             obs_model,
-            data_train.states[1],
-            data_train.observations,
-            data_train.controls,
+            vi_x0,
+            vi_obs_seq,
+            vi_control_seq,
             data_train.Δt;
             optimizer=adam,
             n_steps,
-            anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
-            callback=vi_callback(learned_motion_model; n_steps),
-            # lr_schedule=let β = 40^2 / total_steps
-            #     step -> 1e-3 / sqrt(β * step)
-            # end,
+            # anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
+            callback=vi_callback(learned_motion_model; n_steps, trajs_per_ex=1),
+            lr_schedule=let β = 40^2 / total_steps
+                step -> 1e-3 / sqrt(β * step)
+            end,
         )
         display(train_result)
     end
-    # save the model
-    serialize(
-        joinpath(save_dir, "models.serial"),
-        (learned_motion_model=Flux.cpu(learned_motion_model), guide=Flux.cpu(guide)),
-    )
-    deserialize(joinpath(save_dir, "models.serial"))
+    # save the model weights
+    load_trained || save_model_weights!()
 end
 ##-----------------------------------------------------------
 plot_pf_posterior(

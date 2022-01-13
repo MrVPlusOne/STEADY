@@ -144,7 +144,7 @@ function angle_2d_diff(y::NamedTuple, x::NamedTuple)
     else
         c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
         c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
-        @. asin(c1 * s2 - c2 * s1)
+        @. asin(clamp(c1 * s2 - c2 * s1, -1, 1))
     end
 end
 
@@ -161,14 +161,14 @@ function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple; include_veloc
             angle_2d_diff(state1.val, state2.val) .^ 2,
             (state1.val.ω .- state2.val.ω) .^ 2,
         )) do diff
-            sum(diff; dims=1) |> mean
+            sum(diff; dims=1)
         end |> sum
     else
         map((
             (state1.val.pos .- state2.val.pos) .^ 2,
             angle_2d_diff(state1.val, state2.val) .^ 2,
         )) do diff
-            sum(diff; dims=1) |> mean
+            sum(diff; dims=1)
         end |> sum
     end
 end
@@ -380,12 +380,14 @@ function estimate_posterior_quality(
         )
         post_traj = SEDL.batched_trajectories(pf_result, 1000)
         true_traj = getindex.(data.states, sample_id)
-        local RMSE::Real = map(true_traj, post_traj) do x1, x2
-            state_L2_loss(x1, x2, include_velocity=true) |> mean
-        end |> mean |> sqrt
-        local RMSE_pos::Real = map(true_traj, post_traj) do x1, x2
-            state_L2_loss(x1, x2, include_velocity=false) |> mean
-        end |> mean |> sqrt
+        local RMSE::Real =
+            map(1:length(true_traj), true_traj, post_traj) do t, x1, x2
+                state_L2_loss(x1, x2; include_velocity=true) |> mean
+            end |> mean |> sqrt
+        local RMSE_pos::Real =
+            map(true_traj, post_traj) do x1, x2
+                state_L2_loss(x1, x2; include_velocity=false) |> mean
+            end |> mean |> sqrt
         (; pf_result.log_obs, RMSE, RMSE_pos)
     end
     named_tuple_reduce(metric_rows, mean)

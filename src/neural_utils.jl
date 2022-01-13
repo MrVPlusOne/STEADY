@@ -101,7 +101,7 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
     end
 end
 
-function Base.show(io::IO, ::Type{T}) where {T <: BatchTuple}
+function Base.show(io::IO, ::Type{T}) where {T<:BatchTuple}
     if T isa UnionAll || T.parameters[2] isa UnionAll
         print(io, "BatchTuple")
     else
@@ -129,7 +129,7 @@ function BatchTuple(batches::AbsVec{<:BatchTuple})
     )
 end
 
-function BatchTuple(f::Function, batches::BatchTuple{TC}...) where TC
+function BatchTuple(f::Function, batches::BatchTuple{TC}...) where {TC}
     bs = common_batch_size(batches...)
     BatchTuple(TC(), bs, f(getfield.(batches, :val)...)::NamedTuple)
 end
@@ -173,7 +173,7 @@ function batch_subset(m::Union{Real,AbstractArray}, ids::Union{Integer,AbsVec{<:
             m
         else
             colons = ntuple(_ -> :, ndims(m) - 1)
-            ids1 = ids isa Integer ? (ids:ids) : ids
+            ids1 = ids isa AbsVec ? ids : (ids:ids)
             m[colons..., ids1]
         end
     end
@@ -194,8 +194,16 @@ common_batch_size(bts::BatchTuple...) = begin
 end
 
 function Base.repeat(batch::BatchTuple, n::Int; inflate=false)
-    @smart_assert batch.batch_size == 1
-    nb = @set batch.batch_size = n
+    nb = if n == 1
+        batch
+    elseif batch.batch_size == 1
+        @set batch.batch_size = n
+    else
+        vs = map(inflate_batch(batch).val) do v
+            repeat(v, ntuple(Returns(1), ndims(v) - 1)..., n)
+        end
+        BatchTuple(batch.tconf, batch.batch_size * n, vs)
+    end
     inflate ? inflate_batch(nb) : nb
 end
 

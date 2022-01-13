@@ -360,16 +360,15 @@ function mk_guide(;
     guide_core = FluxLayer(
         Val(:guide_core),
         (
-            gate=Dense(h_dim, core_out_dim, sigmoid),
+            propose_linear=Dense(core_in_dim, core_out_dim; init=zero_init),
             propose_left=mlp(core_in_dim, h_dim, tanh),
             propose_right=mlp(rnn_dim + x_dim, h_dim, tanh),
-            mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
-            mean2=Dense(h_dim, core_out_dim; init=zero_init),
+            mean=Dense(h_dim, core_out_dim; init=zero_init),
             scale=Dense(
                 h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
             ),
         ),
-    ) do (; gate, propose_left, propose_right, mean1, mean2, scale)
+    ) do (; propose_linear, propose_left, propose_right, mean, scale)
         (core_input::BatchTuple, state::BatchTuple, future::BatchTuple) -> begin
             local batch_size = common_batch_size(core_input, state, future)
 
@@ -378,15 +377,13 @@ function mk_guide(;
                 inv(state_trans)(state.val)..., future.val...; batch_size
             )
             local prop = propose_left(left_input) + propose_right(right_input)
-            local g = gate(prop)
-            local μ_data = (1 .- g) .* mean1(left_input) .+ g .* mean2(prop)
-            local σ_data = scale(prop)
+            local mean_prop = propose_linear(left_input) + mean(prop)
 
-            local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
+            local μs = core_out_trans(split_components(mean_prop, sketch.output_vars))
             local σs = map(
                 .*,
                 core_out_trans.scale,
-                split_components(σ_data, sketch.output_vars),
+                split_components(scale(prop), sketch.output_vars),
             )
             map((; μs, σs)) do nt
                 BatchTuple(core_input.tconf, batch_size, nt)
@@ -558,7 +555,7 @@ function train_VI!(
             lr=optimizer.eta,
             time_stats,
         )
-        callback_time += @elapsed begin 
+        callback_time += @elapsed begin
             to_stop = callback(callback_args).should_stop
         end
         steps_trained += 1
