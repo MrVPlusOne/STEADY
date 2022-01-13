@@ -436,6 +436,10 @@ function mk_nn_motion_model(;
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
             mean2=Chain(
                 Dense(core_in_dim, h_dim, relu),
+                SkipConnection(
+                    Dense(h_dim, h_dim, relu),
+                    +,
+                ),
                 Dense(h_dim, core_out_dim; init=zero_init),
             ),
             scale=Dense(

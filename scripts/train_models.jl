@@ -187,7 +187,7 @@ end
 function posterior_metrics(
     motion_model, data; n_repeats=1, obs_frames=nothing, n_particles=100_000
 )
-    rows = map(1:n_repeats) do _
+    rows = @showprogress 0.1 "posterior_metrics" map(1:n_repeats) do _
         SEDL.estimate_posterior_quality(
             motion_model, obs_model, data; n_particles, obs_frames, state_L2_loss
         )
@@ -591,10 +591,10 @@ if train_method == :VI
             data_train.Δt;
             optimizer=adam,
             n_steps,
-            # anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.5step / n_steps)),
+            anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.2step / n_steps)),
             callback=vi_callback(learned_motion_model; n_steps, trajs_per_ex=1),
             lr_schedule=let β = 40^2 / total_steps
-                step -> 1e-3 / sqrt(β * step)
+                step -> 1e-4 / sqrt(β * step)
             end,
         )
         display(train_result)
@@ -632,3 +632,4 @@ perf = evaluate_model(learned_motion_model, data_test, string(train_method))
 DataFrame([perf]) |> display
 wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf)
 ##-----------------------------------------------------------
+1+2

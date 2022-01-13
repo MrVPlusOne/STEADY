@@ -361,11 +361,13 @@ against the ground truth.
 Returns (; log_obs, RMSE)
 """
 function estimate_posterior_quality(
-    motion_model, obs_model, data; state_L2_loss, obs_frames=nothing, n_particles=100_000
+    motion_model, obs_model, data; state_L2_loss, obs_frames=nothing, n_particles=100_000,
+    showprogress=false,
 )
     isnothing(obs_frames) && (obs_frames = eachindex(data.times))
     n_ex = data.states[1].batch_size
-    metric_rows = @showprogress 0.1 "estimate_logp_pf" map(1:n_ex) do sample_id
+    prog = Progress(n_ex, desc="estimate_posterior_quality", enabled=showprogress)
+    metric_rows = map(1:n_ex) do sample_id
         pf_result = SEDL.batched_particle_filter(
             repeat(data.states[1][sample_id], n_particles),
             (;
@@ -388,6 +390,7 @@ function estimate_posterior_quality(
             map(true_traj, post_traj) do x1, x2
                 state_L2_loss(x1, x2; include_velocity=false) |> mean
             end |> mean |> sqrt
+        next!(prog)
         (; pf_result.log_obs, RMSE, RMSE_pos)
     end
     named_tuple_reduce(metric_rows, mean)
