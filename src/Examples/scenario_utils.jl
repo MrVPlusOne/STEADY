@@ -142,10 +142,33 @@ function angle_2d_diff(y::NamedTuple, x::NamedTuple)
     if :θ in keys(y)
         angle_diff(y.θ, x.θ)
     else
+        angle_diff
         c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
         c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
         @. asin(clamp(c1 * s2 - c2 * s1, -1, 1))
     end
+end
+
+"""
+Compute `angle2 - angle1` as a scalar.
+
+## Examples
+```
+julia> angle_2d_diff([cos(2.5) sin(2.5)], [cos(1.5) sin(1.5)], dims=2)[1] ≈ 1.0
+true
+```
+"""
+function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
+    if dims == 1
+        c1, s1 = angle1[1:1, :], angle1[2:2, :]
+        c2, s2 = angle2[1:1, :], angle2[2:2, :]
+    else
+        @smart_assert dims == 2
+        c1, s1 = angle1[:, 1:1], angle1[:, 2:2]
+        c2, s2 = angle2[:, 1:1], angle2[:, 2:2]
+    end
+
+    @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
 end
 
 function angle_diff(θ1::AbstractArray, θ2::AbstractArray)
@@ -283,8 +306,9 @@ end
 function plot_2d_trajectories!(
     trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1
 )
-    linealpha = 2.0 / sqrt(length(trajectories))
-    pos_seq = (x -> x.val.pos).(trajectories)
+    n_trajs = trajectories[1].batch_size
+    linealpha = min(2.0 / sqrt(length(n_trajs)), 1.0)
+    pos_seq = (x -> Flux.cpu(x.val.pos)).(trajectories)
     end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
     push!(pos_seq, end_marker)
     xs_mat = (b -> b[1, :]).(pos_seq) |> hcatreduce |> Flux.cpu
@@ -361,12 +385,17 @@ against the ground truth.
 Returns (; log_obs, RMSE)
 """
 function estimate_posterior_quality(
-    motion_model, obs_model, data; state_L2_loss, obs_frames=nothing, n_particles=100_000,
+    motion_model,
+    obs_model,
+    data;
+    state_L2_loss,
+    obs_frames=nothing,
+    n_particles=100_000,
     showprogress=false,
 )
     isnothing(obs_frames) && (obs_frames = eachindex(data.times))
     n_ex = data.states[1].batch_size
-    prog = Progress(n_ex, desc="estimate_posterior_quality", enabled=showprogress)
+    prog = Progress(n_ex; desc="estimate_posterior_quality", enabled=showprogress)
     metric_rows = map(1:n_ex) do sample_id
         pf_result = SEDL.batched_particle_filter(
             repeat(data.states[1][sample_id], n_particles),

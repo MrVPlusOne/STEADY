@@ -100,6 +100,7 @@ struct BatchTuple{C<:TensorConfig,V<:NamedTuple}
         new{typeof(tconf),typeof(val)}(tconf, batch_size, val)
     end
 end
+Flux.@functor BatchTuple
 
 function Base.show(io::IO, ::Type{T}) where {T<:BatchTuple}
     if T isa UnionAll || T.parameters[2] isa UnionAll
@@ -125,10 +126,18 @@ function BatchTuple(batches::AbsVec{<:BatchTuple})
     BatchTuple(
         batches[1].tconf,
         sum(x -> x.batch_size, batches),
-        hcatreduce((x -> inflate_batch(x).val).(batches)),
+        hcatreduce((x -> inflate_batch(x).val).(batches))::NamedTuple,
     )
 end
 
+"""
+Create a new BatchTuple from existing ones by combining their values
+```
+    BatchTuple(batch1, batch2...) do batch_val1, batch_val2...
+        # should return new values
+    end
+````
+"""
 function BatchTuple(f::Function, batches::BatchTuple{TC}...) where {TC}
     bs = common_batch_size(batches...)
     BatchTuple(TC(), bs, f(getfield.(batches, :val)...)::NamedTuple)
@@ -153,6 +162,18 @@ end
 function Base.getindex(batch::BatchTuple, ids)
     new_val = map(v -> batch_subset(v, ids), batch.val)
     BatchTuple(batch.tconf, length(ids), new_val)
+end
+
+"""
+Split `batch` into `n` equally sized batches.
+"""
+function Base.split(batch::BatchTuple, n::Integer)
+    @smart_assert batch.batch_size % n == 0
+    chunksize = batch.batch_size ÷ n
+    map(1:n) do i
+        shift = 1 + (i-1) * chunksize
+        batch[shift:shift+chunksize-1]
+    end
 end
 
 function (tconf::TensorConfig)(batch::BatchTuple)
@@ -309,7 +330,7 @@ function plot_batched_series(
             end
             y_out[i * (T + 1), :] .= NaN
         end
-        (; xs=x_out, ys=y_out, alpha=1.0 / sqrt(batch_size))
+        (; xs=x_out, ys=y_out, alpha=0.6 / sqrt(batch_size))
     end
 
     series = TensorConfig(false).(series)

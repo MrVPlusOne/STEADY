@@ -30,7 +30,9 @@ include("data_from_source.jl")
 
 if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
-    script_args = NamedTuple()
+    script_args = (
+        gpu_id=1, use_sim_data=false, use_simple_obs_model=true, train_method=:Super_noisy
+    )
 end
 
 (;
@@ -47,9 +49,9 @@ end
         load_trained=false,
         should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
         gpu_id=nothing, # integer or nothing
-        use_simple_obs_model=true,
+        use_simple_obs_model=false,
         use_sim_data=true,
-        train_method=:EM, # :VI or :EM or :Supervised
+        train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
     )
     merge(config, script_args::NamedTuple)
 end
@@ -127,7 +129,12 @@ let
     SEDL.plot_2d_trajectories!(data_train.states, "forward simulation") |> display
 end
 
-SEDL.plot_batched_series(data_train.times, getindex.(data_train.states, 1)) |> display
+SEDL.plot_batched_series(
+    data_train.times, getindex.(data_train.states, 1); title="States"
+) |> display
+SEDL.plot_batched_series(
+    data_train.times, getindex.(data_train.controls, 1); title="Controls"
+) |> display
 ##-----------------------------------------------------------
 # test particle filtering
 function plot_pf_posterior(
@@ -226,7 +233,7 @@ function save_model_weights!()
 end
 
 function load_model_weights!()
-    mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson")) 
+    mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson"))
     Flux.loadparams!(learned_motion_model, mm_weights)
     if train_method == :VI
         guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
@@ -442,39 +449,43 @@ function supervised_callback(
     end
 end
 
-(train_method == :Supervised) && let
-    use_ground_truth = true
-    if use_ground_truth
-        core_in_set, core_out_set = SEDL.input_output_from_trajectory(
-            learned_motion_model.sketch,
+(train_method ∈ [:Super_noisy, :Super_noiseless]) && let
+    states_train = if train_method == :Super_noisy
+        Δt = data_train.times[2] - data_train.times[1]
+        est_result = SEDL.Dataset.estimate_states_from_observations(
+            sce,
+            let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
+                state -> SEDL.gaussian_obs_model(state, σs)
+            end,
+            data_train.observations,
             data_train.states,
-            data_train.controls,
-            data_train.times;
-            test_consistency=true,
+            Δt;
+            n_steps=5000,
         )
+        plot(est_result.loss_history; title="state estimation loss history") |> display
+
+        plot()
+        SEDL.plot_2d_trajectories!(est_result.states, "Estimated states")
+        SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2) |> display
+
+        SEDL.plot_batched_series(
+            data_train.times,
+            getindex.(est_result.states, 1);
+            truth=getindex.(data_train.states, 1),
+        ) |> display
+        est_result.states
     else
-        core_in_set, core_out_set = BatchTuple[], BatchTuple[]
-        x0_batch = data_train.states[1]
-        times = data_train.times
-        @showprogress for ex_id in 1:(x0_batch.batch_size)
-            x0 = repeat(x0_batch[ex_id], 100_000)
-            controls = getindex.(data_train.controls, ex_id)
-            observations = getindex.(data_train.observations, ex_id)
-            local pf_result = SEDL.batched_particle_filter(
-                x0,
-                (; times, obs_frames, controls, observations);
-                motion_model,
-                obs_model,
-                record_io=true,
-                showprogress=false,
-            )
-            (; core_input_seq, core_output_seq) = SEDL.batched_trajectories(
-                pf_result, 1; record_io=true
-            )
-            append!(core_in_set, core_input_seq)
-            append!(core_out_set, core_output_seq)
-        end
+        data_train.states
     end
+    core_in_set, core_out_set = SEDL.input_output_from_trajectory(
+        learned_motion_model.sketch,
+        states_train,
+        data_train.controls,
+        data_train.times;
+        # do not test if the graident is regularized
+        test_consistency=train_method == :Super_noiseless,
+    )
+
     @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
     with_alert("Supervised training") do
@@ -486,7 +497,7 @@ end
             BatchTuple(core_out_set);
             optimizer=adam,
             n_steps,
-            callback=supervised_callback(learned_motion_model; n_steps),
+            callback=supervised_callback(learned_motion_model; n_steps, test_every=50),
         )
     end
     load_trained || save_model_weights!()
@@ -632,4 +643,3 @@ perf = evaluate_model(learned_motion_model, data_test, string(train_method))
 DataFrame([perf]) |> display
 wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf)
 ##-----------------------------------------------------------
-1+2

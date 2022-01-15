@@ -1,7 +1,7 @@
 @kwdef mutable struct EarlyStopping
     max_iters_to_wait::Int
-    best_loss::Real=Inf
-    iters_waited::Int=0
+    best_loss::Real = Inf
+    iters_waited::Int = 0
 end
 
 function (early_stopping::EarlyStopping)(current_loss::Real)
@@ -100,19 +100,21 @@ function input_output_from_trajectory(
     control_seq::TimeSeries{<:BatchTuple},
     times;
     test_consistency=false,
-) 
+)
     @smart_assert length(state_seq) == length(control_seq)
 
     core_in, core_out = BatchTuple[], BatchTuple[]
 
-    for t in 1:length(state_seq)-1
+    for t in 1:(length(state_seq) - 1)
         core_input = sketch.state_to_input(state_seq[t], control_seq[t])
-        Δt = times[t+1] - times[t]
-        core_output = sketch.output_from_state(state_seq[t], state_seq[t+1], Δt)
+        Δt = times[t + 1] - times[t]
+        core_output = sketch.output_from_state(state_seq[t], state_seq[t + 1], Δt)
         if test_consistency
             state_pred = sketch.output_to_state(state_seq[t], core_output, Δt)
-            foreach(state_pred.val, state_seq[t+1].val) do x̂, x1
-                @smart_assert x̂ ≈ x1
+            foreach(
+                keys(state_pred.val), state_pred.val, state_seq[t + 1].val
+            ) do comp, x̂, x1
+                @smart_assert x̂ ≈ x1 "Failed for component $comp at time $t"
             end
         end
         push!(core_in, core_input)
@@ -160,11 +162,57 @@ function train_dynamics_supervised!(
         end
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
         callback_args = (; step, loss=val, lr=optimizer.eta, time_stats)
-        callback_time += @elapsed begin 
+        callback_time += @elapsed begin
             to_stop = callback(callback_args).should_stop
         end
         steps_trained += 1
         to_stop && break
     end
     @info "Training finished ($steps_trained / $n_steps steps trained)."
+end
+
+
+"""
+Find the most likely states from observations only (i.e., by ignoring the dynamics).
+"""
+function optimize_states_from_observations(
+    sce::Scenario,
+    obs_model,
+    observations::BatchTuple,
+    state_guess::BatchTuple;
+    optimizer,
+    n_steps,
+    lr_schedule,
+    callback,
+)
+    @smart_assert(
+        observations.batch_size == state_guess.batch_size,
+        "There must be an observation for each state"
+    )
+
+    vars = pose_to_opt_vars(sce)(deepcopy(state_guess))
+    all_ps = Flux.params(vars.val)
+    @smart_assert length(all_ps) > 0 "No state parameters to optimize."
+    @info "total number of array parameters: $(length(all_ps))"
+
+    to_state = pose_from_opt_vars(sce)
+
+    loss() = -mean(logpdf(obs_model(to_state(vars)), observations)::AbsMat)
+
+    steps_trained = 0
+    for step in 1:n_steps
+        step == 1 && loss() # just for testing
+        (; val, grad) = Flux.withgradient(loss, all_ps)
+        isfinite(val) || error("Loss is not finite: $val")
+        if lr_schedule !== nothing
+            optimizer.eta = lr_schedule(step)
+        end
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        callback_args = (; step, loss=val, lr=optimizer.eta)
+        to_stop = callback(callback_args).should_stop
+        steps_trained += 1
+        to_stop && break
+    end
+    @info "Optimization finished ($steps_trained / $n_steps steps trained)."
+    to_state(vars)
 end
