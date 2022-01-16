@@ -315,7 +315,7 @@ function estimate_states_from_observations(
         (; pos, angle_2d)
     end
     poses = vcat(pose0, split(poses_est, T - 1))
-    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=1000)
+    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps÷5)
     (; states, loss_history)
 end
 

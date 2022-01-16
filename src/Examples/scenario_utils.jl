@@ -53,36 +53,42 @@ end
 """
 `landmarks` should be of shape (n_landmarks, 2, 1).
 """
-function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing, σ_range))
+function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     # simplified version, does not model angle warping.
     @smart_assert size(landmarks)[2] == 2
 
     (; pos) = state.val
-    if :angle_2d in keys(state.val)
-        θ = atan.(state.val.angle_2d[2:2, :], state.val.angle_2d[1:1, :])
+    angle_2d = if :angle_2d in keys(state.val)
+        state.val.angle_2d
     else
-        θ = state.val.θ
-    end
+        vcat(cos.(state.val.θ), sin.(state.val.θ))
+    end  # shape (2, batch_size)
     (; tconf, batch_size) = state
-    σ_range1, σ_bearing1 = tconf(σ_range), tconf(σ_bearing)
+    σ_bearing1 = tconf(σ_bearing)
     check_type(tconf, landmarks)
 
-    rel = landmarks .- reshape(pos, 1, 2, :)
-    bearing_mean = atan.(rel[:, 2, :], rel[:, 1, :]) .- θ
-    range_mean = sqrt.(rel[:, 1, :] .^ 2 + rel[:, 2, :] .^ 2 .+ eps(σ_range1))
+    rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
+    distance = sqrt.(sum(rel .^ 2; dims=2) .+ eps(σ_bearing1))  # shape (n_landmarks, 1, batch_size)
+    rel_dir = rel ./ distance  # shape (n_landmarks, 2, batch_size)
+    θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
+    bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
+    # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
     landmarks_loc = reshape(landmarks, :, 1)
 
     GenericSamplable(;
         rand_f=rng -> let
             bearing = bearing_mean + σ_bearing1 .* Random.randn!(rng, zero(bearing_mean))
-            bearing = bearing .% 2.0f0π
-            range = range_mean + σ_range1 .* Random.randn!(rng, zero(range_mean))
-            BatchTuple(tconf, batch_size, (; bearing, range, landmarks_loc))
+            bearing_x = bearing[:, 1, :]
+            bearing_y = bearing[:, 2, :]
+            # range = range_mean + σ_range1 .* Random.randn!(rng, zero(range_mean))
+            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y, landmarks_loc))
         end,
         log_pdf=(obs::BatchTuple) -> let
-            δθ = angle_diff(obs.val.bearing, bearing_mean)
-            logpdf_normal(0.0f0, σ_bearing1, δθ) +
-            logpdf_normal(range_mean, σ_range1, obs.val.range)
+            (; bearing_x, bearing_y) = obs.val
+            logpdf_normal(bearing_mean[:, 1, :], σ_bearing1, bearing_x) +
+            logpdf_normal(bearing_mean[:, 2, :], σ_bearing1, bearing_y) -
+            reshape(sum(0.1 ./ distance, dims=1), 1, :)
+            # logpdf_normal(range_mean, σ_range1, range)
         end,
     )
 end
@@ -142,7 +148,6 @@ function angle_2d_diff(y::NamedTuple, x::NamedTuple)
     if :θ in keys(y)
         angle_diff(y.θ, x.θ)
     else
-        angle_diff
         c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
         c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
         @. asin(clamp(c1 * s2 - c2 * s1, -1, 1))
@@ -171,9 +176,23 @@ function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
     @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
 end
 
+function angle_diff_scalar(θ1::Real, θ2::Real)
+    pi::Float32 = π
+    diff = (θ1 - θ2) % 2pi
+    if diff > pi
+        diff - 2pi
+    elseif diff < -pi
+        diff + 2pi
+    else
+        diff
+    end
+end
+
+Zygote.@adjoint Base.broadcasted(::typeof(mod), x::Zygote.Numeric, y::Zygote.Numeric) =
+    mod.(x, y), Δ -> (nothing, Δ, .-floor.(x ./ y) .* Δ)
+
 function angle_diff(θ1::AbstractArray, θ2::AbstractArray)
-    diff = @. abs(θ1 - θ2)
-    @. min(diff, 2.0f0π - diff)
+    angle_diff_scalar.(θ1, θ2)
 end
 
 function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple; include_velocity=true)
@@ -744,4 +763,49 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
     else
         error("Unknown regressor name: $alg_name")
     end
+end
+
+"""
+Find the most likely states from observations only (i.e., by ignoring the dynamics).
+"""
+function optimize_states_from_observations(
+    sce::Scenario,
+    obs_model,
+    observations::BatchTuple,
+    state_guess::BatchTuple;
+    optimizer,
+    n_steps,
+    lr_schedule,
+    callback,
+)
+    @smart_assert(
+        observations.batch_size == state_guess.batch_size,
+        "There must be an observation for each state"
+    )
+
+    vars = pose_to_opt_vars(sce)(deepcopy(state_guess))
+    all_ps = Flux.params(vars.val)
+    @smart_assert length(all_ps) > 0 "No state parameters to optimize."
+    @info "total number of array parameters: $(length(all_ps))"
+
+    to_state = pose_from_opt_vars(sce)
+
+    loss() = -mean(logpdf(obs_model(to_state(vars)), observations)::AbsMat)
+
+    steps_trained = 0
+    for step in 1:n_steps
+        step == 1 && loss() # just for testing
+        (; val, grad) = Flux.withgradient(loss, all_ps)
+        isfinite(val) || error("Loss is not finite: $val")
+        if lr_schedule !== nothing
+            optimizer.eta = lr_schedule(step)
+        end
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        callback_args = (; step, loss=val, lr=optimizer.eta)
+        to_stop = callback(callback_args).should_stop
+        steps_trained += 1
+        to_stop && break
+    end
+    @info "Optimization finished ($steps_trained / $n_steps steps trained)."
+    to_state(vars)
 end

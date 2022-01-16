@@ -284,7 +284,7 @@ vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
 
 function rotate2d(θ::AbsMat, v::AbsMat)
-    @smart_assert size(θ, 2) == 1 || size(θ, 2) == size(v,2)
+    @smart_assert size(θ, 2) == 1 || size(θ, 2) == size(v, 2)
     x = @views v[1:1, :]
     y = @views v[2:2, :]
     if size(θ, 1) == 1
@@ -294,6 +294,27 @@ function rotate2d(θ::AbsMat, v::AbsMat)
         c, s = @views θ[1:1, :], @views θ[2:2, :]
     end
     r = vcat((c .* x .- s .* y), (s .* x .+ c .* y))
+    @smart_assert size(r) == size(v)
+    r
+end
+
+"""
+Treat both the 1st and 3rd dimensions as batch dimensions.
+
+If the 2nd dimension of θ is 1, treat it as a scalar angle; otherwise, treat it as 
+a rotation vector of form [cos(α), sin(α)].
+"""
+function rotate2d(θ::AbstractArray{T,3}, v::AbstractArray{T,3}) where {T}
+    @smart_assert size(θ, 3) == 1 || size(θ, 3) == size(v, 3)
+    x = @views v[:, 1:1, :]
+    y = @views v[:, 2:2, :]
+    if size(θ, 2) == 1
+        # treat it as a scalar angle
+        s, c = sin.(θ), cos.(θ)
+    else
+        c, s = @views θ[:, 1:1, :], @views θ[:, 2:2, :]
+    end
+    r = cat((c .* x .- s .* y), (s .* x .+ c .* y), dims=2)
     @smart_assert size(r) == size(v)
     r
 end
@@ -379,7 +400,7 @@ julia> named_tuple_reduce([(a=1, b=2), (a=3, b=6)], sum)
 (a = 4, b = 8)
 ```
 """
-function named_tuple_reduce(xs::AbstractArray{<:NamedTuple{keys}}, reduce_f) where keys
+function named_tuple_reduce(xs::AbstractArray{<:NamedTuple{keys}}, reduce_f) where {keys}
     @smart_assert length(xs) > 0
     vals = map(keys) do k
         reduce_f(map(x -> getfield(x, k), xs))
@@ -527,10 +548,6 @@ fix_nan_dual(v::Real) = v
 function nan_to_zero(v::R)::R where {R<:Real}
     isnan(v) ? zero(v) : v
 end
-
-using Statistics: norm
-Base.show(io::IO, d::ForwardDiff.Dual) =
-    print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
 
 function assert_finite(x::NamedTuple)
     if !all(isfinite, x)

@@ -102,7 +102,7 @@ obs_model = if use_simple_obs_model
     end
 else
     state -> SEDL.landmark_obs_model(
-        state, (; landmarks=landmarks_tensor, σ_bearing=10°, σ_range=5.0)
+        state, (; landmarks=landmarks_tensor, σ_bearing=5°)
     )
 end
 
@@ -454,9 +454,7 @@ end
         Δt = data_train.times[2] - data_train.times[1]
         est_result = SEDL.Dataset.estimate_states_from_observations(
             sce,
-            let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
-                state -> SEDL.gaussian_obs_model(state, σs)
-            end,
+            obs_model,
             data_train.observations,
             data_train.states,
             Δt;
@@ -464,9 +462,14 @@ end
         )
         plot(est_result.loss_history; title="state estimation loss history") |> display
 
-        plot()
+        traj_plt = plot()
         SEDL.plot_2d_trajectories!(est_result.states, "Estimated states")
-        SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2) |> display
+        SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2)
+        let 
+            @unzip xs, ys = landmarks
+            scatter!(xs, ys; label="Landmarks")
+        end
+        display(traj_plt)
 
         SEDL.plot_batched_series(
             data_train.times,

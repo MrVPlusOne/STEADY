@@ -572,8 +572,9 @@ function logpdf_normal(μ, σ, x)
     T = eltype(μ)
     a = log(T(2π))
     vs = @. -(abs2((x - μ) / σ) + a) / 2 - log(σ)
-    if vs isa AbsMat
-        sum(vs; dims=1)::AbsMat
+    rank = ndims(vs)
+    if rank > 1
+        reshape(sum(vs, dims=1:rank-1), 1, :)
     else
         vs
     end
