@@ -1,12 +1,14 @@
 @kwdef mutable struct EarlyStopping
     max_iters_to_wait::Int
+    best_model::Any = nothing
     best_loss::Real = Inf
     iters_waited::Int = 0
 end
 
-function (early_stopping::EarlyStopping)(current_loss::Real)
+function (early_stopping::EarlyStopping)(current_loss::Real, current_model)
     if current_loss < early_stopping.best_loss
         early_stopping.best_loss = current_loss
+        early_stopping.best_model = current_model
         early_stopping.iters_waited = 0
     else
         early_stopping.iters_waited += 1
@@ -70,8 +72,10 @@ function train_dynamics_em!(
         end
         log_obs = mean(log_obs_set)
         n_trans = sum(x -> x.batch_size, core_in_set)
+        Δt = times[2] - times[1]
+        core = motion_model.core
 
-        loss() = -transition_logp(motion_model.core, core_in_set, core_out_set) / n_trans
+        loss() = -transition_logp(core, core_in_set, core_out_set, Δt) / n_trans
 
         step == 1 && loss() # just for testing
         gradient_time += @elapsed CUDA.@sync begin
@@ -127,7 +131,8 @@ end
 function train_dynamics_supervised!(
     motion_core,
     core_input::BatchTuple,
-    core_output::BatchTuple;
+    core_output::BatchTuple,
+    Δt;
     optimizer,
     n_steps::Int,
     lr_schedule=nothing,
@@ -142,7 +147,8 @@ function train_dynamics_supervised!(
     reg_ps = Flux.Params(collect(regular_params(motion_core)))
     @info "total number of regular parameters: $(length(reg_ps))"
 
-    loss() = -transition_logp(motion_core, core_input, core_output) / core_input.batch_size
+    loss() =
+        -transition_logp(motion_core, core_input, core_output, Δt) / core_input.batch_size
 
     steps_trained = 0
     for step in 1:n_steps

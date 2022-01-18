@@ -69,6 +69,31 @@ function pose_from_opt_vars(::RealCarScenario)
     end
 end
 
+function get_simplified_motion_core(
+    ::RealCarScenario,
+    (; twist_linear_scale, twist_angular_scale, max_a_linear, max_a_angular),
+    acc_σs::NamedNTuple,
+)
+    (core_input::BatchTuple, Δt) -> begin
+        local μs = BatchTuple(core_input) do (; twist_linear, twist_angular, loc_v, ω)
+            â = (twist_linear_scale * twist_linear .- loc_v[1:1, :]) ./ Δt
+            a_x = @. ifelse(abs(â) < max_a_linear, â, sign(â) .* max_a_linear)
+            a_y = @. -loc_v[2:2, :] / Δt
+            a_loc = vcat(a_x, a_y)
+
+            â_rot = (twist_angular_scale * twist_angular .- ω) ./ Δt
+            a_rot = @. ifelse(
+                abs(â_rot) < max_a_angular, â_rot, sign(â_rot) .* max_a_angular
+            )
+            (; a_loc, a_rot)
+        end
+        local σs = BatchTuple(core_input) do _
+            acc_σs
+        end
+        (; μs, σs)
+    end
+end
+
 module Dataset
 
 using CSV
@@ -198,7 +223,7 @@ function states_from_poses_tv(poses::Vector{<:BatchTuple}, Δt::Real; α, n_iter
     end
 
     poses_cpu = Flux.cpu.(poses)
-    prog = Progress(batch_size, desc="states_from_poses_tv")
+    prog = Progress(batch_size; desc="states_from_poses_tv")
     seqs = map(1:batch_size) do i
         est = estimate_single(getindex.(poses_cpu, i))
         next!(prog)
@@ -315,7 +340,7 @@ function estimate_states_from_observations(
         (; pos, angle_2d)
     end
     poses = vcat(pose0, split(poses_est, T - 1))
-    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps÷5)
+    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps ÷ 5)
     (; states, loss_history)
 end
 

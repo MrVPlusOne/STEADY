@@ -51,7 +51,7 @@ function (motion_model::BatchedMotionModel{TC})(
     core_input = sketch.state_to_input(x, u)::BatchTuple{TC}
     check_components(core_input, sketch.input_vars)
 
-    (; μs::BatchTuple{TC}, σs::BatchTuple{TC}) = core(core_input)
+    (; μs::BatchTuple{TC}, σs::BatchTuple{TC}) = core(core_input, Δt)
 
     @unzip out, lps = map(sample_normal, μs.val, σs.val)
     out_batch = BatchTuple(x.tconf, bs, out)
@@ -70,13 +70,14 @@ function transition_logp(
     core,
     core_input_seq::TimeSeries{<:BatchTuple},
     core_output_seq::TimeSeries{<:BatchTuple},
+    Δt,
 )::Real
     @smart_assert length(core_input_seq) == length(core_output_seq)
-    transition_logp(core, BatchTuple(core_input_seq), BatchTuple(core_output_seq))
+    transition_logp(core, BatchTuple(core_input_seq), BatchTuple(core_output_seq), Δt)
 end
 
-function transition_logp(core, core_input::BatchTuple, core_output::BatchTuple)::Real
-    (; μs::BatchTuple, σs::BatchTuple) = core(core_input)
+function transition_logp(core, core_input::BatchTuple, core_output::BatchTuple, Δt)::Real
+    (; μs::BatchTuple, σs::BatchTuple) = core(core_input, Δt)
     lps = map(logpdf_normal, μs.val, σs.val, core_output.val)
     sum(sum(lps)::AbsMat)
 end
@@ -260,7 +261,7 @@ function (guide::VIGuide)(
     x0 = inflate_batch(x0)
     x::BatchTuple{TC} = x0
     @unzip trans, core_in_seq, core_out_seq = map(2:length(future_info)) do t
-        core = inputs -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
+        core = (inputs, Δt) -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
         mm_t = BatchedMotionModel(tconf, guide.sketch, core)
         (x1, lp, core_in, core_out) = mm_t(x, control_seq[t - 1], Δt; test_consistency)
         x = x1
@@ -436,10 +437,7 @@ function mk_nn_motion_model(;
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
             mean2=Chain(
                 Dense(core_in_dim, h_dim, relu),
-                SkipConnection(
-                    Dense(h_dim, h_dim, relu),
-                    +,
-                ),
+                SkipConnection(Dense(h_dim, h_dim, relu), +),
                 Dense(h_dim, core_out_dim; init=zero_init),
             ),
             scale=Dense(
@@ -450,7 +448,7 @@ function mk_nn_motion_model(;
             ),
         ),
     ) do (; mean1, mean2, scale)
-        (core_input::BatchTuple) -> begin
+        (core_input::BatchTuple, Δt) -> begin
             local (; batch_size) = core_input
             local core_val = inv(core_in_trans)(core_input.val)
             local input = vcat_bc(core_val...; batch_size)
@@ -523,8 +521,9 @@ function train_VI!(
                 )
             end
             dynamics_time += @elapsed begin
-                lp_dynamics =
-                    transition_logp(motion_model_core, core_in_seq, core_out_seq)::Real
+                lp_dynamics = transition_logp(
+                    motion_model_core, core_in_seq, core_out_seq, Δt
+                )::Real
             end
             obs_time += @elapsed begin
                 lp_obs = observation_logp(obs_model, traj_seq, obs_seq)::Real
@@ -574,7 +573,7 @@ function logpdf_normal(μ, σ, x)
     vs = @. -(abs2((x - μ) / σ) + a) / 2 - log(σ)
     rank = ndims(vs)
     if rank > 1
-        reshape(sum(vs, dims=1:rank-1), 1, :)
+        reshape(sum(vs; dims=1:(rank - 1)), 1, :)
     else
         vs
     end

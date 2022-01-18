@@ -91,7 +91,7 @@ sketch = SEDL.batched_sketch(sce)
 landmarks = if use_sim_data
     [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
 else
-    [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874]]
+    [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
 end
 landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
 @smart_assert size(landmarks_tensor) == (length(landmarks), 2, 1)
@@ -101,9 +101,7 @@ obs_model = if use_simple_obs_model
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
-    state -> SEDL.landmark_obs_model(
-        state, (; landmarks=landmarks_tensor, σ_bearing=5°)
-    )
+    state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, σ_bearing=5°))
 end
 
 data_train, data_test = if data_source isa SimulationData
@@ -208,10 +206,10 @@ end
 
 
 function with_alert(task::Function, task_name::String)
-    is_quick_test && return nothing
     try
-        task()
-        alert("$task_name finished.")
+        local result = task()
+        is_quick_test || alert("$task_name finished.")
+        result
     catch e
         alert("$task_name stopped due to exception: $(summary(e)).")
         rethrow()
@@ -391,7 +389,11 @@ end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
 function supervised_callback(
-    learned_motion_model::BatchedMotionModel; n_steps, test_every=100, plot_every=2_500
+    learned_motion_model::BatchedMotionModel,
+    early_stopping::SEDL.EarlyStopping;
+    n_steps,
+    test_every=100,
+    plot_every=2_500,
 )
     prog = Progress(n_steps; showspeed=true)
     test_in_set, test_out_set = SEDL.input_output_from_trajectory(
@@ -400,10 +402,10 @@ function supervised_callback(
     test_input = BatchTuple(test_in_set)
     test_output = BatchTuple(test_out_set)
     compute_test_loss() =
-        -SEDL.transition_logp(learned_motion_model.core, test_input, test_output) /
-        test_input.batch_size
+        -SEDL.transition_logp(
+            learned_motion_model.core, test_input, test_output, data_test.Δt
+        ) / test_input.batch_size
 
-    early_stopping = SEDL.EarlyStopping(; max_iters_to_wait=5)
 
     function (r)
         Base.with_logger(logger) do
@@ -417,7 +419,10 @@ function supervised_callback(
             Base.with_logger(logger) do
                 @info("testing", test_loss, log_step_increment = 0)
             end
-            should_stop = early_stopping(test_loss).should_stop
+            should_stop =
+                early_stopping(
+                    test_loss, deepcopy(Flux.cpu(learned_motion_model))
+                ).should_stop
         else
             should_stop = false
         end
@@ -449,41 +454,92 @@ function supervised_callback(
     end
 end
 
-(train_method ∈ [:Super_noisy, :Super_noiseless]) && let
+function repeat_seq(seq::Vector{<:BatchTuple}, n::Integer)
+    map(seq) do batch
+        new_batches = BatchTuple[]
+        for r in 1:(batch.batch_size)
+            append!(new_batches, fill(batch[r], n))
+        end
+        BatchTuple(new_batches)
+    end
+end
+
+simplifed_model = let
+    core = SEDL.get_simplified_motion_core(
+        sce,
+        (;
+            twist_linear_scale=1.0f0,
+            twist_angular_scale=0.5f0,
+            max_a_linear=6.0f0,
+            max_a_angular=6.0f0,
+        ),
+        (; a_loc=5.0f0, a_rot=2.0f0),
+    )
+    BatchedMotionModel(tconf, sketch, core)
+end
+if train_method == :Handwritten
+    learned_motion_model = simplifed_model
+end
+
+(train_method ∈ [:Super_TV, :Super_noiseless, :Super_Hand]) && let
+    data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
     states_train = if train_method == :Super_noisy
-        Δt = data_train.times[2] - data_train.times[1]
         est_result = SEDL.Dataset.estimate_states_from_observations(
             sce,
             obs_model,
             data_train.observations,
             data_train.states,
-            Δt;
+            data_train.Δt;
             n_steps=5000,
         )
         plot(est_result.loss_history; title="state estimation loss history") |> display
+        est_result.states
+    elseif train_method == :Super_Hand
+        est_trajs = [BatchTuple[] for t in data_train.times]
+        @info "Generating trajectories using the hand-written model..."
+        for i in 1:n_train_ex
+            pf_result = SEDL.batched_particle_filter(
+                repeat(data_train.states[1][i], 100_000),
+                (;
+                    data_train.times,
+                    obs_frames,
+                    controls=getindex.(data_train.controls, i),
+                    observations=getindex.(data_train.observations, i),
+                );
+                motion_model=simplifed_model,
+                obs_model,
+                showprogress=false,
+            )
+            pf_trajs = SEDL.batched_trajectories(pf_result, data_multiplicity)
+            push!.(est_trajs, pf_trajs)
+        end
+        map(est_trajs) do batches
+            BatchTuple(specific_elems(batches))
+        end
+    else
+        data_train.states
+    end
 
-        traj_plt = plot()
-        SEDL.plot_2d_trajectories!(est_result.states, "Estimated states")
+    let
+        traj_plt = plot(; title="Method: $train_method")
+        SEDL.plot_2d_trajectories!(states_train, "Estimated states")
         SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2)
-        let 
+        let
             @unzip xs, ys = landmarks
             scatter!(xs, ys; label="Landmarks")
         end
         display(traj_plt)
-
-        SEDL.plot_batched_series(
-            data_train.times,
-            getindex.(est_result.states, 1);
-            truth=getindex.(data_train.states, 1),
-        ) |> display
-        est_result.states
-    else
-        data_train.states
     end
+    SEDL.plot_batched_series(
+        data_train.times,
+        getindex.(states_train, 1);
+        truth=getindex.(data_train.states, 1),
+    ) |> display
+
     core_in_set, core_out_set = SEDL.input_output_from_trajectory(
         learned_motion_model.sketch,
         states_train,
-        data_train.controls,
+        repeat_seq(data_train.controls, data_multiplicity),
         data_train.times;
         # do not test if the graident is regularized
         test_consistency=train_method == :Super_noiseless,
@@ -491,27 +547,33 @@ end
 
     @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
-    with_alert("Supervised training") do
+    global learned_motion_model = with_alert("Supervised training") do
         total_steps = 50_000
         n_steps = is_quick_test ? 3 : total_steps + 1
+        es = SEDL.EarlyStopping(; max_iters_to_wait=100)
         SEDL.train_dynamics_supervised!(
             learned_motion_model.core,
             BatchTuple(core_in_set),
-            BatchTuple(core_out_set);
+            BatchTuple(core_out_set),
+            data_train.Δt;
             optimizer=adam,
             n_steps,
-            callback=supervised_callback(learned_motion_model; n_steps, test_every=50),
+            callback=supervised_callback(learned_motion_model, es; n_steps, test_every=50),
         )
+        device(es.best_model)
     end
     load_trained || save_model_weights!()
 end
 ##-----------------------------------------------------------
 # train the guide using variational inference
 function vi_callback(
-    learned_motion_model::BatchedMotionModel; n_steps, trajs_per_ex=10, test_every=200
+    learned_motion_model::BatchedMotionModel,
+    early_stopping::SEDL.EarlyStopping;
+    n_steps,
+    trajs_per_ex=10,
+    test_every=200,
 )
     prog = Progress(n_steps; showspeed=true)
-    early_stopping = SEDL.EarlyStopping(; max_iters_to_wait=5)
     function (r)
         Base.with_logger(logger) do
             @info "training" r.elbo r.loss r.lr r.annealing
@@ -527,7 +589,7 @@ function vi_callback(
                 test_x0_batch, repeated_obs_seq, repeated_control_seq, data_test.Δt
             )
             test_lp_dynamics = SEDL.transition_logp(
-                learned_motion_model.core, test_core_in, test_core_out
+                learned_motion_model.core, test_core_in, test_core_out, data_test.Δt
             )
             test_lp_obs = SEDL.observation_logp(obs_model, test_trajs, repeated_obs_seq)
             test_elbo =
@@ -539,8 +601,10 @@ function vi_callback(
             end
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
-            # should_stop = early_stopping(-test_elbo).should_stop
-            should_stop = false
+            should_stop =
+                early_stopping(
+                    -test_scores.log_obs, deepcopy(Flux.cpu(learned_motion_model))
+                ).should_stop
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -595,6 +659,7 @@ if train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
+        es = SEDL.EarlyStopping(; max_iters_to_wait=20)
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -606,17 +671,21 @@ if train_method == :VI
             optimizer=adam,
             n_steps,
             anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.2step / n_steps)),
-            callback=vi_callback(learned_motion_model; n_steps, trajs_per_ex=1),
+            callback=vi_callback(learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1),
             lr_schedule=let β = 40^2 / total_steps
                 step -> 1e-4 / sqrt(β * step)
             end,
         )
         display(train_result)
+        global learned_motion_model = device(es.best_model)
     end
     # save the model weights
     load_trained || save_model_weights!()
 end
 ##-----------------------------------------------------------
+plot_pf_posterior(
+    learned_motion_model, data_train, 1; title="Closed-loop prediction (learned)"
+) |> display
 plot_pf_posterior(
     learned_motion_model,
     data_train,

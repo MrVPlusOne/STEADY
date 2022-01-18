@@ -45,6 +45,9 @@ Adapt.adapt_storage(::Flux.FluxCPUAdaptor, tf::TensorConfig{true,ftype}) where {
 Adapt.adapt_storage(::Flux.FluxCUDAAdaptor, tf::TensorConfig{false,ftype}) where {ftype} =
     TensorConfig{true,ftype}()
 
+# make sure it's not skipped by Flux.gpu
+Flux._isbitsarray(::TensorConfig) = true
+
 (tconf::TensorConfig{on_gpu,ftype})(v::Real) where {on_gpu,ftype} = convert(ftype, v)
 (tconf::TensorConfig{on_gpu,ftype})(a::AbstractArray{<:Real}) where {on_gpu,ftype} =
     convert(tensor_type(tconf), a)
@@ -107,7 +110,8 @@ function Base.show(io::IO, ::Type{T}) where {T<:BatchTuple}
         print(io, "BatchTuple")
     else
         names = T.parameters[2].parameters[1]
-        print(io, "BatchTuple{keys=$names}")
+        tconf = T.parameters[1]
+        print(io, "BatchTuple{keys=$names, tconf=$tconf}")
     end
 end
 
