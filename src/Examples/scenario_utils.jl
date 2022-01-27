@@ -50,6 +50,12 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
+function landmarks_to_tensor(tconf::TensorConfig, landmarks::AbsVec{<:AbsVec{<:Real}})
+    r = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3)
+    @smart_assert size(r) == (length(landmarks), 2, 1)
+    tconf(r)
+end
+
 """
 `landmarks` should be of shape (n_landmarks, 2, 1).
 """
@@ -73,7 +79,7 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, 1/x, one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 = (x -> ifelse(x <= 1, 1 / x, one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
@@ -398,6 +404,58 @@ function simulate_scenario(
     end
     @unzip true_systems, ex_data_list, obs_data_list = data_list
     (; true_systems, ex_data_list, obs_data_list, setups, save_dir)
+end
+
+function sample_posterior_pf(
+    motion_model,
+    obs_model,
+    (; times, states, controls, observations),
+    sample_id=1;
+    n_particles=100_000,
+    n_trajs=100,
+    obs_frames=nothing,
+    record_io=false,
+)
+    isnothing(obs_frames) && (obs_frames = eachindex(times))
+    pf_result = SEDL.batched_particle_filter(
+        repeat(states[1][sample_id]::BatchTuple, n_particles),
+        (;
+            times,
+            obs_frames,
+            controls=getindex.(controls, sample_id),
+            observations=getindex.(observations, sample_id),
+        );
+        motion_model,
+        obs_model,
+        record_io,
+        showprogress=false,
+    )
+    SEDL.batched_trajectories(pf_result, n_trajs; record_io)
+end
+
+
+"""
+Plot the posterior trajectories sampled by a [`VIGuide`](@ref).
+"""
+function plot_guide_posterior(
+    guide::VIGuide,
+    (; times, Δt, states, controls, observations),
+    sample_id=1;
+    n_trajs=100,
+    obs_frames=obs_frames,
+    plot_args...,
+)
+    guide_trajs =
+        guide(
+            repeat(states[1][sample_id], n_trajs),
+            getindex.(observations, sample_id),
+            getindex.(controls, sample_id),
+            Δt,
+        ).trajectory
+
+    plot_batched_series(
+        times, guide_trajs; truth=getindex.(states, sample_id), plot_args...
+    )
 end
 
 """

@@ -164,6 +164,7 @@ function batched_particle_filter(
 
     out = (; particles, weights, log_weights, ancestors, log_obs, n_resampled)
     if record_io
+        @smart_assert length(core_inputs) == T - 1
         merge(out, (; core_inputs, core_outputs))
     else
         out
@@ -198,14 +199,16 @@ function batched_trajectories(pf_result, n_trajs; record_io=false)
     for t in (T - 1):-1:1
         indices = ancestors[t + 1][indices]
         push!(trajectory, particles[t][indices])
-        if record_io && t > 1
-            push!(core_input_seq, core_inputs[t - 1][indices])
-            push!(core_output_seq, core_outputs[t - 1][indices])
+        if record_io
+            push!(core_input_seq, core_inputs[t][indices])
+            push!(core_output_seq, core_outputs[t][indices])
         end
     end
 
     trajectory = reverse(trajectory)
     if record_io
+        core_input_seq = reverse(core_input_seq)
+        core_output_seq = reverse(core_output_seq)
         (; trajectory, core_input_seq, core_output_seq)
     else
         trajectory

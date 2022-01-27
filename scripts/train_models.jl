@@ -22,7 +22,7 @@ using BSON: BSON
     using .SEDL
 end
 using SEDL
-using .SEDL: @kwdef
+using .SEDL: @kwdef, @smart_assert, °
 
 include("data_from_source.jl")
 ##-----------------------------------------------------------
@@ -93,15 +93,15 @@ landmarks = if use_sim_data
 else
     [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
 end
-landmarks_tensor = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3) |> device
-@smart_assert size(landmarks_tensor) == (length(landmarks), 2, 1)
 
 obs_model = if use_simple_obs_model
     let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
-    state -> SEDL.landmark_obs_model(state, (; landmarks=landmarks_tensor, σ_bearing=5°))
+    let landmark_tensor = SEDL.landmarks_to_tensor(tconf, landmarks)
+        state -> SEDL.landmark_obs_model(state, (; landmarks=landmark_tensor, σ_bearing=5°))
+    end
 end
 
 data_train, data_test = if data_source isa SimulationData
@@ -134,59 +134,55 @@ SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.controls, 1); title="Controls"
 ) |> display
 ##-----------------------------------------------------------
-# test particle filtering
-function plot_pf_posterior(
+# utilities
+"""
+Plot the posterior trajectories sampled by a particle filter.
+"""
+function plot_posterior(
     motion_model,
-    sim_result,
-    sample_id;
+    data,
+    sample_id=1;
     n_particles=100_000,
+    n_trajs=100,
     obs_frames=nothing,
     plot_args...,
 )
-    isnothing(obs_frames) && (obs_frames = eachindex(sim_result.times))
-    pf_result = SEDL.batched_particle_filter(
-        repeat(sim_result.states[1][sample_id], n_particles),
-        (;
-            sim_result.times,
-            obs_frames,
-            controls=getindex.(sim_result.controls, sample_id),
-            observations=getindex.(sim_result.observations, sample_id),
-        );
-        motion_model,
-        obs_model,
-        showprogress=false,
+    pf_trajs = SEDL.sample_posterior_pf(
+        motion_model, obs_model, data, sample_id; n_particles, n_trajs, obs_frames
     )
-    pf_trajs = SEDL.batched_trajectories(pf_result, 100)
-    SEDL.plot_batched_series(
-        sim_result.times,
-        pf_trajs;
-        truth=getindex.(sim_result.states, sample_id),
-        plot_args...,
+    plot_batched_series(
+        data.times, pf_trajs; truth=getindex.(data.states, sample_id), plot_args...
     )
 end
 
-function plot_guide_posterior(
-    guide::VIGuide,
-    sim_result,
-    sample_id;
-    n_particles=100,
-    obs_frames=obs_frames,
+function plot_core_io(
+    motion_model::BatchedMotionModel,
+    data,
+    sample_id=1;
+    n_particles=100_000,
+    n_trajs=100,
+    obs_frames=nothing,
     plot_args...,
 )
-    guide_trajs =
-        guide(
-            repeat(sim_result.states[1][sample_id], n_particles),
-            getindex.(sim_result.observations, sample_id),
-            getindex.(sim_result.controls, sample_id),
-            sim_result.Δt,
-        ).trajectory
-
-    SEDL.plot_batched_series(
-        sim_result.times,
-        guide_trajs;
-        truth=getindex.(sim_result.states, sample_id),
-        plot_args...,
+    pf_trajs, core_in, core_out = SEDL.sample_posterior_pf(
+        motion_model,
+        obs_model,
+        data,
+        sample_id;
+        n_particles,
+        n_trajs,
+        obs_frames,
+        record_io=true,
     )
+    series = map(merge, core_in, core_out)
+    core_in_truth, core_out_truth = SEDL.input_output_from_trajectory(
+        motion_model.sketch,
+        getindex.(data.states, sample_id),
+        getindex.(data.controls, sample_id),
+        data.times,
+    )
+    truth = map(merge, core_in_truth, core_out_truth)
+    plot_batched_series(data.times[1:(end - 1)], series; truth, plot_args...)
 end
 
 function posterior_metrics(
@@ -204,7 +200,6 @@ function posterior_metrics(
     end
 end
 
-
 function with_alert(task::Function, task_name::String)
     try
         local result = task()
@@ -216,13 +211,8 @@ function with_alert(task::Function, task_name::String)
     end
 end
 
-if use_sim_data
-    plot_pf_posterior(motion_model, data_train, 1; title="true posterior") |> display
-end
-##-----------------------------------------------------------
-# load or set up the NN models
 function save_model_weights!()
-    mm_weights = Flux.params(learned_motion_model)
+    mm_weights = Flux.params(Main.learned_motion_model)
     serialize(joinpath(save_dir, "mm_weights.bson"), mm_weights)
     if train_method == :VI
         guide_weights = Flux.params(guide)
@@ -232,12 +222,16 @@ end
 
 function load_model_weights!()
     mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson"))
-    Flux.loadparams!(learned_motion_model, mm_weights)
+    Flux.loadparams!(Main.learned_motion_model, mm_weights)
     if train_method == :VI
         guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
         Flux.loadparams!(guide, guide_weights)
     end
 end
+
+use_sim_data && display(plot_posterior(motion_model, data_train; title="true posterior"))
+##-----------------------------------------------------------
+# load or set up the NN models
 
 h_dim = 64
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
@@ -279,12 +273,8 @@ else
     motion_model
 end
 
-plot_pf_posterior(
-    learned_motion_model,
-    data_train,
-    1;
-    obs_frames=1:2,
-    title="Motion model prior (initial)",
+plot_posterior(
+    learned_motion_model, data_train; obs_frames=1:1, title="Motion model prior (initial)"
 ) |> display
 
 if train_method == :VI
@@ -307,7 +297,7 @@ if train_method == :VI
     end
 end
 
-if load_trained
+if load_trained && train_method != :Handwritten
     @warn "Loading motion model weights from file..."
     load_model_weights!()
 end
@@ -335,7 +325,7 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
 
             for name in ["training", "testing"], id in [1, 2]
                 sim_data = name == "training" ? data_train : data_test
-                plt = plot_pf_posterior(
+                plt = plot_posterior(
                     learned_motion_model,
                     sim_data,
                     id;
@@ -362,7 +352,7 @@ function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_eve
     end
 end
 
-if train_method == :EM
+if !load_trained && (train_method == :EM)
     with_alert("EM training") do
         total_steps = 10_000
         n_steps = is_quick_test ? 3 : total_steps + 1
@@ -384,7 +374,7 @@ if train_method == :EM
             # end,
         )
     end
-    load_trained || save_model_weights!()
+    save_model_weights!()
 end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
@@ -435,7 +425,7 @@ function supervised_callback(
 
             for name in ["training", "testing"], id in [1, 2]
                 sim_data = name == "training" ? data_train : data_test
-                plt = plot_pf_posterior(
+                plt = plot_posterior(
                     learned_motion_model,
                     sim_data,
                     id;
@@ -481,89 +471,95 @@ if train_method == :Handwritten
     learned_motion_model = simplifed_model
 end
 
-(train_method ∈ [:Super_TV, :Super_noiseless, :Super_Hand]) && let
-    data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
-    states_train = if train_method == :Super_noisy
-        est_result = SEDL.Dataset.estimate_states_from_observations(
-            sce,
-            obs_model,
-            data_train.observations,
-            data_train.states,
-            data_train.Δt;
-            n_steps=5000,
-        )
-        plot(est_result.loss_history; title="state estimation loss history") |> display
-        est_result.states
-    elseif train_method == :Super_Hand
-        est_trajs = [BatchTuple[] for t in data_train.times]
-        @info "Generating trajectories using the hand-written model..."
-        for i in 1:n_train_ex
-            pf_result = SEDL.batched_particle_filter(
-                repeat(data_train.states[1][i], 100_000),
-                (;
-                    data_train.times,
-                    obs_frames,
-                    controls=getindex.(data_train.controls, i),
-                    observations=getindex.(data_train.observations, i),
-                );
-                motion_model=simplifed_model,
-                obs_model,
-                showprogress=false,
-            )
-            pf_trajs = SEDL.batched_trajectories(pf_result, data_multiplicity)
-            push!.(est_trajs, pf_trajs)
-        end
-        map(est_trajs) do batches
-            BatchTuple(specific_elems(batches))
-        end
-    else
-        data_train.states
-    end
-
+!load_trained &&
+    (train_method ∈ [:Super_TV, :Super_noiseless, :Super_Hand]) &&
     let
-        traj_plt = plot(; title="Method: $train_method")
-        SEDL.plot_2d_trajectories!(states_train, "Estimated states")
-        SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2)
-        let
-            @unzip xs, ys = landmarks
-            scatter!(xs, ys; label="Landmarks")
+        data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
+        states_train = if train_method == :Super_TV
+            est_result = SEDL.Dataset.estimate_states_from_observations(
+                sce,
+                obs_model,
+                data_train.observations,
+                data_train.states,
+                data_train.Δt;
+                n_steps=5000,
+            )
+            plot(est_result.loss_history; title="state estimation loss history") |> display
+            est_result.states
+        elseif train_method == :Super_Hand
+            est_trajs = [BatchTuple[] for t in data_train.times]
+            @info "Generating trajectories using the hand-written model..."
+            for i in 1:n_train_ex
+                pf_result = SEDL.batched_particle_filter(
+                    repeat(data_train.states[1][i], 100_000),
+                    (;
+                        data_train.times,
+                        obs_frames,
+                        controls=getindex.(data_train.controls, i),
+                        observations=getindex.(data_train.observations, i),
+                    );
+                    motion_model=simplifed_model,
+                    obs_model,
+                    showprogress=false,
+                )
+                pf_trajs = SEDL.batched_trajectories(pf_result, data_multiplicity)
+                push!.(est_trajs, pf_trajs)
+            end
+            map(est_trajs) do batches
+                BatchTuple(specific_elems(batches))
+            end
+        elseif train_method == :Super_noiseless
+            data_train.states
+        else
+            error("Unknown train_method: $train_method")
         end
-        display(traj_plt)
-    end
-    SEDL.plot_batched_series(
-        data_train.times,
-        getindex.(states_train, 1);
-        truth=getindex.(data_train.states, 1),
-    ) |> display
 
-    core_in_set, core_out_set = SEDL.input_output_from_trajectory(
-        learned_motion_model.sketch,
-        states_train,
-        repeat_seq(data_train.controls, data_multiplicity),
-        data_train.times;
-        # do not test if the graident is regularized
-        test_consistency=train_method == :Super_noiseless,
-    )
+        let
+            traj_plt = plot(; title="Method: $train_method")
+            SEDL.plot_2d_trajectories!(states_train, "Estimated states")
+            SEDL.plot_2d_trajectories!(data_train.states, "True states"; linecolor=2)
+            let
+                @unzip xs, ys = landmarks
+                scatter!(xs, ys; label="Landmarks")
+            end
+            display(traj_plt)
+        end
+        SEDL.plot_batched_series(
+            data_train.times,
+            getindex.(states_train, 1);
+            truth=getindex.(data_train.states, 1),
+        ) |> display
 
-    @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
-
-    global learned_motion_model = with_alert("Supervised training") do
-        total_steps = 50_000
-        n_steps = is_quick_test ? 3 : total_steps + 1
-        es = SEDL.EarlyStopping(; max_iters_to_wait=100)
-        SEDL.train_dynamics_supervised!(
-            learned_motion_model.core,
-            BatchTuple(core_in_set),
-            BatchTuple(core_out_set),
-            data_train.Δt;
-            optimizer=adam,
-            n_steps,
-            callback=supervised_callback(learned_motion_model, es; n_steps, test_every=50),
+        core_in_set, core_out_set = SEDL.input_output_from_trajectory(
+            learned_motion_model.sketch,
+            states_train,
+            repeat_seq(data_train.controls, data_multiplicity),
+            data_train.times;
+            # do not test if the graident is regularized
+            test_consistency=train_method == :Super_noiseless,
         )
-        device(es.best_model)
+
+        @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
+
+        global learned_motion_model = with_alert("Supervised training") do
+            total_steps = 50_000
+            n_steps = is_quick_test ? 3 : total_steps + 1
+            es = SEDL.EarlyStopping(; max_iters_to_wait=100)
+            SEDL.train_dynamics_supervised!(
+                learned_motion_model.core,
+                BatchTuple(core_in_set),
+                BatchTuple(core_out_set),
+                data_train.Δt;
+                optimizer=adam,
+                n_steps,
+                callback=supervised_callback(
+                    learned_motion_model, es; n_steps, test_every=50
+                ),
+            )
+            device(es.best_model)
+        end
+        save_model_weights!()
     end
-    load_trained || save_model_weights!()
-end
 ##-----------------------------------------------------------
 # train the guide using variational inference
 function vi_callback(
@@ -612,14 +608,14 @@ function vi_callback(
 
             for name in ["training", "testing"], id in [1, 2]
                 sim_data = name == "training" ? data_train : data_test
-                pf_plt = plot_pf_posterior(
+                pf_plt = plot_posterior(
                     learned_motion_model,
                     sim_data,
                     id;
                     title="$name traj $id (iter $(r.step))",
                 )
 
-                guide_plt = plot_guide_posterior(
+                guide_plt = SEDL.plot_guide_posterior(
                     guide, sim_data, id; title="$name traj $id (iter $(r.step))"
                 )
 
@@ -648,8 +644,8 @@ function vi_callback(
     end
 end
 
-if train_method == :VI
-    load_trained || with_alert("VI training") do
+if !load_trained && train_method == :VI
+    with_alert("VI training") do
         total_steps = 10_000
         n_steps = is_quick_test ? 3 : total_steps + 1
 
@@ -671,7 +667,9 @@ if train_method == :VI
             optimizer=adam,
             n_steps,
             anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.2step / n_steps)),
-            callback=vi_callback(learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1),
+            callback=vi_callback(
+                learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1
+            ),
             lr_schedule=let β = 40^2 / total_steps
                 step -> 1e-4 / sqrt(β * step)
             end,
@@ -680,28 +678,23 @@ if train_method == :VI
         global learned_motion_model = device(es.best_model)
     end
     # save the model weights
-    load_trained || save_model_weights!()
+    save_model_weights!()
 end
 ##-----------------------------------------------------------
-plot_pf_posterior(
-    learned_motion_model, data_train, 1; title="Closed-loop prediction (learned)"
-) |> display
-plot_pf_posterior(
-    learned_motion_model,
-    data_train,
-    1;
-    obs_frames=1:1,
-    title="Open-loop prediction (learned)",
+plot_posterior(learned_motion_model, data_train; title="Posterior (learned)") |> display
+plot_posterior(
+    learned_motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (learned)"
 ) |> display
 if use_sim_data
-    plot_pf_posterior(
-        motion_model,
-        data_train,
-        1;
-        obs_frames=1:1,
-        title="Open-loop prediction (true model)",
+    plot_posterior(
+        motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (true model)"
     ) |> display
 end
+
+plot_core_io(learned_motion_model, data_train; title="Posterior (learned)") |> display
+plot_core_io(
+    learned_motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (learned)"
+) |> display
 
 function evaluate_model(motion_model, data_test, name)
     n_repeats = is_quick_test ? 2 : 5

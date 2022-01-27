@@ -175,9 +175,18 @@ function Base.split(batch::BatchTuple, n::Integer)
     @smart_assert batch.batch_size % n == 0
     chunksize = batch.batch_size ÷ n
     map(1:n) do i
-        shift = 1 + (i-1) * chunksize
-        batch[shift:shift+chunksize-1]
+        shift = 1 + (i - 1) * chunksize
+        batch[shift:(shift + chunksize - 1)]
     end
+end
+
+"""
+Similar to `merge(x1::NamedTuple, x2::NamedTuple)`.
+"""
+function Base.merge(b1::BatchTuple, b2::BatchTuple)
+    @smart_assert b1.tconf == b2.tconf
+    @smart_assert b1.batch_size == b2.batch_size
+    BatchTuple(b1.tconf, b1.batch_size, merge(b1.val, b2.val))
 end
 
 function (tconf::TensorConfig)(batch::BatchTuple)
@@ -289,9 +298,15 @@ end
 
 
 export plot_batched_series
+
 """
 A general plotting function that plots a time series of `BatchedTuple`s. Each batch 
 component will be plotted inside a separate subplot.
+
+## Keyword args
+- `mode`: :particle or :marginal. :particle plots a seperate line for each batch element, 
+whereas :marginal plots a ribbon that shows the 20th, 50th, and 80th percentiles of 
+each compoenent.
 
 ## Examples
 ```julia
@@ -317,10 +332,25 @@ end
 function plot_batched_series(
     times,
     series::TimeSeries{<:BatchTuple};
+    mode=:marginal,
     truth::Union{Nothing,TimeSeries{<:BatchTuple}}=nothing,
     plot_width=600,
     plot_args...,
 )
+    series = TensorConfig(false).(series)
+    truth === nothing || (truth = TensorConfig(false).(truth))
+    plot_batched_series(Val(mode), times, series; truth, plot_width, plot_args...)
+end
+
+function plot_batched_series(
+    ::Val{:particle},
+    times,
+    series::TimeSeries{<:BatchTuple};
+    truth::Union{Nothing,TimeSeries{<:BatchTuple}}=nothing,
+    plot_width=600,
+    plot_args...,
+)
+    @smart_assert length(times) == length(series)
     to_plot_data(ys::TimeSeries{<:Real}) = (; xs=times, ys, alpha=1.0)
     to_plot_data(ys::TimeSeries{<:AbsMat{<:Real}}) = begin
         local (dim, batch_size) = size(ys[1])
@@ -337,10 +367,8 @@ function plot_batched_series(
         (; xs=x_out, ys=y_out, alpha=0.6 / sqrt(batch_size))
     end
 
-    series = TensorConfig(false).(series)
     template = series[1]
     if truth !== nothing
-        truth = TensorConfig(false).(truth)
         truth_temp = truth[1]
         @smart_assert truth_temp.batch_size == 1
         @smart_assert keys(truth_temp.val) == keys(template.val)
@@ -359,6 +387,59 @@ function plot_batched_series(
                 txs, tys; label=hcatreduce(["$k[$i] (truth)" for i in 1:n_comps]), linecolor
             )
         end
+    end
+    plot(
+        subplots...;
+        layout=(length(subplots), 1),
+        size=(plot_width, 0.6plot_width * length(subplots)),
+        left_margin=1.5cm,
+        plot_args...,
+    )
+end
+
+function plot_batched_series(
+    ::Val{:marginal},
+    times,
+    series::TimeSeries{<:BatchTuple};
+    truth::Union{Nothing,TimeSeries{<:BatchTuple}}=nothing,
+    plot_width=600,
+    quantile_spread=0.25,
+    plot_args...,
+)
+    @smart_assert 0 <= quantile_spread <= 0.5
+    @smart_assert length(times) == length(series)
+
+    plot_data!(ys::TimeSeries{<:Real}; args...) = plot!(times, ys, args...)
+    plot_data!(ys::TimeSeries{<:AbsVec{<:Real}}; args...) = begin
+        @unzip lower, middle, upper = map(ys) do ensemble
+            local l, m, u = quantile(
+                ensemble, (0.5 - quantile_spread, 0.5, 0.5 + quantile_spread)
+            )
+            m - l, m, u - m
+        end
+        plot!(times, middle; ribbon=(lower, upper), args...)
+    end
+    template = series[1]
+
+    subplots = []
+    for k in keys(template.val)
+        n_dims = size(template.val[k], 1)
+        sp = plot()
+        for d in 1:n_dims
+            local ys = (b -> b.val[k][d, :]).(series)
+            plot_data!(
+                ys;
+                linecolor=d,
+                fillcolor=d,
+                fillalpha=0.4,
+                line=:dot,
+                label="$k[$d] (median)",
+            )
+            truth === nothing || plot_data!(
+                (b -> b.val[k][d, :]).(truth); linecolor=d, label="$k[$d] (truth)"
+            )
+        end
+        push!(subplots, sp)
     end
     plot(
         subplots...;
