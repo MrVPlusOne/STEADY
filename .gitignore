@@ -2,9 +2,10 @@ configs/
 
 JuliaSysimage.dylib
 checkpoints
-.vscode
 .history
 .lh
+.vscode/*
+!.vscode/JuliaSysimage.toml
 
 scripts/scratch.jl
 

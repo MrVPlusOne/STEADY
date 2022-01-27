@@ -1,9 +1,9 @@
 """
 The 2D hovercraft scenario.
 """
-@kwdef(struct HovercraftScenario{LI<:LandmarkInfo} <: Scenario
-    landmark_info::LI
-end)
+struct HovercraftScenario <: Scenario end
+
+Base.summary(io::IO, ::HovercraftScenario) = print(io, "HovercraftScenario")
 
 dummy_state(::HovercraftScenario) =
     (pos=to_svec(randn(2)), vel=to_svec(randn(2)), θ=randn(), ω=randn())
@@ -51,8 +51,8 @@ function initial_state_dist(::HovercraftScenario, x0)
     DistrIterator((
         pos=SMvNormal(x0.pos, 0.2),
         vel=SMvNormal(x0.vel, 0.2),
-        θ=CircularNormal(x0.θ, 8°),
-        ω=Normal(x0.ω, 0.1),
+        θ=CircularNormal(x0.θ[1], 8°),
+        ω=Normal(x0.ω[1], 0.1),
     ))
 end
 
@@ -106,6 +106,18 @@ function sindy_sketch(sce::HovercraftScenario)
     )
 end
 
+function batched_sketch(::HovercraftScenario)
+    BatchedMotionSketch(;
+        state_vars=(; pos=2, vel=2, θ=1, ω=1),
+        control_vars=(; ul=1, ur=1),
+        input_vars=(; loc_v=2, ω=1, θ=1, ul=1, ur=1),
+        output_vars=(; loc_acc=2, a_θ=1),
+        state_to_input=state_to_input_SE2,
+        output_to_state_rate=output_to_state_rate_SE2,
+        output_from_state_rate=output_from_state_rate_SE2,
+    )
+end
+
 function dynamics_sketch(sce::HovercraftScenario)
     vars = variables(sce)
     inputs = [vars.loc_vx, vars.loc_vy, vars.ω, vars.ul, vars.ur]
@@ -154,6 +166,23 @@ function dynamics_core(::HovercraftScenario)
         f_y = -drag_y * loc_vy
         f_θ = -ω * rot_drag
         (; f_x, f_y, f_θ)
+    end
+end
+
+function batched_core(::HovercraftScenario, params)
+    (input::BatchTuple) -> let
+        (; tconf, batch_size) = input
+        (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf, params)
+
+        (; loc_v, ω, ul, ur) = input.val
+        a_x = (ul .+ ur .- drag_x * loc_v[1:1, :]) / mass
+        a_y = -drag_y * loc_v[2:2, :] / mass
+        a_θ = (ur .- ul .- rot_drag * ω) / rot_mass
+        loc_acc = vcat(a_x, a_y)
+        @smart_assert size(loc_acc) == size(loc_v)
+        μs = BatchTuple(tconf, batch_size, (; loc_acc, a_θ))
+        σs = BatchTuple(input, (loc_acc=tconf(fill(σ_v, 2, 1)), a_θ=tconf(fill(σ_ω, 1, 1))))
+        (; μs, σs)
     end
 end
 
@@ -216,7 +245,7 @@ function simulation_controller(sce::HovercraftScenario; noise=0.5)
     if rand() < 0.6
         ul_f, ur_f = ur_f, ul_f
     end
-    (s, obs, t::Float64) -> begin
+    (s, obs, t::Real) -> begin
         (ul=ul_f(t), ur=ur_f(t))
     end
 end
@@ -255,3 +284,7 @@ function hovercraft_scenario()
 end
 
 state_L2_loss(::HovercraftScenario) = L2_in_SE2
+
+function state_L2_loss_batched(::HovercraftScenario)
+    L2_in_SE2_batched
+end

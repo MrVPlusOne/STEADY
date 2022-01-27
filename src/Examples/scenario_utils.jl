@@ -1,7 +1,5 @@
 using Interpolations: LinearInterpolation
 using DrWatson
-using REPL: REPL
-using REPL.TerminalMenus
 using JSON: JSON
 using TensorBoardLogger: TBLogger
 using Serialization
@@ -16,20 +14,19 @@ abstract type Scenario end
 """
 Information related to 2D landmark observations.
 """
-@kwdef(
-    struct LandmarkInfo{bo,N}
-        landmarks::SVector{N,SVector{2,Float64}}
-        σ_range::Float64 = 1.0
-        σ_bearing::Float64 = 5°
-        sensor_range::Float64 = 10.0
-        "The width of the sigmoid function that gives the probability of having observations 
-        near the sensor range limit."
-        range_falloff::Float64 = 1.0
-        p_detect_min::Float64 = 1e-4
-        "If true, will only include bearing (angle) but not range (distrance) readings."
-        bearing_only::Val{bo} = Val(false)
-    end
-)
+@kwdef struct LandmarkInfo{bo,L<:AbsVec}
+    landmarks::L
+    σ_range::Float64 = 1.0
+    σ_bearing::Float64 = 5°
+    sensor_range::Float64 = 10.0
+    "The width of the sigmoid function that gives the probability of having observations 
+    near the sensor range limit."
+    range_falloff::Float64 = 1.0
+    p_detect_min::Float64 = 1e-4
+    "If true, will only include bearing (angle) but not range (distrance) readings."
+    bearing_only::Val{bo} = Val(false)
+end
+@use_short_show LandmarkInfo
 
 function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     (; landmarks, σ_bearing, σ_range, sensor_range, range_falloff, p_detect_min) = linfo
@@ -53,30 +50,179 @@ function landmark_readings((; pos, θ), linfo::LandmarkInfo{bo}) where {bo}
     )
 end
 
-function landmark_obs_sample((; pos, θ), (; landmarks, σ_bearing))
+function landmarks_to_tensor(tconf::TensorConfig, landmarks::AbsVec{<:AbsVec{<:Real}})
+    r = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3)
+    @smart_assert size(r) == (length(landmarks), 2, 1)
+    tconf(r)
+end
+
+"""
+`landmarks` should be of shape (n_landmarks, 2, 1).
+"""
+function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     # simplified version, does not model angle warping.
-    σ = convert(eltype(pos), σ_bearing)
-    map(landmarks) do l
-        rel = l .- pos
-        angle = atan.(rel[2, :], rel[1, :]) .- θ
-        angle += σ .* Random.randn!(zero(angle))
-        (; angle)
+    @smart_assert size(landmarks)[2] == 2
+    n_landmarks = size(landmarks, 1)
+
+    (; pos) = state.val
+    angle_2d = if :angle_2d in keys(state.val)
+        state.val.angle_2d
+    else
+        vcat(cos.(state.val.θ), sin.(state.val.θ))
+    end  # shape (2, batch_size)
+    (; tconf, batch_size) = state
+    check_type(tconf, landmarks)
+
+    rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
+    distance = sqrt.(sum(rel .^ 2; dims=2) .+ eps(tconf.ftype))  # shape (n_landmarks, 1, batch_size)
+    rel_dir = rel ./ distance  # shape (n_landmarks, 2, batch_size)
+    θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
+    bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
+    # make the measurement more uncertain when being too close
+    σ_bearing1 = (x -> ifelse(x <= 1, 1 / x, one(x))).(distance) .* tconf(σ_bearing)
+    @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
+
+    # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
+    landmarks_loc = reshape(landmarks, :, 1)
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            bearing = bearing_mean + σ_bearing1 .* Random.randn!(rng, zero(bearing_mean))
+            bearing_x = bearing[:, 1, :]
+            bearing_y = bearing[:, 2, :]
+            # range = range_mean + σ_range1 .* Random.randn!(rng, zero(range_mean))
+            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y, landmarks_loc))
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            (; bearing_x, bearing_y) = obs.val
+            logpdf_normal(bearing_mean[:, 1, :], σ_bearing1[:, 1, :], bearing_x) +
+            logpdf_normal(bearing_mean[:, 2, :], σ_bearing1[:, 1, :], bearing_y)
+            # logpdf_normal(range_mean, σ_range1, range)
+        end,
+    )
+end
+
+function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {names}
+    (; tconf, batch_size) = state
+    σs1 = map(tconf, σs)
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            ys = map(names) do k
+                x = state.val[k]
+                x + σs1[k] .* Random.randn!(rng, zero(x))
+            end
+            BatchTuple(tconf, batch_size, NamedTuple{names}(ys))
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            map(names) do k
+                logpdf_normal(state.val[k], σs1[k], obs.val[k])
+            end |> sum
+        end,
+    )
+end
+
+function state_to_input_SE2(state::BatchTuple, control::BatchTuple)
+    BatchTuple(state, control) do (; vel, θ, ω), u
+        loc_v = rotate2d(-θ, vel)
+        (; loc_v, ω, θ, u...)
     end
 end
 
-function landmark_obs_logp((; pos, θ), (; landmarks, σ_bearing), obs::Vector)
-    @smart_assert length(obs) == length(landmarks)
-    σ = convert(eltype(pos), σ_bearing)
-    map(landmarks, obs) do l, (; angle)
-        rel = l .- pos
-        @. logpdf_normal(atan(rel[2, :], rel[1, :]) - θ, σ, angle)
-    end |> sum
+function output_to_state_rate_SE2(state::BatchTuple, output::BatchTuple)
+    BatchTuple(state, output) do (; pos, vel, θ, ω), (; loc_acc, a_θ)
+        acc = rotate2d(θ, loc_acc)
+        (pos=vel, vel=acc, θ=ω, ω=a_θ)
+    end
+end
+
+function output_from_state_rate_SE2(state::BatchTuple, state_rate::BatchTuple)
+    @smart_assert state.batch_size == state_rate.batch_size
+    BatchTuple(state, state_rate) do (; θ), derivatives
+        acc, a_θ = derivatives.vel, derivatives.ω
+        loc_acc = rotate2d(-θ, acc)
+        (; loc_acc, a_θ)
+    end
 end
 
 """
 The L2 loss defined on the SE(2) manifold.
 """
 L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
+
+"""
+Angle `y` minus angle `x`.
+"""
+function angle_2d_diff(y::NamedTuple, x::NamedTuple)
+    if :θ in keys(y)
+        angle_diff(y.θ, x.θ)
+    else
+        c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
+        c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
+        @. asin(clamp(c1 * s2 - c2 * s1, -1, 1))
+    end
+end
+
+"""
+Compute `angle2 - angle1` as a scalar.
+
+## Examples
+```
+julia> angle_2d_diff([cos(2.5) sin(2.5)], [cos(1.5) sin(1.5)], dims=2)[1] ≈ 1.0
+true
+```
+"""
+function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
+    if dims == 1
+        c1, s1 = angle1[1:1, :], angle1[2:2, :]
+        c2, s2 = angle2[1:1, :], angle2[2:2, :]
+    else
+        @smart_assert dims == 2
+        c1, s1 = angle1[:, 1:1], angle1[:, 2:2]
+        c2, s2 = angle2[:, 1:1], angle2[:, 2:2]
+    end
+
+    @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
+end
+
+function angle_diff_scalar(θ1::Real, θ2::Real)
+    pi::Float32 = π
+    diff = (θ1 - θ2) % 2pi
+    if diff > pi
+        diff - 2pi
+    elseif diff < -pi
+        diff + 2pi
+    else
+        diff
+    end
+end
+
+Zygote.@adjoint Base.broadcasted(::typeof(mod), x::Zygote.Numeric, y::Zygote.Numeric) =
+    mod.(x, y), Δ -> (nothing, Δ, .-floor.(x ./ y) .* Δ)
+
+function angle_diff(θ1::AbstractArray, θ2::AbstractArray)
+    angle_diff_scalar.(θ1, θ2)
+end
+
+function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple; include_velocity=true)
+    if include_velocity
+        map((
+            (state1.val.pos .- state2.val.pos) .^ 2,
+            (state1.val.vel .- state2.val.vel) .^ 2,
+            angle_2d_diff(state1.val, state2.val) .^ 2,
+            (state1.val.ω .- state2.val.ω) .^ 2,
+        )) do diff
+            sum(diff; dims=1)
+        end |> sum
+    else
+        map((
+            (state1.val.pos .- state2.val.pos) .^ 2,
+            angle_2d_diff(state1.val, state2.val) .^ 2,
+        )) do diff
+            sum(diff; dims=1)
+        end |> sum
+    end
+end
 
 """
 ## Examples
@@ -90,6 +236,17 @@ NamedTuple{(:a, :v), Tuple{Main.SEDL.Var, Main.SEDL.Var}}
 """
 function variable_tuple(vars::Pair{Symbol,PType}...)::NamedTuple
     NamedTuple(v => Var(v, ty) for (v, ty) in vars)
+end
+
+function extract_θ_2d(state::T) where {T}
+    if :θ in fieldnames(T)
+        state.θ
+    elseif :angle_2d in fieldnames(T)
+        x, y = state.angle_2d
+        atan(y, x)
+    else
+        error("type $T does not contain θ or angle_2d.")
+    end
 end
 
 """
@@ -121,8 +278,10 @@ function plot_2d_scenario!(
     let
         markers = states[obs_frames]
         @unzip xs, ys = map(x -> x.pos, markers)
+        xs::AbsVec{<:Real}
         dirs = map(markers) do x
-            rotate2d(x.θ, @SVector [marker_len, 0.0])
+            θ = extract_θ_2d(x)[1]
+            rotate2d(θ, @SVector [marker_len, 0.0])
         end
         @unzip us, vs = dirs
         quiver!(
@@ -158,7 +317,7 @@ function plot_2d_scenario!(
     end
 end
 
-function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=4)
+function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=1)
     linealpha = 1.0 / sqrt(length(trajectories))
     xs, ys = Float64[], Float64[]
     for tr in trajectories
@@ -170,6 +329,21 @@ function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; lin
     end
     # plt = scatter!(xs, ys, label="particles ($name)", markersize=1.0, markerstrokewidth=0)
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha)
+end
+
+function plot_2d_trajectories!(
+    trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1
+)
+    n_trajs = trajectories[1].batch_size
+    linealpha = min(2.0 / sqrt(length(n_trajs)), 1.0)
+    pos_seq = (x -> Flux.cpu(x.val.pos)).(trajectories)
+    end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
+    push!(pos_seq, end_marker)
+    xs_mat = (b -> b[1, :]).(pos_seq) |> hcatreduce |> Flux.cpu
+    ys_mat = (b -> b[2, :]).(pos_seq) |> hcatreduce |> Flux.cpu
+    xs = eachrow(xs_mat) |> collect |> vcatreduce
+    ys = eachrow(ys_mat) |> collect |> vcatreduce
+    plot!(xs, ys; label="Position ($name)", linecolor, linealpha, aspect_ratio=1.0)
 end
 
 @kwdef struct ScenarioSetup{A<:AbsVec{Float64},B<:AbsVec{Int},X<:NamedTuple,Ctrl<:Function}
@@ -230,6 +404,105 @@ function simulate_scenario(
     end
     @unzip true_systems, ex_data_list, obs_data_list = data_list
     (; true_systems, ex_data_list, obs_data_list, setups, save_dir)
+end
+
+function sample_posterior_pf(
+    motion_model,
+    obs_model,
+    (; times, states, controls, observations),
+    sample_id=1;
+    n_particles=100_000,
+    n_trajs=100,
+    obs_frames=nothing,
+    record_io=false,
+)
+    isnothing(obs_frames) && (obs_frames = eachindex(times))
+    pf_result = SEDL.batched_particle_filter(
+        repeat(states[1][sample_id]::BatchTuple, n_particles),
+        (;
+            times,
+            obs_frames,
+            controls=getindex.(controls, sample_id),
+            observations=getindex.(observations, sample_id),
+        );
+        motion_model,
+        obs_model,
+        record_io,
+        showprogress=false,
+    )
+    SEDL.batched_trajectories(pf_result, n_trajs; record_io)
+end
+
+
+"""
+Plot the posterior trajectories sampled by a [`VIGuide`](@ref).
+"""
+function plot_guide_posterior(
+    guide::VIGuide,
+    (; times, Δt, states, controls, observations),
+    sample_id=1;
+    n_trajs=100,
+    obs_frames=obs_frames,
+    plot_args...,
+)
+    guide_trajs =
+        guide(
+            repeat(states[1][sample_id], n_trajs),
+            getindex.(observations, sample_id),
+            getindex.(controls, sample_id),
+            Δt,
+        ).trajectory
+
+    plot_batched_series(
+        times, guide_trajs; truth=getindex.(states, sample_id), plot_args...
+    )
+end
+
+"""
+Sample posterior trajectories using a particle fitler and evaluate their quality 
+against the ground truth.
+
+Returns (; log_obs, RMSE)
+"""
+function estimate_posterior_quality(
+    motion_model,
+    obs_model,
+    data;
+    state_L2_loss,
+    obs_frames=nothing,
+    n_particles=100_000,
+    showprogress=false,
+)
+    isnothing(obs_frames) && (obs_frames = eachindex(data.times))
+    n_ex = data.states[1].batch_size
+    prog = Progress(n_ex; desc="estimate_posterior_quality", enabled=showprogress)
+    metric_rows = map(1:n_ex) do sample_id
+        pf_result = SEDL.batched_particle_filter(
+            repeat(data.states[1][sample_id], n_particles),
+            (;
+                data.times,
+                obs_frames,
+                controls=getindex.(data.controls, sample_id),
+                observations=getindex.(data.observations, sample_id),
+            );
+            motion_model,
+            showprogress=false,
+            obs_model,
+        )
+        post_traj = SEDL.batched_trajectories(pf_result, 1000)
+        true_traj = getindex.(data.states, sample_id)
+        local RMSE::Real =
+            map(1:length(true_traj), true_traj, post_traj) do t, x1, x2
+                state_L2_loss(x1, x2; include_velocity=true) |> mean
+            end |> mean |> sqrt
+        local RMSE_pos::Real =
+            map(true_traj, post_traj) do x1, x2
+                state_L2_loss(x1, x2; include_velocity=false) |> mean
+            end |> mean |> sqrt
+        next!(prog)
+        (; pf_result.log_obs, RMSE, RMSE_pos)
+    end
+    named_tuple_reduce(metric_rows, mean)
 end
 
 function test_posterior_sampling(
@@ -534,7 +807,7 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
             else
                 params -> sum(p -> sum(abs2, p), params) * 1e-4
             end
-                
+
             NeuralRegression(; network, optimizer, regularizer, patience=10)
         end
     elseif alg_name === :genetic
@@ -551,4 +824,49 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
     else
         error("Unknown regressor name: $alg_name")
     end
+end
+
+"""
+Find the most likely states from observations only (i.e., by ignoring the dynamics).
+"""
+function optimize_states_from_observations(
+    sce::Scenario,
+    obs_model,
+    observations::BatchTuple,
+    state_guess::BatchTuple;
+    optimizer,
+    n_steps,
+    lr_schedule,
+    callback,
+)
+    @smart_assert(
+        observations.batch_size == state_guess.batch_size,
+        "There must be an observation for each state"
+    )
+
+    vars = pose_to_opt_vars(sce)(deepcopy(state_guess))
+    all_ps = Flux.params(vars.val)
+    @smart_assert length(all_ps) > 0 "No state parameters to optimize."
+    @info "total number of array parameters: $(length(all_ps))"
+
+    to_state = pose_from_opt_vars(sce)
+
+    loss() = -mean(logpdf(obs_model(to_state(vars)), observations)::AbsMat)
+
+    steps_trained = 0
+    for step in 1:n_steps
+        step == 1 && loss() # just for testing
+        (; val, grad) = Flux.withgradient(loss, all_ps)
+        isfinite(val) || error("Loss is not finite: $val")
+        if lr_schedule !== nothing
+            optimizer.eta = lr_schedule(step)
+        end
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        callback_args = (; step, loss=val, lr=optimizer.eta)
+        to_stop = callback(callback_args).should_stop
+        steps_trained += 1
+        to_stop && break
+    end
+    @info "Optimization finished ($steps_trained / $n_steps steps trained)."
+    to_state(vars)
 end

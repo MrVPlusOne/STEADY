@@ -1,56 +1,66 @@
-export specific_elems, count_len, @unzip, @unzip_named
-export max_by, sort_by
-export rotate2d, rotation2D, °
+export specific_elems, count_len
+export max_by, sort_by, mean, std
+export rotate2d, rotation2D, °, linear
 export Optional, map_optional
 
 using MacroTools: @capture
 using ForwardDiff: Dual
 # import ReverseDiff
 using LineSearches: LineSearches
+using Logging: Logging
 
-const Optional{X} = Union{X,Nothing}
-const AbsVec = AbstractVector
-const AbsMat = AbstractMatrix
-
-abstract type Either end
-
-struct Left{X} <: Either
-    value::X
-end
-
-struct Right{Y} <: Either
-    value::Y
-end
-
-specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
-
-count_len(iters) = count(_ -> true, iters)
-
-get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
-get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
+##-----------------------------------------------------------
+# macros
+export @unzip, @unzip_named, @smart_assert, @use_short_show
 
 """
-Like @assert, but try to print out additional information about the arguments.
+Like @assert, but try to also print out additional information about the arguments.
+Note that each argument is only evaluated once, so there is no extra overhead compared 
+to a normal assert.
 ## Examples
 ```julia
-julia> let a=4, b=2; @smart_assert(a < b, "Some helpful info.") end
+julia> let a=4, b=2; @smart_assert(a < b, "Some extra info.") end
 
-ERROR: LoadError: AssertionError: Some helpful info. | Caused by: Condition `a < b` failed due to `a` => 4, `b` => 2 .
+ERROR: LoadError: AssertionError: Some extra info. | Caused by: Condition `a < b` failed due to:
+        `a` evaluates to 4
+        `b` evaluates to 2
 Stacktrace:
 ...
 ```
 """
 macro smart_assert(ex, msg=nothing)
     has_msg = msg !== nothing
-    if @capture(ex, op_(lhs_, rhs_))
+    is_type_assert = @capture(ex, t1_ <: t2_)
+    if is_type_assert
+        args = (t1, t2)
+        to_cond_ex = arg_names -> Expr(:(<:), arg_names...)
+    else
+        is_func_call =
+            @capture(ex, op_(args__)) && !any(a -> a isa Expr && a.head == :kw, args)
+        if is_func_call
+            to_cond_ex = arg_names -> Expr(:call, esc(op), arg_names...)
+        end
+    end
+    if is_type_assert || is_func_call
         ex_q = QuoteNode(ex)
-        lhs_q = QuoteNode(lhs)
-        rhs_q = QuoteNode(rhs)
+        args_q = Expr(:tuple, QuoteNode.(args)...)
+        arg_names = [gensym("arg$i") for i in 1:length(args)]
+        cond_ex = to_cond_ex(arg_names)
+        assigns = Expr(
+            :block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...
+        )
+        args_tuple = Expr(:tuple, arg_names...)
         quote
-            lv = $(esc(lhs))
-            rv = $(esc(rhs))
-            if !$(esc(op))(lv, rv)
-                reason_text = "Condition `$($ex_q)` failed due to `$($lhs_q)` => $lv, `$($rhs_q)` => $rv ."
+            $assigns
+            if !$(cond_ex)
+                eval_string = join(
+                    [
+                        "\t`$ex` evaluates to $val" for
+                        (ex, val) in zip($args_q, $args_tuple)
+                    ],
+                    "\n",
+                )
+                reason_text = "Condition `$($ex_q)` failed due to:\n" * eval_string
                 if $has_msg
                     msg_v = $(esc(msg))
                     throw(AssertionError("$msg_v | Caused by: $reason_text"))
@@ -68,26 +78,22 @@ macro smart_assert(ex, msg=nothing)
     end
 end
 
-function normalize_transform(xs::AbstractVector)
-    σ = std(xs)
-    μ = mean(xs)
-    σ = map(σ) do s
-        s ≈ zero(s) ? one(s) : s
-    end
-    transformed = map(xs) do v
-        (v .- μ) ./ σ
-    end
-    (; transformed, μ, σ)
+function test_smart_assert()
+    @smart_assert typeof(1) <: Int
 end
 
 """
-Concat columns horizontally.
+Specify that the given type `t` should be displayed as `"t{...}"`.
+This can be used to avoid cluttering display when `t` has too many type parameters.
 """
-hcatreduce(xs::AbsVec) = reduce(hcat, xs)
-"""
-Concat rows vertically.
-"""
-vcatreduce(xs::AbsVec) = reduce(vcat, xs)
+macro use_short_show(type)
+    type_string = "$type{...}"
+    quote
+        function Base.show(io::IO, ::Type{<:$(esc(type))})
+            print(io, $type_string)
+        end
+    end
+end
 
 """
     @unzip xs, [ys,...] = collection
@@ -159,13 +165,160 @@ macro unzip_named(assign)
     Expr(:block, :(rhs_value = $(esc(rhs))), assigns..., :rhs_value)
 end
 
+##-----------------------------------------------------------
+# types
+export Optional, AbsVec, AbsMat, NamedNTuple, NormalTransform
+
+const Optional{X} = Union{X,Nothing}
+const AbsVec = AbstractVector
+const AbsMat = AbstractMatrix
+const TimeSeries{T} = Vector{T}
+const NamedNTuple{names,T} = NamedTuple{names,<:Tuple{Vararg{T}}}
+
+abstract type Either end
+
+struct Left{X} <: Either
+    value::X
+end
+
+struct Right{Y} <: Either
+    value::Y
+end
+
+@kwdef struct NormalTransform{T}
+    shift::T
+    scale::T
+end
+
+function NormalTransform(data::AbsVec)
+    (; μ, σ) = normalize_transform(data)
+    NormalTransform(μ, σ)
+end
+
+(trans::NormalTransform{<:AbsVec})(x::AbsVec) = x .* trans.scale .+ trans.shift
+Base.inv(trans::NormalTransform{<:AbsVec}) =
+    (x::AbsVec) -> (x .- trans.shift) ./ trans.scale
+
+(trans::NormalTransform{<:NamedTuple})(xs::NamedTuple) =
+    map(trans.shift, trans.scale, xs) do shift, scale, x
+        x .* scale .+ shift
+    end
+Base.inv(trans::NormalTransform{<:NamedTuple}) =
+    (xs::NamedTuple) -> map(trans.shift, trans.scale, xs) do shift, scale, x
+        (x .- shift) ./ scale
+    end
+##-----------------------------------------------------------
+# utility functions
+export hcatreduce, vcatreduce, specific_elems
+
+specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
+
+count_len(iters) = count(_ -> true, iters)
+
+get_columns(m::Matrix) = (m[:, i] for i in 1:size(m, 2))
+get_rows(m::Matrix) = (m[i, :] for i in 1:size(m, 1))
+
+function normalize_transform(xs)
+    σ = std(xs)
+    μ = mean(xs)
+    σ = map(σ) do s
+        s ≈ zero(s) ? one(s) : s
+    end
+    transformed = map(xs) do v
+        (v .- μ) ./ σ
+    end
+    (; transformed, μ, σ)
+end
+
+function Logging.default_metafmt(level::Logging.LogLevel, _module, group, id, file, line)
+    @nospecialize
+    color = Logging.default_logcolor(level)
+    prefix = string(level == Logging.Warn ? "Warning" : string(level), ':')
+    suffix::String = ""
+    # make it always show file location
+    # Info <= level < Warn && return color, prefix, suffix
+    _module !== nothing && (suffix *= "$(_module)")
+    if file !== nothing
+        _module !== nothing && (suffix *= " ")
+        suffix *= Base.contractuser(file)::String
+        if line !== nothing
+            suffix *= ":$(isa(line, UnitRange) ? "$(first(line))-$(last(line))" : line)"
+        end
+    end
+    !isempty(suffix) && (suffix = "@ " * suffix)
+    return color, prefix, suffix
+end
+@info "Changed the default @info format to always include src location."
+
+"""
+Concat columns horizontally.
+"""
+hcatreduce(xs::AbsVec) = reduce(hcat, xs)
+
+
+"""
+Concat a vector of named tuples, recursively calling `hcatreduce` on each tupe element.
+```jldoctest
+julia> hcatreduce(fill((a = [1], b = [2, 3]), 3)) == (a = [1 1 1], b = [2 2 2 ; 3 3 3])
+true
+```
+"""
+function hcatreduce(xs::AbsVec{<:NamedTuple{keys}}) where {keys}
+    vs = map(keys) do k
+        hcatreduce(map(x -> getproperty(x, k), xs))
+    end
+    NamedTuple{keys}(vs)
+end
+
+"""
+Concat rows vertically.
+"""
+vcatreduce(xs::AbsVec) = reduce(vcat, xs)
+
 
 @inline rotation2D(θ) = @SArray([
     cos(θ) -sin(θ)
     sin(θ) cos(θ)
 ])
 
-rotate2d(θ, v::AbstractArray) = rotation2D(θ) * v
+rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
+
+function rotate2d(θ::AbsMat, v::AbsMat)
+    @smart_assert size(θ, 2) == 1 || size(θ, 2) == size(v, 2)
+    x = @views v[1:1, :]
+    y = @views v[2:2, :]
+    if size(θ, 1) == 1
+        # treat it as a scalar angle
+        s, c = sin.(θ), cos.(θ)
+    else
+        c, s = @views θ[1:1, :], @views θ[2:2, :]
+    end
+    r = vcat((c .* x .- s .* y), (s .* x .+ c .* y))
+    @smart_assert size(r) == size(v)
+    r
+end
+
+"""
+Treat both the 1st and 3rd dimensions as batch dimensions.
+
+If the 2nd dimension of θ is 1, treat it as a scalar angle; otherwise, treat it as 
+a rotation vector of form [cos(α), sin(α)].
+"""
+function rotate2d(θ::AbstractArray{T,3}, v::AbstractArray{T,3}) where {T}
+    @smart_assert size(θ, 3) == 1 || size(θ, 3) == size(v, 3)
+    x = @views v[:, 1:1, :]
+    y = @views v[:, 2:2, :]
+    if size(θ, 2) == 1
+        # treat it as a scalar angle
+        s, c = sin.(θ), cos.(θ)
+    else
+        c, s = @views θ[:, 1:1, :], @views θ[:, 2:2, :]
+    end
+    r = cat((c .* x .- s .* y), (s .* x .+ c .* y), dims=2)
+    @smart_assert size(r) == size(v)
+    r
+end
+
 
 const ° = π / 180
 
@@ -235,6 +388,24 @@ end
 
 subtuple(xs::NamedTuple, keys::Tuple) = begin
     NamedTuple{keys}(map(k -> getfield(xs, k), keys))
+end
+
+"""
+Given an array of NamedTuples, apply `reduce_f` to the arrays corresponding to 
+each componenet.
+
+## Examples
+```jldoctest
+julia> named_tuple_reduce([(a=1, b=2), (a=3, b=6)], sum)
+(a = 4, b = 8)
+```
+"""
+function named_tuple_reduce(xs::AbstractArray{<:NamedTuple{keys}}, reduce_f) where {keys}
+    @smart_assert length(xs) > 0
+    vals = map(keys) do k
+        reduce_f(map(x -> getfield(x, k), xs))
+    end
+    NamedTuple{keys}(vals)
 end
 
 """
@@ -378,10 +549,6 @@ function nan_to_zero(v::R)::R where {R<:Real}
     isnan(v) ? zero(v) : v
 end
 
-using Statistics: norm
-Base.show(io::IO, d::ForwardDiff.Dual) =
-    print(io, "Dual($(d.value), |dx|=$(norm(d.partials)))")
-
 function assert_finite(x::NamedTuple)
     if !all(isfinite, x)
         @error "some components are not finite" x
@@ -498,6 +665,8 @@ function parallel_map(
 end
 
 sigmoid(x::Real) = one(x) / (one(x) + exp(-x))
+
+linear(from, to) = x -> from + (to - from) * x
 
 """
 Combine a named tuple of functions into a function that returns a named tuple.

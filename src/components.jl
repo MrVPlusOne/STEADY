@@ -171,8 +171,10 @@ end
 
 mk_R2(x, y) = @SVector [x, y]
 # this makes sure that gradient exists when norm = 0.
-norm_R2(x) = sqrt(x[1]^2 + x[2]^2 + eps(x[1]))
+norm_R2(x::AbsVec) = sqrt(x[1]^2 + x[2]^2 + eps(x[1]))
+norm_R2(x::AbsMat) = sqrt.(x[1:1, :].^2 + x[2:2, :].^2 .+ eps(eltype(x)))
 cross_R2(x, y) = x[1] * y[2] - x[2] * y[1]
 dir_R2(θ) = @SVector [cos(θ), sin(θ)]
 unit_R2(v) = v ./ norm_R2(v)
 project_R2(v, dir) = v'dir * dir
+project_R2(v::AbsMat, dir::AbsMat) = sum(v .* dir, dims=1) .* dir

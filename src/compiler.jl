@@ -15,7 +15,7 @@ end
     convert(R, cf.f(args))::R
 end
 
-Base.show(io::IO, ::Type{<:CompiledFunc}) = print(io, "CompiledFunc{...}")
+@use_short_show CompiledFunc
 
 Base.show(io::IO, @nospecialize cf::CompiledFunc) = print(io, cf)
 function Base.print(io::IO, @nospecialize cf::CompiledFunc)

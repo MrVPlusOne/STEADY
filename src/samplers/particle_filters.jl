@@ -1,26 +1,18 @@
+using CUDA: @allowscalar
+
 effective_particles(weights::AbstractVector) = 1 / sum(abs2, weights)
 
-function systematic_resample!(indices, weights, bins_buffer)
+function systematic_resample!(indices, weights::AbsVec, bins_buffer::AbsVec)
     N = length(weights)
     M = length(indices)
     @smart_assert length(bins_buffer) == N
-    bins_buffer[1] = weights[1]
-    for i in 2:N
-        bins_buffer[i] = bins_buffer[i - 1] + weights[i]
+    cumsum!(bins_buffer, weights)
+    delta = @allowscalar bins_buffer[end] / M
+    r = delta * rand()
+    broadcast!(indices, 0:(M - 1)) do i
+        s = delta * i + r
+        min(searchsortedfirst(bins_buffer, s), N)
     end
-    r = rand() * bins_buffer[end] / M
-    s = r:(1 / M):(bins_buffer[end] + r) # Added r in the end to ensure correct length (r < 1/N)
-    bo = 1
-    for i in 1:M
-        @inbounds for b in bo:N
-            if s[i] < bins_buffer[b]
-                indices[i] = b
-                bo = b
-                break
-            end
-        end
-    end
-    Random.shuffle!(indices)
     return indices
 end
 
@@ -29,8 +21,9 @@ function systematic_resample(weights::AbstractArray{N}, n_samples::Integer) wher
         @error "Weights must be finite." weights
         throw(ArgumentError("Weights must be finite."))
     end
-    indices = collect(1:n_samples)
-    bins_buffer = fill(zero(N), length(weights))
+    indices = similar(weights, Int, n_samples)
+    indices .= 1:n_samples
+    bins_buffer = similar(weights)
     systematic_resample!(indices, weights, bins_buffer)
 end
 
@@ -72,7 +65,7 @@ function forward_filter(
         aux_indices = collect(1:N)
     end
 
-    progress = Progress(T - 1; desc="forward_filter", output=stdout, enabled=showprogress)
+    progress = Progress(T; desc="forward_filter", output=stdout, enabled=showprogress)
     for t in 1:T
         if t in obs_frames
             for i in 1:N

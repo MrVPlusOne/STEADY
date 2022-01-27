@@ -24,11 +24,13 @@ using Transducers
 using Bijectors
 using SplitApplyCombine: group as to_groups
 using TimerOutputs
+using Alert, AlertPushover # for notifications
 using RuntimeGeneratedFunctions
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
 include("utils.jl")
 include("distributions_utils.jl")
+include("neural_utils.jl")
 include("samplers/samplers.jl")
 include("control_utils.jl")
 include("DSL.jl")
@@ -41,7 +43,7 @@ include("tests.jl")
 
 if false
     # include("../scripts/simulation_experiments.jl")
-    include("../scripts/test_vi.jl")
+    # include("../scripts/test_vi.jl")
     # include("../scripts/hovercraft_example.jl")
     # include("../scripts/car2d_example.jl")
     # include("../scripts/iterate_example.jl")
