@@ -125,7 +125,7 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, 1 / x, one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 100f0), one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
@@ -142,7 +142,9 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
         end,
         log_pdf=(obs::BatchTuple) -> let
             (; bearing_x, bearing_y) = obs.val
-            bearing = cat(bearing_x, bearing_y, dims=2)
+            bx = reshape(bearing_x, n_landmarks, 1, :)
+            by = reshape(bearing_y, n_landmarks, 1, :)
+            bearing = cat(bx, by, dims=2)
             diff = angle_2d_diff(bearing_mean, bearing)  # shape (n_landmarks, 1, batch_size)
             logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
         end,
@@ -498,7 +500,6 @@ function plot_guide_posterior(
     (; times, Δt, states, controls, observations),
     sample_id=1;
     n_trajs=100,
-    obs_frames=obs_frames,
     plot_args...,
 )
     guide_trajs =
