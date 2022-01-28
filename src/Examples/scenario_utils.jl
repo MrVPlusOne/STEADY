@@ -125,7 +125,7 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 100f0), one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)

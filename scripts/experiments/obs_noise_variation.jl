@@ -4,7 +4,7 @@ perf_list = []
 
 let ° = π / 180
 
-    for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
+    for σ_bearing in [5°, 1°, 2.5°, 10°, 20°]
         # you can find the available args inside `train_models.jl`.
         global script_args = (; gpu_id=1, σ_bearing, exp_name="σ_bearing=$(σ_bearing/°)°")
         my_include("../train_models.jl")
