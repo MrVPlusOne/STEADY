@@ -46,7 +46,9 @@ end
     should_train_dynamics,
     gpu_id,
     use_simple_obs_model,
+    σ_bearing,
     train_method,
+    lr,
     exp_name,
     n_particles,
     h_dim,
@@ -58,9 +60,11 @@ end
         should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
         gpu_id=nothing, # integer or nothing
         use_simple_obs_model=false,
+        σ_bearing=5°,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
+        lr=1e-4,
         exp_name=nothing,
-        n_particles=100_000,  # how many particles to use for the EM training.
+        n_particles=20_000,  # how many particles to use for the EM training.
         h_dim=64,
     )
     merge(config, script_args::NamedTuple)
@@ -105,7 +109,7 @@ obs_model = if use_simple_obs_model
     end
 else
     let landmark_tensor = SEDL.landmarks_to_tensor(tconf, landmarks)
-        state -> SEDL.landmark_obs_model(state, (; landmarks=landmark_tensor, σ_bearing=5°))
+        state -> SEDL.landmark_obs_model(state, (; landmarks=landmark_tensor, σ_bearing))
     end
 end
 
@@ -297,7 +301,7 @@ if load_trained && train_method != :Handwritten
 end
 
 # adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
-adam = Flux.ADAM(1e-4)
+adam = Flux.ADAM(lr)
 ##-----------------------------------------------------------
 # train the model using expectation maximization
 
