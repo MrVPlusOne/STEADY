@@ -59,7 +59,7 @@ end
 """
 `landmarks` should be of shape (n_landmarks, 2, 1).
 """
-function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
+function landmark_obs_model_old(state::BatchTuple, (; landmarks, σ_bearing))
     # simplified version, does not model angle warping.
     @smart_assert size(landmarks)[2] == 2
     n_landmarks = size(landmarks, 1)
@@ -98,6 +98,53 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
             logpdf_normal(bearing_mean[:, 1, :], σ_bearing1[:, 1, :], bearing_x) +
             logpdf_normal(bearing_mean[:, 2, :], σ_bearing1[:, 1, :], bearing_y)
             # logpdf_normal(range_mean, σ_range1, range)
+        end,
+    )
+end
+
+"""
+`landmarks` should be of shape (n_landmarks, 2, 1).
+"""
+function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
+    # simplified version, does not model angle warping.
+    @smart_assert size(landmarks)[2] == 2
+    n_landmarks = size(landmarks, 1)
+
+    (; pos) = state.val
+    angle_2d = if :angle_2d in keys(state.val)
+        state.val.angle_2d
+    else
+        vcat(cos.(state.val.θ), sin.(state.val.θ))
+    end  # shape (2, batch_size)
+    (; tconf, batch_size) = state
+    check_type(tconf, landmarks)
+
+    rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
+    distance = sqrt.(sum(rel .^ 2; dims=2) .+ eps(tconf.ftype))  # shape (n_landmarks, 1, batch_size)
+    rel_dir = rel ./ distance  # shape (n_landmarks, 2, batch_size)
+    θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
+    bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
+    # make the measurement more uncertain when being too close
+    σ_bearing1 = (x -> ifelse(x <= 1, 1 / x, one(x))).(distance) .* tconf(σ_bearing)
+    @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
+
+    # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
+    landmarks_loc = reshape(landmarks, :, 1)
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            δ_bearing = σ_bearing1 .* Random.randn!(zero(distance)) # shape (n_landmarks, 1, batch_size)
+            δ_angle2d = cat(cos.(δ_bearing), sin.(δ_bearing), dims=2)  # shape (n_landmarks, 2, batch_size)
+            bearing = rotate2d(δ_angle2d, bearing_mean)
+            bearing_x = bearing[:, 1, :]
+            bearing_y = bearing[:, 2, :]
+            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y, landmarks_loc))
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            (; bearing_x, bearing_y) = obs.val
+            bearing = cat(bearing_x, bearing_y, dims=2)
+            diff = angle_2d_diff(bearing_mean, bearing)  # shape (n_landmarks, 1, batch_size)
+            logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
         end,
     )
 end
@@ -181,6 +228,15 @@ function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
         c1, s1 = angle1[:, 1:1], angle1[:, 2:2]
         c2, s2 = angle2[:, 1:1], angle2[:, 2:2]
     end
+
+    @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
+end
+
+function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<:Real, 3})
+    @smart_assert size(angle2, 2) == size(angle1, 2) == 2
+    
+    c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
+    c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
 
     @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
 end

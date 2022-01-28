@@ -367,12 +367,12 @@ function mk_guide(;
             propose_linear=Dense(core_in_dim, core_out_dim; init=zero_init),
             propose_left=mlp(core_in_dim, h_dim, tanh),
             propose_right=mlp(rnn_dim + x_dim, h_dim, tanh),
-            mean=Dense(h_dim, core_out_dim; init=zero_init),
-            scale=Dense(
+            mean_net=Dense(h_dim, core_out_dim; init=zero_init),
+            scale_net=Dense(
                 h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
             ),
         ),
-    ) do (; propose_linear, propose_left, propose_right, mean, scale)
+    ) do (; propose_linear, propose_left, propose_right, mean_net, scale_net)
         (core_input::BatchTuple, state::BatchTuple, future::BatchTuple) -> begin
             local batch_size = common_batch_size(core_input, state, future)
 
@@ -381,13 +381,13 @@ function mk_guide(;
                 inv(state_trans)(state.val)..., future.val...; batch_size
             )
             local prop = propose_left(left_input) + propose_right(right_input)
-            local mean_prop = propose_linear(left_input) + mean(prop)
+            local mean_prop = propose_linear(left_input) + mean_net(prop)
 
             local μs = core_out_trans(split_components(mean_prop, sketch.output_vars))
             local σs = map(
                 .*,
                 core_out_trans.scale,
-                split_components(scale(prop), sketch.output_vars),
+                split_components(scale_net(prop), sketch.output_vars),
             )
             map((; μs, σs)) do nt
                 BatchTuple(core_input.tconf, batch_size, nt)
