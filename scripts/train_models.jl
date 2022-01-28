@@ -240,7 +240,7 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-save_dir = SEDL.data_dir(savename("train_models", script_args; connector="-"))
+save_dir = SEDL.data_dir("sims", savename("train_models", script_args; connector="-"))
 if !load_trained && isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
