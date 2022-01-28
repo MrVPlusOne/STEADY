@@ -11,7 +11,7 @@ for train_method in [:Super_noiseless] #[:Super_noiseless, :Handwritten, :Super_
         use_simple_obs_model=false,
         train_method,
     )
-    my_include("train_models.jl")
+    my_include("../train_models.jl")
     push!(perf_list, Main.perf)
 end
 

@@ -31,27 +31,37 @@ include("data_from_source.jl")
 if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
-        gpu_id=1, use_sim_data=false, use_simple_obs_model=true, train_method=:Super_noisy
+        is_quick_test=true,
+        gpu_id=1,
+        use_simple_obs_model=true,
+        train_method=:EM,
+        n_particles=1000,
     )
 end
 
 (;
+    scenario,
     is_quick_test,
     load_trained,
     should_train_dynamics,
     gpu_id,
     use_simple_obs_model,
-    use_sim_data,
     train_method,
+    exp_name,
+    n_particles,
+    h_dim,
 ) = let
     config = (;
+        scenario=SEDL.RealCarScenario(),
         is_quick_test=false,
         load_trained=false,
         should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
         gpu_id=nothing, # integer or nothing
         use_simple_obs_model=false,
-        use_sim_data=true,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
+        exp_name=nothing,
+        n_particles=100_000,  # how many particles to use for the EM training.
+        h_dim=64,
     )
     merge(config, script_args::NamedTuple)
 end
@@ -69,6 +79,7 @@ end
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 device = use_gpu ? Flux.gpu : Flux.cpu
 
+use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
     SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
 else
@@ -78,15 +89,9 @@ else
     )
 end
 
-sce = if use_sim_data
-    SEDL.HovercraftScenario()
-    # sce = SEDL.Car2dScenario(linfo, SEDL.BicycleCarDyn(; front_drive=false))
-else
-    SEDL.RealCarScenario()
-end
-state_L2_loss = SEDL.state_L2_loss_batched(sce)
+state_L2_loss = SEDL.state_L2_loss_batched(scenario)
 
-sketch = SEDL.batched_sketch(sce)
+sketch = SEDL.batched_sketch(scenario)
 
 landmarks = if use_sim_data
     [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
@@ -105,13 +110,13 @@ else
 end
 
 data_train, data_test = if data_source isa SimulationData
-    true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(sce))
+    true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
     motion_model = SEDL.BatchedMotionModel(
-        tconf, sketch, SEDL.batched_core(sce, true_params)
+        tconf, sketch, SEDL.batched_core(scenario, true_params)
     )
-    data_from_source(sce, data_source, tconf; motion_model, obs_model)
+    data_from_source(scenario, data_source, tconf; motion_model, obs_model)
 else
-    data_from_source(sce, data_source, tconf; obs_model)
+    data_from_source(scenario, data_source, tconf; obs_model)
 end
 
 n_train_ex = data_train.states[1].batch_size
@@ -233,24 +238,13 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 ##-----------------------------------------------------------
 # load or set up the NN models
 
-h_dim = 64
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-settings = (;
-    is_quick_test,
-    scenario=summary(sce),
-    use_sim_data,
-    train_method,
-    h_dim,
-    should_train_dynamics,
-    use_simple_obs_model,
-    n_train_ex,
-)
-save_dir = SEDL.data_dir(savename("train_models", settings; connector="-"))
+save_dir = SEDL.data_dir(savename("train_models", script_args; connector="-"))
 if !load_trained && isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
-    @tagsave(joinpath(save_dir, "settings.bson"), @dict(settings))
+    @tagsave(joinpath(save_dir, "settings.bson"), @dict(script_args))
 end
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
@@ -354,7 +348,7 @@ end
 
 if !load_trained && (train_method == :EM)
     with_alert("EM training") do
-        total_steps = 10_000
+        total_steps = 40_000
         n_steps = is_quick_test ? 3 : total_steps + 1
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
@@ -366,6 +360,7 @@ if !load_trained && (train_method == :EM)
             (; data_train.times, obs_frames);
             optimizer=adam,
             n_steps,
+            n_particles,
             trajs_per_step=1,
             # sampling_model=motion_model,
             callback=em_callback(learned_motion_model; n_steps, test_every=500),
@@ -456,7 +451,7 @@ end
 
 simplifed_model = let
     core = SEDL.get_simplified_motion_core(
-        sce,
+        scenario,
         (;
             twist_linear_scale=1.0f0,
             twist_angular_scale=0.5f0,
@@ -477,7 +472,7 @@ end
         data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
         states_train = if train_method == :Super_TV
             est_result = SEDL.Dataset.estimate_states_from_observations(
-                sce,
+                scenario,
                 obs_model,
                 data_train.observations,
                 data_train.states,
@@ -704,7 +699,8 @@ function evaluate_model(motion_model, data_test, name)
 end
 
 @info "Testing dynamics model performance on the test set"
-perf = evaluate_model(learned_motion_model, data_test, string(train_method))
+exp_name = isnothing(exp_name) ? string(train_method) : exp_name
+perf = evaluate_model(learned_motion_model, data_test, exp_name)
 DataFrame([perf]) |> display
 wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf)
 ##-----------------------------------------------------------
