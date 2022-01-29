@@ -78,10 +78,10 @@ if use_gpu
     CUDA.device!(gpu_id)
     @info "Using GPU #$(gpu_id)"
 else
-    @warn "No GPU specified, using CPU."
+    @warn "gpu_id = $gpu_id, using CPU."
 end
+device = use_gpu ? Flux.gpu : (Flux.f32 ∘ Flux.cpu)
 tconf = SEDL.TensorConfig(use_gpu, Float32)
-device = use_gpu ? Flux.gpu : Flux.cpu
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
@@ -141,6 +141,9 @@ SEDL.plot_batched_series(
 ) |> display
 SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.controls, 1); title="Controls"
+) |> display
+SEDL.plot_batched_series(
+    data_train.times, getindex.(data_train.observations, 1); title="Observations"
 ) |> display
 ##-----------------------------------------------------------
 # utilities
@@ -281,18 +284,8 @@ if train_method == :VI
             sketch, dynamics_core=learned_motion_model.core, h_dim, y_dim, normal_transforms
         ) |> device
 
-    let (prior_trajs, _) = guide(
-            data_train.states[1],
-            data_train.observations,
-            data_train.controls,
-            data_train.Δt,
-        )
-        SEDL.plot_batched_series(
-            data_train.times,
-            SEDL.TensorConfig(false).(prior_trajs);
-            title="Guide posterior (initial)",
-        ) |> display
-    end
+    SEDL.plot_guide_posterior(guide, data_train, 1; title="Guide posterior (initial)") |>
+    display
 end
 
 if load_trained && train_method != :Handwritten
@@ -300,7 +293,6 @@ if load_trained && train_method != :Handwritten
     load_model_weights!()
 end
 
-# adam = Flux.Optimiser(Flux.ClipNorm(1.0), Flux.WeightDecay(1e-4), Flux.ADAM(1e-4))
 adam = Flux.ADAM(lr)
 ##-----------------------------------------------------------
 # train the model using expectation maximization
@@ -569,15 +561,16 @@ function vi_callback(
     test_every=200,
 )
     prog = Progress(n_steps; showspeed=true)
+    test_x0_batch = repeat(data_test.states[1], trajs_per_ex)
+    repeated_obs_seq = repeat.(data_test.observations, trajs_per_ex)
+    repeated_control_seq = repeat.(data_test.controls, trajs_per_ex)
+
     function (r)
         Base.with_logger(logger) do
             @info "training" r.elbo r.loss r.lr r.annealing
             @info "statistics" r.time_stats... log_step_increment = 0
         end
 
-        test_x0_batch = repeat(data_test.states[1], trajs_per_ex)
-        repeated_obs_seq = repeat.(data_test.observations, trajs_per_ex)
-        repeated_control_seq = repeat.(data_test.controls, trajs_per_ex)
         # Compute test elbo and plot a few trajectories.
         if r.step % test_every == 1
             test_trajs, test_lp_guide, test_core_in, test_core_out = guide(
@@ -645,7 +638,7 @@ end
 
 if !load_trained && train_method == :VI
     with_alert("VI training") do
-        total_steps = 10_000
+        total_steps = 40_000
         n_steps = is_quick_test ? 3 : total_steps + 1
 
         n_repeat = 10

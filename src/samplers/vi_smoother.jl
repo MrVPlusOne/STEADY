@@ -45,18 +45,21 @@ function (motion_model::BatchedMotionModel{TC})(
     x::BatchTuple{TC}, u::BatchTuple{TC}, Δt::Real; test_consistency=false
 ) where {TC}
     check_type(TC(), Δt)
+    assert_finite(x)
+    assert_finite(u)
     bs = common_batch_size(x.batch_size, u.batch_size)
     sketch, core = motion_model.sketch, motion_model.core
 
-    core_input = sketch.state_to_input(x, u)::BatchTuple{TC}
-    check_components(core_input, sketch.input_vars)
+    core_input = assert_finite(sketch.state_to_input(x, u))::BatchTuple{TC}
+    check_comp_size(core_input, sketch.input_vars)
 
     (; μs::BatchTuple{TC}, σs::BatchTuple{TC}) = core(core_input, Δt)
 
     @unzip out, lps = map(sample_normal, μs.val, σs.val)
-    out_batch = BatchTuple(x.tconf, bs, out)
-    check_components(out_batch, sketch.output_vars)
+    out_batch = BatchTuple(x.tconf, bs, out) |> assert_finite
+    check_comp_size(out_batch, sketch.output_vars)
     next_state = sketch.output_to_state(x, out_batch, Δt)::BatchTuple{TC}
+    assert_finite(next_state)
     if test_consistency
         out_batch2 = sketch.output_from_state(x, next_state, Δt)::BatchTuple{TC}
         foreach(out_batch.val, out_batch2.val) do v1, v2
@@ -254,7 +257,9 @@ function (guide::VIGuide)(
         [
             begin
                 obs_mat = obs_encoder(obs_seq[t], control_seq[t])::AbsMat
-                h, o = rnn(h, obs_mat)
+                assert_finite.(h)
+                h, o = rnn(h, assert_finite(obs_mat))
+                assert_finite(o)
                 BatchTuple(tconf, batch_size, (; future_info=o))
             end for t in length(obs_seq):-1:1
         ] |> reverse
@@ -262,13 +267,13 @@ function (guide::VIGuide)(
     # future1 = inflate_batch(future_info[1])
     logp = 0
     x0 = inflate_batch(x0)
-    x::BatchTuple{TC} = x0
+    x::BatchTuple{TC} = x0 |> assert_finite
     @unzip trans, core_in_seq, core_out_seq = map(2:length(future_info)) do t
         core = (inputs, Δt) -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
         mm_t = BatchedMotionModel(tconf, guide.sketch, core)
         (x1, lp, core_in, core_out) = mm_t(x, control_seq[t - 1], Δt; test_consistency)
-        x = x1
-        logp = logp .+ lp
+        x = x1 |> assert_finite
+        logp = logp .+ assert_finite(lp)
         (x, core_in, core_out)
     end
     trajectory = vcat([x0], trans)
@@ -331,7 +336,7 @@ function mk_guide(;
     normal_transforms,
     min_σ=1.0f-3,
 )
-    (; state_trans, control_trans, obs_trans, core_in_trans, core_out_trans) =
+    (; state_trans, control_trans, core_in_trans, core_out_trans) =
         normal_transforms
 
     mlp(args...) = mlp_with_skip(args...; h_dim)
@@ -401,7 +406,7 @@ function mk_guide(;
     ) do (; u_encoder, y_encoder)
         (obs::BatchTuple, control::BatchTuple) -> begin
             batch_size = common_batch_size(obs, control)
-            local y_enc = y_encoder(vcat_bc(inv(obs_trans)(obs.val)...; batch_size))
+            local y_enc = y_encoder(vcat_bc((obs.val)...; batch_size))
             local u_enc = u_encoder(vcat_bc(inv(control_trans)(control.val)...; batch_size))
             vcat(y_enc, u_enc)
         end
@@ -522,18 +527,24 @@ function train_VI!(
                 traj_seq, lp_guide, core_in_seq, core_out_seq = guide(
                     x0_batch, obs_seq, control_seq, Δt; test_consistency
                 )
+                @smart_assert size(lp_guide) == (1, batch_size)
+                lp_guide = sum(lp_guide)
+                isfinite(lp_guide) || error("lp_guide is not finite: $lp_guide")
             end
             dynamics_time += @elapsed begin
                 lp_dynamics = transition_logp(
                     motion_model_core, core_in_seq, core_out_seq, Δt
                 )::Real
+                isfinite(lp_dynamics) ||
+                    error("lp_dynamics is not finite: $lp_dynamics")
             end
             obs_time += @elapsed begin
                 lp_obs = observation_logp(obs_model, traj_seq, obs_seq)::Real
+                isfinite(lp_obs) || error("lp_obs is not finite: $lp_obs")
             end
-            @smart_assert size(lp_guide) == (1, batch_size)
+
             obs_term = lp_obs / (batch_size * T)
-            transition_term = (lp_dynamics - sum(lp_guide)) / (batch_size * T)
+            transition_term = (lp_dynamics - lp_guide) / (batch_size * T)
             elbo[] = obs_term + transition_term
             -(obs_term + w * transition_term)
         end
@@ -543,9 +554,13 @@ function train_VI!(
         end
 
         isfinite(val) || error("Loss is not finite: $val")
+        foreach(grad) do g
+            g === nothing || assert_finite(g)
+        end
         if lr_schedule !== nothing
             optimizer.eta = lr_schedule(step)
         end
+        # Flux.Optimiser(Flux.ClipNorm(1.0), optimizer)
         Flux.update!(optimizer, all_ps, grad) # update parameters
         for p in reg_ps
             p .-= weight_decay .* p

@@ -276,7 +276,7 @@ function inflate_batch(batch::BatchTuple)
     end
 end
 
-function check_components(
+function check_comp_size(
     batch::BatchTuple, comp_sizes::NamedNTuple{names,Int}
 ) where {names}
     Zygote.ignore() do
