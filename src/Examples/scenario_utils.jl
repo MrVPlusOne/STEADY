@@ -79,7 +79,7 @@ function landmark_obs_model_old(state::BatchTuple, (; landmarks, σ_bearing))
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, 1 / x, one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
@@ -120,8 +120,10 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     check_type(tconf, landmarks)
 
     rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
-    distance = sqrt.(sum(rel .^ 2; dims=2) .+ eps(tconf.ftype))  # shape (n_landmarks, 1, batch_size)
-    rel_dir = rel ./ distance  # shape (n_landmarks, 2, batch_size)
+    distance = sqrt.(sum(rel .^ 2; dims=2))  # shape (n_landmarks, 1, batch_size)
+    rel_dir = rel ./ (distance .+ 1f-6)  # shape (n_landmarks, 2, batch_size)
+    # rel_θ = reshape(atan.(rel[:, 2, :], rel[:, 1, :]), n_landmarks, 1, :)  # shape (n_landmarks, 1, batch_size)
+    # rel_dir = cat(cos.(rel_θ), sin.(rel_θ), dims=2)  # shape (n_landmarks, 2, batch_size)
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
@@ -138,17 +140,23 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
             bearing = rotate2d(δ_angle2d, bearing_mean)
             bearing_x = bearing[:, 1, :]
             bearing_y = bearing[:, 2, :]
-            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y, landmarks_loc))
+            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y))
         end,
         log_pdf=(obs::BatchTuple) -> let
             (; bearing_x, bearing_y) = obs.val
             bx = reshape(bearing_x, n_landmarks, 1, :)
             by = reshape(bearing_y, n_landmarks, 1, :)
             bearing = cat(bx, by, dims=2)
-            diff = angle_2d_diff(bearing_mean, bearing)  # shape (n_landmarks, 1, batch_size)
+            diff = angle_2d_diff(bearing, bearing_mean) |> assert_finite  # shape (n_landmarks, 1, batch_size)
             logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
         end,
     )
+end
+
+_cross_dim2(angle1, angle2) = begin
+    c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
+    c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
+    @. c1 * s2 - s1 * c2
 end
 
 function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {names}
@@ -199,6 +207,13 @@ The L2 loss defined on the SE(2) manifold.
 """
 L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
 
+_asin_cs(c1, c2, s1, s2) = begin
+    T = eltype(c1)
+    bound = T(0.99)
+
+    @. asin(clamp(c1 * s2 - s1 * c2, -bound, bound))
+end
+
 """
 Angle `y` minus angle `x`.
 """
@@ -208,7 +223,7 @@ function angle_2d_diff(y::NamedTuple, x::NamedTuple)
     else
         c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
         c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
-        @. asin(clamp(c1 * s2 - c2 * s1, -1, 1))
+        _asin_cs(c1, c2, s1, s2)
     end
 end
 
@@ -230,8 +245,7 @@ function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
         c1, s1 = angle1[:, 1:1], angle1[:, 2:2]
         c2, s2 = angle2[:, 1:1], angle2[:, 2:2]
     end
-
-    @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
+    _asin_cs(c1, c2, s1, s2)
 end
 
 function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<:Real, 3})
@@ -239,8 +253,7 @@ function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<
     
     c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
     c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
-
-    @. asin(clamp(c1 * s2 - s1 * c2, -1, 1))
+    _asin_cs(c1, c2, s1, s2)
 end
 
 function angle_diff_scalar(θ1::Real, θ2::Real)
