@@ -1,0 +1,10 @@
+ Row │ name             log_obs         RMSE             RMSE_pos       open_loop     
+     │ String           Measurem…       Measurem…        Measurem…      Measurem…     
+─────┼────────────────────────────────────────────────────────────────────────────────
+   1 │ σ_bearing=1.0°    732.0±97.0     0.329±0.029      0.112±0.026    8.296±0.039
+   2 │ σ_bearing=2.5°    629.33±0.23    0.2412±0.0013    0.0946±0.001   0.8274±0.0022
+   3 │ σ_bearing=5.0°    388.208±0.054  0.27902±0.00063  0.1338±0.0016  0.8319±0.0033
+   4 │ σ_bearing=10.0°   114.443±0.058  0.3379±0.0014    0.2156±0.0019  0.8694±0.0026
+   5 │ σ_bearing=20.0°  -161.794±0.069  0.42063±0.00083  0.3079±0.0013  0.8578±0.0041
+
+   tensorboard --samples_per_plugin "images=100" --logdir "/mnt/data0/jiayi/SEDL/sims/train_models-exp_name=σ_bearing=1.0°-gpu_id=1-σ_bearing=0.349/tb_logs"
