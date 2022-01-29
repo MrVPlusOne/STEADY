@@ -47,6 +47,7 @@ end
     gpu_id,
     use_simple_obs_model,
     σ_bearing,
+    use_fixed_variance,
     train_method,
     lr,
     exp_name,
@@ -61,6 +62,7 @@ end
         gpu_id=nothing, # integer or nothing
         use_simple_obs_model=false,
         σ_bearing=5°,
+        use_fixed_variance=false,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
         lr=1e-4,
         exp_name=nothing,
@@ -267,7 +269,9 @@ normal_transforms = @time SEDL.compute_normal_transforms(
 
 learned_motion_model = if should_train_dynamics
     nn_motion_model =
-        SEDL.mk_nn_motion_model(; sketch, tconf, h_dim, normal_transforms) |> device
+        SEDL.mk_nn_motion_model(;
+            sketch, tconf, h_dim, use_fixed_variance, normal_transforms
+        ) |> device
     @smart_assert !isempty(Flux.params(nn_motion_model))
     nn_motion_model
 else

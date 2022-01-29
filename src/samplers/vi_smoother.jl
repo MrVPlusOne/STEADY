@@ -336,8 +336,7 @@ function mk_guide(;
     normal_transforms,
     min_σ=1.0f-3,
 )
-    (; state_trans, control_trans, core_in_trans, core_out_trans) =
-        normal_transforms
+    (; state_trans, control_trans, core_in_trans, core_out_trans) = normal_transforms
 
     mlp(args...) = mlp_with_skip(args...; h_dim)
 
@@ -430,7 +429,12 @@ end
 zero_init(args...) = Flux.identity_init(args...; gain=0)
 
 function mk_nn_motion_model(;
-    sketch::BatchedMotionSketch, tconf, h_dim, normal_transforms, min_σ=1.0f-3
+    sketch::BatchedMotionSketch,
+    tconf,
+    h_dim,
+    normal_transforms,
+    use_fixed_variance,
+    min_σ=1.0f-3,
 )
     mlp(args...) = mlp_with_skip(args...; h_dim)
 
@@ -439,29 +443,36 @@ function mk_nn_motion_model(;
 
     (; core_in_trans, core_out_trans) = normal_transforms
 
+    scale_net = if use_fixed_variance
+        FluxLayer(
+            Val(:fixed_variance), (logits=Trainable(false, zeros(core_out_dim, 1)),)
+        ) do (; logits)
+            (input::AbsMat) -> let
+                σ = max.(softplus.(logits.array), min_σ)
+                repeat(σ, 1, size(input, 2))
+            end
+        end
+    else
+        Dense(core_in_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init)
+    end
     core = FluxLayer(
         Val(:nn_motion_model),
-        (
+        (;
             mean1=Dense(core_in_dim, core_out_dim; init=zero_init),
             mean2=Chain(
                 Dense(core_in_dim, h_dim, relu),
                 SkipConnection(Dense(h_dim, h_dim, relu), +),
                 Dense(h_dim, core_out_dim; init=zero_init),
             ),
-            scale=Dense(
-                core_in_dim,
-                core_out_dim,
-                x -> max.(softplus.(x), min_σ);
-                init=zero_init,
-            ),
+            scale_net,
         ),
-    ) do (; mean1, mean2, scale)
+    ) do (; mean1, mean2, scale_net)
         (core_input::BatchTuple, Δt) -> begin
             local (; batch_size) = core_input
             local core_val = inv(core_in_trans)(core_input.val)
             local input = vcat_bc(core_val...; batch_size)
             local μ_data = mean1(input) + mean2(input)
-            local σ_data = scale(input)
+            local σ_data = scale_net(input)
             local μs = core_out_trans(split_components(μ_data, sketch.output_vars))
             local σs = map(
                 .*,
