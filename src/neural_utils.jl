@@ -296,6 +296,29 @@ function check_approx(batch1::BatchTuple, batch2::BatchTuple; kargs...)
     end
 end
 
+const should_check_finite = Ref(false)
+function assert_finite(x::AbstractArray)
+    if should_check_finite[] && !all(isfinite, x)
+        Zygote.ignore() do
+            @error "Some elements are not finite" x
+            throw(ErrorException("assert_finite failed."))
+        end
+    end
+    x
+end
+function assert_finite(x::BatchTuple)
+    if should_check_finite[]
+        Zygote.ignore() do
+            for (k, v) in pairs(x.val)
+                if !all(isfinite, v)
+                    @error "In component $k, some elements are not finite" v
+                    throw(ErrorException("assert_finite failed."))
+                end
+            end
+        end
+    end
+    x
+end
 
 export plot_batched_series
 

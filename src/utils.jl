@@ -549,30 +549,6 @@ function nan_to_zero(v::R)::R where {R<:Real}
     isnan(v) ? zero(v) : v
 end
 
-const should_check_finite = Ref(false)
-function assert_finite(x::AbstractArray)
-    if should_check_finite[] && !all(isfinite, x)
-        Zygote.ignore() do
-            @error "Some elements are not finite" x
-            throw(ErrorException("assert_finite failed."))
-        end
-    end
-    x
-end
-function assert_finite(x::BatchTuple)
-    if should_check_finite[]
-        Zygote.ignore() do
-            for (k, v) in pairs(x.val)
-                if !all(isfinite, v)
-                    @error "In component $k, some elements are not finite" v
-                    throw(ErrorException("assert_finite failed."))
-                end
-            end
-        end
-    end
-    x
-end
-
 """
 A helper macro to find functions by name.
 """
