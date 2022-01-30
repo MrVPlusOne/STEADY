@@ -14,10 +14,10 @@ end
 
 perf_list = []
 
-for train_method in [:Handwritten, :Super_Hand, :Super_TV, :EM, :Super_noiseless] # :VI
+for train_method in [:Handwritten, :Super_Hand, :Super_TV, :Super_noiseless, :EM] # :VI
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
-        is_quick_test=true,
+        is_quick_test=false,
         scenario=SEDL.HovercraftScenario(),
         gpu_id=5,
         # load_trained=true, 

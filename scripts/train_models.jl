@@ -469,7 +469,7 @@ end
     let
         data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
         states_train = if train_method == :Super_TV
-            est_result = SEDL.Dataset.estimate_states_from_observations(
+            est_result = SEDL.estimate_states_from_observations_SE2(
                 scenario,
                 obs_model,
                 data_train.observations,
@@ -521,6 +521,7 @@ end
             data_train.times,
             getindex.(states_train, 1);
             truth=getindex.(data_train.states, 1),
+            title="Training data"
         ) |> display
 
         core_in_set, core_out_set = SEDL.input_output_from_trajectory(

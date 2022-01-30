@@ -8,6 +8,7 @@ using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 using Flux: Dense, Chain, Dropout, relu, ADAM
 using CSV: CSV
+using NoiseRobustDifferentiation: NoiseRobustDifferentiation as NDiff
 
 abstract type Scenario end
 
@@ -924,6 +925,50 @@ function mk_regressor(alg_name::Symbol, sketch; is_test_run)
 end
 
 """
+Note that the first state will not be optimized.
+"""
+function estimate_states_from_observations_SE2(
+    sce::Scenario,
+    obs_model,
+    obs_seq,
+    true_states,
+    Δt;
+    n_steps=5000,
+    showprogress=true,
+)
+    T = length(true_states)
+    states_guess = BatchTuple(true_states[2:end])
+    observations = BatchTuple(obs_seq[2:end])
+    poses_guess = BatchTuple(states_guess) do (; pos, angle_2d)
+        (; pos, angle_2d)
+    end
+    optimizer = ADAM()
+    loss_history = []
+    prog = Progress(n_steps; desc="estimate_states_from_observations", enabled=showprogress)
+    callback = info -> begin
+        push!(loss_history, info.loss)
+        next!(prog)
+        (; should_stop=false)
+    end
+    poses_est::BatchTuple = SEDL.optimize_states_from_observations(
+        sce,
+        obs_model,
+        observations,
+        poses_guess;
+        optimizer,
+        n_steps,
+        lr_schedule=nothing,
+        callback,
+    )
+    pose0 = BatchTuple(true_states[1]) do (; pos, angle_2d)
+        (; pos, angle_2d)
+    end
+    poses = vcat(pose0, split(poses_est, T - 1))
+    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps ÷ 5)
+    (; states, loss_history)
+end
+
+"""
 Find the most likely states from observations only (i.e., by ignoring the dynamics).
 """
 function optimize_states_from_observations(
@@ -966,4 +1011,53 @@ function optimize_states_from_observations(
     end
     @info "Optimization finished ($steps_trained / $n_steps steps trained)."
     to_state(vars)
+end
+
+"""
+Estimate state derivatives using total-variation regularization.
+"""
+function states_from_poses_tv(poses::Vector{<:BatchTuple}, Δt::Real; α, n_iters)
+    T = length(poses)
+    tconf = poses[1].tconf
+    tconf_cpu = Flux.cpu(tconf)
+    batch_size = poses[1].batch_size
+    function compute_derivatives(values)
+        NDiff.tvdiff(values, n_iters, α; dx=Δt, diff_kernel="square")
+    end
+    function estimate_single(poses::Vector{<:BatchTuple})
+        @smart_assert poses[1].batch_size == 1
+        @smart_assert poses[1].tconf.on_gpu == false
+        vel1 = compute_derivatives([p.val.pos[1, 1] for p in poses])
+        vel2 = compute_derivatives([p.val.pos[2, 1] for p in poses])
+        dθ = map(1:(T - 1)) do t
+            SEDL.angle_2d_diff(poses[t + 1].val.angle_2d, poses[t].val.angle_2d; dims=1)[1]
+        end
+        ω = compute_derivatives(
+            [zero(eltype(dθ)); accumulate(+, dθ; init=zero(eltype(dθ)))]
+        )
+        map(1:T) do t
+            val = poses[t].val
+            BatchTuple(
+                tconf_cpu,
+                1,
+                (
+                    pos=val.pos,
+                    angle_2d=val.angle_2d,
+                    vel=tconf_cpu(vcat([vel1[t];;], [vel2[t];;])),
+                    ω=[tconf_cpu(ω[t]);;],
+                ),
+            )
+        end
+    end
+
+    poses_cpu = Flux.cpu.(poses)
+    prog = Progress(batch_size; desc="states_from_poses_tv")
+    seqs = map(1:batch_size) do i
+        est = estimate_single(getindex.(poses_cpu, i))
+        next!(prog)
+        est
+    end
+    map(1:T) do t
+        BatchTuple(tconf.(getindex.(seqs, t)))
+    end
 end
