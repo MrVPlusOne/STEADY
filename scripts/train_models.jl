@@ -571,7 +571,7 @@ function vi_callback(
 
     function (r)
         Base.with_logger(logger) do
-            @info "training" r.elbo r.loss r.lr r.annealing
+            @info "training" r.elbo r.obs_logp r.loss r.lr r.annealing
             @info "statistics" r.time_stats... log_step_increment = 0
         end
 
@@ -651,7 +651,7 @@ if !load_trained && train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; max_iters_to_wait=20)
+        es = SEDL.EarlyStopping(; max_iters_to_wait=999999)# turned off
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -666,7 +666,7 @@ if !load_trained && train_method == :VI
             callback=vi_callback(
                 learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1
             ),
-            lr_schedule=let β = 40^2 / total_steps
+            lr_schedule=let β = 10^2 / total_steps
                 step -> 1e-4 / sqrt(β * step)
             end,
         )

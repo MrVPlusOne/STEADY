@@ -513,6 +513,7 @@ function plot_guide_posterior(
     (; times, Δt, states, controls, observations),
     sample_id=1;
     n_trajs=100,
+    mode=:particle,
     plot_args...,
 )
     guide_trajs =
@@ -524,7 +525,7 @@ function plot_guide_posterior(
         ).trajectory
 
     plot_batched_series(
-        times, guide_trajs; truth=getindex.(states, sample_id), plot_args...
+        times, guide_trajs; mode, truth=getindex.(states, sample_id), plot_args...
     )
 end
 

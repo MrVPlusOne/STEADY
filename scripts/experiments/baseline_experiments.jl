@@ -4,11 +4,11 @@ SEDL.should_check_finite[] = false
 my_include = include # to avoid mess up the VSCode linter
 
 perf_list = []
-for train_method in [:EM] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_TV, :EM, :VI]
+for train_method in [:VI] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_TV, :EM, :VI]
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
-        is_quick_test=false,
-        gpu_id=6,
+        is_quick_test=true,
+        gpu_id=7,
         # load_trained=true, 
         use_fixed_variance=true,
         use_simple_obs_model=false,

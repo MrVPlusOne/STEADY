@@ -532,6 +532,7 @@ function train_VI!(
         w = anneal_schedule(step)
         @smart_assert 0 ≤ w ≤ 1
         elbo = Ref{Any}(missing)
+        obs_logp = Ref{Any}(missing)
 
         loss(; test_consistency=false) = begin
             guide_time += @elapsed begin
@@ -557,6 +558,7 @@ function train_VI!(
             obs_term = lp_obs / (batch_size * T)
             transition_term = (lp_dynamics - lp_guide) / (batch_size * T)
             elbo[] = obs_term + transition_term
+            obs_logp[] = obs_term
             -(obs_term + w * transition_term)
         end
         step == 1 && loss(; test_consistency=true)  # just for testing
@@ -582,6 +584,7 @@ function train_VI!(
             step,
             loss=val,
             elbo=elbo[],
+            obs_logp=obs_logp[],
             batch_size,
             annealing=w,
             lr=optimizer.eta,
