@@ -186,7 +186,7 @@ function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
             δ_bearing = σ_bearing1 .* Random.randn!(zero(distance)) # shape (n_landmarks, 1, batch_size)
             δ_angle = @. atan(sin(δ_bearing), cos(δ_bearing))
             bearing = (@. _restrict_angle(bearing_mean + δ_angle))[:, 1, :]  # shape (n_landmarks, batch_size)
-            @smart_assert all(x -> abs(x) <= pi, bearing)
+            @smart_assert maximum(abs.(bearing)) <= pi+2eps(Float32)
             BatchTuple(tconf, batch_size, (; bearing))
         end,
         log_pdf=(obs::BatchTuple) -> let
@@ -194,7 +194,7 @@ function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
             
             diff = _restrict_angle.(reshape(bearing, n_landmarks, 1, :) .- bearing_mean)
             assert_finite(diff)
-            @smart_assert all(x -> abs(x) <= pi, diff)
+            @smart_assert maximum(abs.(diff)) <= pi+2eps(Float32)
             logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
         end,
     )
