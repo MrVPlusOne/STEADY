@@ -149,6 +149,14 @@ SEDL.plot_batched_series(
 ) |> display
 ##-----------------------------------------------------------
 # utilities
+function copy_model(model)
+    if use_gpu
+        Flux.cpu(model)
+    else
+        deepcopy(model)
+    end
+end
+
 """
 Plot the posterior trajectories sampled by a particle filter.
 """
@@ -593,10 +601,11 @@ function vi_callback(
             end
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
-            should_stop =
-                early_stopping(
-                    -test_scores.log_obs, deepcopy(Flux.cpu(learned_motion_model))
-                ).should_stop
+            # should_stop =
+            #     early_stopping(
+            #         -test_scores.log_obs, deepcopy(Flux.cpu(learned_motion_model))
+            #     ).should_stop
+            should_stop = false
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -671,7 +680,7 @@ if !load_trained && train_method == :VI
             end,
         )
         display(train_result)
-        global learned_motion_model = device(es.best_model)
+        # Flux.loadparams!(learned_motion_model, device(es.best_model))
     end
     # save the model weights
     save_model_weights!()

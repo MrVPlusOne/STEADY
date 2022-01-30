@@ -131,7 +131,7 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
-    landmarks_loc = reshape(landmarks, :, 1)
+    # landmarks_loc = reshape(landmarks, :, 1)
 
     GenericSamplable(;
         rand_f=rng -> let
@@ -207,11 +207,9 @@ The L2 loss defined on the SE(2) manifold.
 """
 L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
 
-_asin_cs(c1, c2, s1, s2) = begin
-    T = eltype(c1)
-    bound = T(0.99)
-
-    @. asin(clamp(c1 * s2 - s1 * c2, -bound, bound))
+_angle_diff(c1, c2, s1, s2) = begin
+    x, y = rotate2d(c1, -s1, c2, s2) # rotate vec 2 by negative vec 1
+    @. atan(y, x)
 end
 
 """
@@ -223,7 +221,7 @@ function angle_2d_diff(y::NamedTuple, x::NamedTuple)
     else
         c1, s1 = x.angle_2d[1:1, :], x.angle_2d[2:2, :]
         c2, s2 = y.angle_2d[1:1, :], y.angle_2d[2:2, :]
-        _asin_cs(c1, c2, s1, s2)
+        _angle_diff(c1, c2, s1, s2)
     end
 end
 
@@ -245,7 +243,7 @@ function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
         c1, s1 = angle1[:, 1:1], angle1[:, 2:2]
         c2, s2 = angle2[:, 1:1], angle2[:, 2:2]
     end
-    _asin_cs(c1, c2, s1, s2)
+    _angle_diff(c1, c2, s1, s2)
 end
 
 function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<:Real, 3})
@@ -253,7 +251,7 @@ function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<
     
     c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
     c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
-    _asin_cs(c1, c2, s1, s2)
+    _angle_diff(c1, c2, s1, s2)
 end
 
 function angle_diff_scalar(θ1::Real, θ2::Real)

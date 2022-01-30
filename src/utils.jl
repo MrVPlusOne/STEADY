@@ -298,6 +298,12 @@ function rotate2d(θ::AbsMat, v::AbsMat)
     r
 end
 
+function rotate2d(θ_cos, θ_sin, x, y)
+    x′ = (θ_cos .* x .- θ_sin .* y)
+    y′ = (θ_sin .* x .+ θ_cos .* y)
+    (x′, y′)
+end
+
 """
 Treat both the 1st and 3rd dimensions as batch dimensions.
 
