@@ -111,7 +111,7 @@ obs_model = if use_simple_obs_model
     end
 else
     let landmark_tensor = SEDL.landmarks_to_tensor(tconf, landmarks)
-        state -> SEDL.landmark_obs_model(state, (; landmarks=landmark_tensor, σ_bearing))
+        state -> SEDL.landmark_obs_model_warp(state, (; landmarks=landmark_tensor, σ_bearing))
     end
 end
 

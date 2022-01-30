@@ -153,6 +153,53 @@ function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
     )
 end
 
+_restrict_angle(θ) = θ - (θ > pi) * (2f0 * pi) + (θ < -pi) * (2f0 * pi)
+
+"""
+Implemented using angle warping.
+"""
+function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
+    # simplified version, does not model angle warping.
+    @smart_assert size(landmarks)[2] == 2
+    n_landmarks = size(landmarks, 1)
+
+    (; pos) = state.val
+    θ = if :angle_2d in keys(state.val)
+        atan.(state.val.angle_2d[2:2, :], state.val.angle_2d[1:1, :])
+    else
+        state.val.θ
+    end  # shape (1, batch_size)
+    (; tconf, batch_size) = state
+    check_type(tconf, landmarks)
+
+    rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
+    rel_angle = atan.(rel[:, 2:2, :], rel[:, 1:1, :])  # shape (n_landmarks, 1, batch_size)
+    distance = sqrt.(sum(rel .^ 2; dims=2))  # shape (n_landmarks, 1, batch_size)
+
+    bearing_mean = _restrict_angle.(rel_angle .- reshape(θ, 1, 1, :))  # shape (n_landmarks, 1, batch_size)
+    # make the measurement more uncertain when being too close
+    σ_bearing1 = (x -> ifelse(x <= 0.5, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
+    @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
+
+    GenericSamplable(;
+        rand_f=rng -> let
+            δ_bearing = σ_bearing1 .* Random.randn!(zero(distance)) # shape (n_landmarks, 1, batch_size)
+            δ_angle = @. atan(sin(δ_bearing), cos(δ_bearing))
+            bearing = (@. _restrict_angle(bearing_mean + δ_angle))[:, 1, :]  # shape (n_landmarks, batch_size)
+            @smart_assert all(x -> abs(x) <= pi, bearing)
+            BatchTuple(tconf, batch_size, (; bearing))
+        end,
+        log_pdf=(obs::BatchTuple) -> let
+            (; bearing) = obs.val
+            
+            diff = _restrict_angle.(reshape(bearing, n_landmarks, 1, :) .- bearing_mean)
+            assert_finite(diff)
+            @smart_assert all(x -> abs(x) <= pi, diff)
+            logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
+        end,
+    )
+end
+
 _cross_dim2(angle1, angle2) = begin
     c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
     c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]

@@ -7,10 +7,10 @@ perf_list = []
 for train_method in [:VI] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_TV, :EM, :VI]
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
-        is_quick_test=true,
-        gpu_id=7,
+        is_quick_test=false,
+        gpu_id=6,
         # load_trained=true, 
-        use_fixed_variance=true,
+        use_fixed_variance=false,
         use_simple_obs_model=false,
         train_method,
     )
