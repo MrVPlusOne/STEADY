@@ -71,7 +71,7 @@ end
     )
     merge(config, script_args::NamedTuple)
 end
-is_quick_test && @info "Quick testing VI..."
+is_quick_test && @info "Quick testing model training..."
 
 Random.seed!(123)
 
@@ -87,7 +87,7 @@ tconf = SEDL.TensorConfig(use_gpu, Float32)
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
-    SimulationData(; n_train_ex=16, n_test_ex=64, times=0:tconf(0.1):10)
+    SimulationData(; n_train_ex=16, n_test_ex=32, times=0:tconf(0.1):10)
 else
     RealData(
         SEDL.data_dir("real_data", "simple_loop"),
@@ -100,13 +100,13 @@ state_L2_loss = SEDL.state_L2_loss_batched(scenario)
 sketch = SEDL.batched_sketch(scenario)
 
 landmarks = if use_sim_data
-    [[10.0, 0.0], [-4.0, -2.0], [-6.0, 5.0]]
+    [[10.0, -2.0], [-4.0, -2.0], [-6.0, 10.0]]
 else
     [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
 end
 
 obs_model = if use_simple_obs_model
-    let σs = use_sim_data ? (pos=0.1, θ=5°) : (pos=0.1, angle_2d=5°)
+    let σs = (pos=0.1, angle_2d=σ_bearing)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -244,10 +244,10 @@ end
 
 function load_model_weights!()
     mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson"))
-    Flux.loadparams!(Main.learned_motion_model, mm_weights)
+    Flux.loadparams!(Main.learned_motion_model, device(mm_weights))
     if train_method == :VI
         guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
-        Flux.loadparams!(guide, guide_weights)
+        Flux.loadparams!(guide, device(guide_weights))
     end
 end
 
@@ -412,10 +412,7 @@ function supervised_callback(
             Base.with_logger(logger) do
                 @info("testing", test_loss, log_step_increment = 0)
             end
-            should_stop =
-                early_stopping(
-                    test_loss, deepcopy(Flux.cpu(learned_motion_model))
-                ).should_stop
+            should_stop = early_stopping(test_loss, save_model_weights!).should_stop
         else
             should_stop = false
         end
@@ -453,21 +450,14 @@ function repeat_seq(seq::Vector{<:BatchTuple}, n::Integer)
         for r in 1:(batch.batch_size)
             append!(new_batches, fill(batch[r], n))
         end
-        BatchTuple(new_batches)
+        nb = BatchTuple(new_batches)
+        @smart_assert nb.batch_size == n * batch.batch_size
+        nb
     end
 end
 
 simplifed_model = let
-    core = SEDL.get_simplified_motion_core(
-        scenario,
-        (;
-            twist_linear_scale=1.0f0,
-            twist_angular_scale=0.5f0,
-            max_a_linear=6.0f0,
-            max_a_angular=6.0f0,
-        ),
-        (; a_loc=5.0f0, a_rot=2.0f0),
-    )
+    core = SEDL.get_simplified_motion_core(scenario)
     BatchedMotionModel(tconf, sketch, core)
 end
 if train_method == :Handwritten
@@ -544,7 +534,7 @@ end
 
         @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
-        global learned_motion_model = with_alert("Supervised training") do
+        with_alert("Supervised training") do
             total_steps = 50_000
             n_steps = is_quick_test ? 3 : total_steps + 1
             es = SEDL.EarlyStopping(; max_iters_to_wait=100)
@@ -559,7 +549,7 @@ end
                     learned_motion_model, es; n_steps, test_every=50
                 ),
             )
-            device(es.best_model)
+            load_model_weights!()
         end
         save_model_weights!()
     end
@@ -601,11 +591,8 @@ function vi_callback(
             end
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
-            # should_stop =
-            #     early_stopping(
-            #         -test_scores.log_obs, deepcopy(Flux.cpu(learned_motion_model))
-            #     ).should_stop
-            should_stop = false
+            should_stop =
+                early_stopping(-test_scores.log_obs, save_model_weights!).should_stop
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -680,15 +667,20 @@ if !load_trained && train_method == :VI
             end,
         )
         display(train_result)
-        # Flux.loadparams!(learned_motion_model, device(es.best_model))
+        load_model_weights!()
     end
     # save the model weights
     save_model_weights!()
 end
 ##-----------------------------------------------------------
-plot_posterior(learned_motion_model, data_train; title="Posterior (learned)") |> display
 plot_posterior(
-    learned_motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (learned)"
+    learned_motion_model, data_train; title="Posterior ($train_method learned)"
+) |> display
+plot_posterior(
+    learned_motion_model,
+    data_train;
+    obs_frames=1:1,
+    title="Open-loop prediction ($train_method learned)",
 ) |> display
 if use_sim_data
     plot_posterior(
@@ -696,9 +688,14 @@ if use_sim_data
     ) |> display
 end
 
-plot_core_io(learned_motion_model, data_train; title="Posterior (learned)") |> display
 plot_core_io(
-    learned_motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (learned)"
+    learned_motion_model, data_train; title="IO Posterior ($train_method learned)"
+) |> display
+plot_core_io(
+    learned_motion_model,
+    data_train;
+    obs_frames=1:1,
+    title="IO Open-loop prediction ($train_method learned)",
 ) |> display
 
 function evaluate_model(motion_model, data_test, name)

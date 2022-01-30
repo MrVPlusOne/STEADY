@@ -3,7 +3,7 @@ export max_by, sort_by, mean, std
 export rotate2d, rotation2D, °, linear
 export Optional, map_optional
 
-using MacroTools: @capture
+using MacroTools: @capture, @q
 using ForwardDiff: Dual
 # import ReverseDiff
 using LineSearches: LineSearches
@@ -50,7 +50,7 @@ macro smart_assert(ex, msg=nothing)
             :block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...
         )
         args_tuple = Expr(:tuple, arg_names...)
-        quote
+        @q begin
             $assigns
             if !$(cond_ex)
                 eval_string = join(
@@ -283,8 +283,12 @@ vcatreduce(xs::AbsVec) = reduce(vcat, xs)
 
 rotate2d(θ, v::AbsVec) = rotation2D(θ) * v
 
+function check_broadcase_sizes(s1::Integer, s2::Integer)
+    s1 == 1 || s2 == 1 || @smart_assert s1 == s2
+end
+
 function rotate2d(θ::AbsMat, v::AbsMat)
-    @smart_assert size(θ, 2) == 1 || size(θ, 2) == size(v, 2)
+    check_broadcase_sizes(size(θ, 2), size(v, 2))
     x = @views v[1:1, :]
     y = @views v[2:2, :]
     if size(θ, 1) == 1
@@ -293,9 +297,7 @@ function rotate2d(θ::AbsMat, v::AbsMat)
     else
         c, s = @views θ[1:1, :], @views θ[2:2, :]
     end
-    r = vcat((c .* x .- s .* y), (s .* x .+ c .* y))
-    @smart_assert size(r) == size(v)
-    r
+    vcat((c .* x .- s .* y), (s .* x .+ c .* y))
 end
 
 function rotate2d(θ_cos, θ_sin, x, y)

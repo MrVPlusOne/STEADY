@@ -1,3 +1,4 @@
+# todo: change to callback-based
 @kwdef mutable struct EarlyStopping
     max_iters_to_wait::Int
     best_model::Any = nothing
@@ -5,11 +6,11 @@
     iters_waited::Int = 0
 end
 
-function (early_stopping::EarlyStopping)(current_loss::Real, current_model)
+function (early_stopping::EarlyStopping)(current_loss::Real, save_model_f)
     if current_loss < early_stopping.best_loss
         early_stopping.best_loss = current_loss
-        early_stopping.best_model = current_model
         early_stopping.iters_waited = 0
+        save_model_f()
     else
         early_stopping.iters_waited += 1
     end

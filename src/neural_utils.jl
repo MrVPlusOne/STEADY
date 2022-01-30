@@ -164,6 +164,8 @@ function Base.lastindex(batch::BatchTuple)
 end
 
 function Base.getindex(batch::BatchTuple, ids)
+    bs = batch.batch_size
+    @smart_assert all(i -> 0 <= i <= bs, ids) "batch size = $(bs)"
     new_val = map(v -> batch_subset(v, ids), batch.val)
     BatchTuple(batch.tconf, length(ids), new_val)
 end
@@ -568,3 +570,7 @@ regular_params(layer::Union{Flux.GRUCell,Flux.LSTMCell}) = (layer.Wi, layer.Wh)
 regular_params(tp::Union{Tuple,NamedTuple}) = Iterators.flatten(map(regular_params, tp))
 
 regular_params(::Union{Function,BatchNorm,Nothing}) = tuple()
+
+# fix Flux Params
+Base.in(k::Flux.Params, v::Base.KeySet{Any, <:IdDict}) = 
+    get(v.dict, k, Base.secret_table_token) !== Base.secret_table_token

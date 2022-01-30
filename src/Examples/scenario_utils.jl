@@ -79,7 +79,8 @@ function landmark_obs_model_old(state::BatchTuple, (; landmarks, σ_bearing))
     θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 =
+        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
@@ -102,58 +103,7 @@ function landmark_obs_model_old(state::BatchTuple, (; landmarks, σ_bearing))
     )
 end
 
-"""
-`landmarks` should be of shape (n_landmarks, 2, 1).
-"""
-function landmark_obs_model(state::BatchTuple, (; landmarks, σ_bearing))
-    # simplified version, does not model angle warping.
-    @smart_assert size(landmarks)[2] == 2
-    n_landmarks = size(landmarks, 1)
-
-    (; pos) = state.val
-    angle_2d = if :angle_2d in keys(state.val)
-        state.val.angle_2d
-    else
-        vcat(cos.(state.val.θ), sin.(state.val.θ))
-    end  # shape (2, batch_size)
-    (; tconf, batch_size) = state
-    check_type(tconf, landmarks)
-
-    rel = landmarks .- reshape(pos, 1, 2, :)  # shape (n_landmarks, 2, batch_size)
-    distance = sqrt.(sum(rel .^ 2; dims=2))  # shape (n_landmarks, 1, batch_size)
-    rel_dir = rel ./ (distance .+ 1f-6)  # shape (n_landmarks, 2, batch_size)
-    # rel_θ = reshape(atan.(rel[:, 2, :], rel[:, 1, :]), n_landmarks, 1, :)  # shape (n_landmarks, 1, batch_size)
-    # rel_dir = cat(cos.(rel_θ), sin.(rel_θ), dims=2)  # shape (n_landmarks, 2, batch_size)
-    θ_neg = reshape(negate_angle_2d(angle_2d), 1, 2, :)
-    bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
-    # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 1, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
-    @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
-
-    # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
-    # landmarks_loc = reshape(landmarks, :, 1)
-
-    GenericSamplable(;
-        rand_f=rng -> let
-            δ_bearing = σ_bearing1 .* Random.randn!(zero(distance)) # shape (n_landmarks, 1, batch_size)
-            δ_angle2d = cat(cos.(δ_bearing), sin.(δ_bearing), dims=2)  # shape (n_landmarks, 2, batch_size)
-            bearing = rotate2d(δ_angle2d, bearing_mean)
-            bearing_x = bearing[:, 1, :]
-            bearing_y = bearing[:, 2, :]
-            BatchTuple(tconf, batch_size, (; bearing_x, bearing_y))
-        end,
-        log_pdf=(obs::BatchTuple) -> let
-            (; bearing_x, bearing_y) = obs.val
-            bx = reshape(bearing_x, n_landmarks, 1, :)
-            by = reshape(bearing_y, n_landmarks, 1, :)
-            bearing = cat(bx, by, dims=2)
-            diff = angle_2d_diff(bearing, bearing_mean) |> assert_finite  # shape (n_landmarks, 1, batch_size)
-            logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
-        end,
-    )
-end
-
-_restrict_angle(θ) = θ - (θ > pi) * (2f0 * pi) + (θ < -pi) * (2f0 * pi)
+_restrict_angle(θ) = θ - (θ > pi) * (2.0f0 * pi) + (θ < -pi) * (2.0f0 * pi)
 
 """
 Implemented using angle warping.
@@ -178,7 +128,8 @@ function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
 
     bearing_mean = _restrict_angle.(rel_angle .- reshape(θ, 1, 1, :))  # shape (n_landmarks, 1, batch_size)
     # make the measurement more uncertain when being too close
-    σ_bearing1 = (x -> ifelse(x <= 0.5, min(1 / x, 10f0), one(x))).(distance) .* tconf(σ_bearing)
+    σ_bearing1 =
+        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .* tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     GenericSamplable(;
@@ -186,24 +137,19 @@ function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
             δ_bearing = σ_bearing1 .* Random.randn!(zero(distance)) # shape (n_landmarks, 1, batch_size)
             δ_angle = @. atan(sin(δ_bearing), cos(δ_bearing))
             bearing = (@. _restrict_angle(bearing_mean + δ_angle))[:, 1, :]  # shape (n_landmarks, batch_size)
-            @smart_assert maximum(abs.(bearing)) <= pi+2eps(Float32)
+            @smart_assert maximum(abs.(bearing)) <= pi + 2eps(Float32)
             BatchTuple(tconf, batch_size, (; bearing))
         end,
         log_pdf=(obs::BatchTuple) -> let
             (; bearing) = obs.val
-            
-            diff = _restrict_angle.(reshape(bearing, n_landmarks, 1, :) .- bearing_mean)
+
+            diff =
+                _restrict_angle.(reshape(bearing, n_landmarks, 1, :) .- bearing_mean)
             assert_finite(diff)
-            @smart_assert maximum(abs.(diff)) <= pi+2eps(Float32)
+            @smart_assert maximum(abs.(diff)) <= pi + 2eps(Float32)
             logpdf_normal(zero(tconf.ftype), σ_bearing1, diff)
         end,
     )
-end
-
-_cross_dim2(angle1, angle2) = begin
-    c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
-    c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
-    @. c1 * s2 - s1 * c2
 end
 
 function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {names}
@@ -226,37 +172,72 @@ function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {na
     )
 end
 
-function state_to_input_SE2(state::BatchTuple, control::BatchTuple)
-    BatchTuple(state, control) do (; vel, θ, ω), u
-        loc_v = rotate2d(-θ, vel)
-        (; loc_v, ω, θ, u...)
+function batched_sketch_SE2(control_vars)
+    state_vars = (; pos=2, angle_2d=2, vel=2, ω=1)
+    input_vars = (; angle_2d=2, loc_v=2, ω=1, control_vars...)
+    output_vars = (; a_loc=2, a_rot=1)
+
+    state_to_input(x, u) =
+        BatchTuple(x, u) do (; angle_2d, vel, ω), uval
+            loc_v = rotate2d(negate_angle_2d(angle_2d), vel)
+            (; angle_2d, loc_v, ω, uval...)
+        end
+
+    output_to_state(x, o, Δt) =
+        BatchTuple(x, o) do (; pos, angle_2d, vel, ω), (; a_loc, a_rot)
+            (
+                pos=pos .+ vel .* Δt,
+                angle_2d=rotate2d(ω * Δt, angle_2d),
+                vel=vel .+ rotate2d(angle_2d, a_loc) .* Δt,
+                ω=ω .+ a_rot .* Δt,
+            )
+        end
+
+    output_from_state(x, x1, Δt) =
+        BatchTuple(x, x1) do xv, x1v
+            acc = (x1v.vel .- xv.vel) ./ Δt
+            a_loc = rotate2d(negate_angle_2d(xv.angle_2d), acc)
+            a_rot = (x1v.ω .- xv.ω) ./ Δt
+            (; a_loc, a_rot)
+        end
+
+    BatchedMotionSketch(;
+        state_vars,
+        control_vars,
+        input_vars,
+        output_vars,
+        state_to_input,
+        output_to_state,
+        output_from_state,
+    )
+end
+
+# """
+# The L2 loss defined on the SE(2) manifold.
+# """
+# L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
+
+function pose_to_opt_vars_SE2(state::BatchTuple)
+    BatchTuple(state) do (; pos, angle_2d)
+        θ = atan.(angle_2d[2:2, :], angle_2d[1:1, :])
+        (; pos, θ)
     end
 end
 
-function output_to_state_rate_SE2(state::BatchTuple, output::BatchTuple)
-    BatchTuple(state, output) do (; pos, vel, θ, ω), (; loc_acc, a_θ)
-        acc = rotate2d(θ, loc_acc)
-        (pos=vel, vel=acc, θ=ω, ω=a_θ)
+function pose_from_opt_vars_SE2(opt_vars::BatchTuple)
+    BatchTuple(opt_vars) do (; pos, θ)
+        angle_2d = vcat(cos.(θ), sin.(θ))
+        (; pos, angle_2d)
     end
 end
-
-function output_from_state_rate_SE2(state::BatchTuple, state_rate::BatchTuple)
-    @smart_assert state.batch_size == state_rate.batch_size
-    BatchTuple(state, state_rate) do (; θ), derivatives
-        acc, a_θ = derivatives.vel, derivatives.ω
-        loc_acc = rotate2d(-θ, acc)
-        (; loc_acc, a_θ)
-    end
-end
-
-"""
-The L2 loss defined on the SE(2) manifold.
-"""
-L2_in_SE2(x1, x2) = norm(x1.pos - x2.pos)^2 + angular_distance(x1.θ, x2.θ)^2
 
 _angle_diff(c1, c2, s1, s2) = begin
     x, y = rotate2d(c1, -s1, c2, s2) # rotate vec 2 by negative vec 1
     @. atan(y, x)
+end
+
+function negate_angle_2d(angle_2d::AbsMat)
+    @views vcat(angle_2d[1:1, :], -angle_2d[2:2, :])
 end
 
 """
@@ -293,9 +274,9 @@ function angle_2d_diff(angle2::SEDL.AbsMat, angle1::SEDL.AbsMat; dims=1)
     _angle_diff(c1, c2, s1, s2)
 end
 
-function angle_2d_diff(angle2::AbstractArray{<:Real, 3}, angle1::AbstractArray{<:Real, 3})
+function angle_2d_diff(angle2::AbstractArray{<:Real,3}, angle1::AbstractArray{<:Real,3})
     @smart_assert size(angle2, 2) == size(angle1, 2) == 2
-    
+
     c1, s1 = angle1[:, 1:1, :], angle1[:, 2:2, :]
     c2, s2 = angle2[:, 1:1, :], angle2[:, 2:2, :]
     _angle_diff(c1, c2, s1, s2)

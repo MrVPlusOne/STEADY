@@ -2,49 +2,9 @@ struct RealCarScenario <: Scenario end
 
 Base.summary(io::IO, ::RealCarScenario) = print(io, "RealCarScenario")
 
-function negate_angle_2d(angle_2d::AbsMat)
-    @views vcat(angle_2d[1:1, :], -angle_2d[2:2, :])
-end
-
 function batched_sketch(::RealCarScenario)
-    state_vars = (; pos=2, angle_2d=2, vel=2, ω=1)
     control_vars = (; twist_linear=1, twist_angular=1)
-    input_vars = (; angle_2d=2, loc_v=2, ω=1, control_vars...)
-    output_vars = (; a_loc=2, a_rot=1)
-
-    state_to_input(x, u) =
-        BatchTuple(x, u) do (; angle_2d, vel, ω), uval
-            loc_v = rotate2d(negate_angle_2d(angle_2d), vel)
-            (; angle_2d, loc_v, ω, uval...)
-        end
-
-    output_to_state(x, o, Δt) =
-        BatchTuple(x, o) do (; pos, angle_2d, vel, ω), (; a_loc, a_rot)
-            (
-                pos=pos .+ vel .* Δt,
-                angle_2d=rotate2d(ω * Δt, angle_2d),
-                vel=vel .+ rotate2d(angle_2d, a_loc) .* Δt,
-                ω=ω .+ a_rot .* Δt,
-            )
-        end
-
-    output_from_state(x, x1, Δt) =
-        BatchTuple(x, x1) do xv, x1v
-            acc = (x1v.vel .- xv.vel) ./ Δt
-            a_loc = rotate2d(negate_angle_2d(xv.angle_2d), acc)
-            a_rot = (x1v.ω .- xv.ω) ./ Δt
-            (; a_loc, a_rot)
-        end
-
-    BatchedMotionSketch(;
-        state_vars,
-        control_vars,
-        input_vars,
-        output_vars,
-        state_to_input,
-        output_to_state,
-        output_from_state,
-    )
+    batched_sketch_SE2(control_vars)
 end
 
 function state_L2_loss_batched(::RealCarScenario)
@@ -52,28 +12,21 @@ function state_L2_loss_batched(::RealCarScenario)
 end
 
 function pose_to_opt_vars(::RealCarScenario)
-    function (state::BatchTuple)
-        BatchTuple(state) do (; pos, angle_2d)
-            θ = atan.(angle_2d[2:2, :], angle_2d[1:1, :])
-            (; pos, θ)
-        end
-    end
+    pose_to_opt_vars_SE2
 end
 
 function pose_from_opt_vars(::RealCarScenario)
-    function (opt_vars::BatchTuple)
-        BatchTuple(opt_vars) do (; pos, θ)
-            angle_2d = vcat(cos.(θ), sin.(θ))
-            (; pos, angle_2d)
-        end
-    end
+    pose_from_opt_vars_SE2
 end
 
-function get_simplified_motion_core(
-    ::RealCarScenario,
-    (; twist_linear_scale, twist_angular_scale, max_a_linear, max_a_angular),
-    acc_σs::NamedNTuple,
-)
+function get_simplified_motion_core(::RealCarScenario)
+    twist_linear_scale = 1.0f0
+    twist_angular_scale = 0.5f0
+    max_a_linear = 6.0f0
+    max_a_angular = 6.0f0
+
+    acc_σs = (a_loc=5.0f0, a_rot=2.0f0)
+
     (core_input::BatchTuple, Δt) -> begin
         local μs = BatchTuple(core_input) do (; twist_linear, twist_angular, loc_v, ω)
             â = (twist_linear_scale * twist_linear .- loc_v[1:1, :]) ./ Δt

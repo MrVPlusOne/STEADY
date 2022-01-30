@@ -1,14 +1,25 @@
 using SEDL
+using CSV
+using DataFrames
 SEDL.should_check_finite[] = false
 
 my_include = include # to avoid mess up the VSCode linter
 
+result_name = "comparisons_hovercraft"
+mkpath("results")
+result_path = joinpath("results", "$result_name.csv")
+if isfile(result_path)
+    error("file $result_path already exists")
+end
+
 perf_list = []
-for train_method in [:VI] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_TV, :EM, :VI]
+
+for train_method in [:Handwritten, :Super_Hand, :Super_TV, :EM, :Super_noiseless] # :VI
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
-        is_quick_test=false,
-        gpu_id=6,
+        is_quick_test=true,
+        scenario=SEDL.HovercraftScenario(),
+        gpu_id=5,
         # load_trained=true, 
         use_fixed_variance=false,
         use_simple_obs_model=false,
@@ -18,4 +29,6 @@ for train_method in [:VI] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_
     push!(perf_list, Main.perf)
 end
 
-DataFrame(perf_list) |> display
+results = DataFrame(perf_list)
+results|> display
+CSV.write(result_path, results)
