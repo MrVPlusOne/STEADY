@@ -5,7 +5,7 @@ SEDL.should_check_finite[] = false
 
 my_include = include # to avoid mess up the VSCode linter
 
-result_name = "comparisons_hovercraft"
+result_name = "comparisons-hovercraft-gaussian"
 mkpath("results")
 result_path = joinpath("results", "$result_name.csv")
 if isfile(result_path)
@@ -22,7 +22,7 @@ for train_method in [:Handwritten, :Super_Hand, :Super_TV, :Super_noiseless, :EM
         gpu_id=5,
         # load_trained=true, 
         use_fixed_variance=false,
-        use_simple_obs_model=false,
+        use_simple_obs_model=true,
         train_method,
     )
     my_include("../train_models.jl")

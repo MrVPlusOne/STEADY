@@ -50,6 +50,7 @@ end
     use_fixed_variance,
     train_method,
     lr,
+    max_train_steps,
     exp_name,
     n_particles,
     h_dim,
@@ -65,6 +66,7 @@ end
         use_fixed_variance=false,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
         lr=1e-4,
+        max_train_steps=40_000,
         exp_name=nothing,
         n_particles=20_000,  # how many particles to use for the EM training.
         h_dim=64,
@@ -106,7 +108,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=σ_bearing)
+    let σs = (pos=0.1, angle_2d=σ_bearing, vel=0.4, ω=0.4)  # FIXME: remove velocity measurements
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -356,7 +358,7 @@ end
 
 if !load_trained && (train_method == :EM)
     with_alert("EM training") do
-        total_steps = 40_000
+        total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
@@ -639,7 +641,7 @@ end
 
 if !load_trained && train_method == :VI
     with_alert("VI training") do
-        total_steps = 40_000
+        total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
 
         n_repeat = 10
