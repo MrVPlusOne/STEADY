@@ -229,7 +229,7 @@ to train the guide using variational inference.
 @kwdef struct VIGuide{SK<:BatchedMotionSketch,X0S,GC,RNN,H0,OE}
     sketch::SK
     "x0_sampler(future_batch_1) -> (x0_batch, logp)"
-    x0_sampler::X0S
+    x0_sampler::X0S  #  FIXME: currently, this is not used
     "guide_core(core_in_batch, x_batch, future_batch) -> core_out_batch"
     guide_core::GC
     rnn::RNN
@@ -250,7 +250,7 @@ function (guide::VIGuide)(
     batch_size = common_batch_size(obs_seq[1], control_seq[1])
     tconf = TC()
 
-    (; rnn_h0, x0_sampler, rnn, obs_encoder) = guide
+    (; rnn_h0, x0_sampler, rnn, obs_encoder, guide_core) = guide
 
     h = map((x::Trainable) -> x.array, rnn_h0)
     future_info =
@@ -269,7 +269,7 @@ function (guide::VIGuide)(
     x0 = inflate_batch(x0)
     x::BatchTuple{TC} = x0 |> assert_finite
     @unzip trans, core_in_seq, core_out_seq = map(2:length(future_info)) do t
-        core = (inputs, Δt) -> guide.guide_core(inputs::BatchTuple, x, future_info[t])
+        core = (inputs, Δt) -> guide_core(inputs::BatchTuple, x, future_info[t])
         mm_t = BatchedMotionModel(tconf, guide.sketch, core)
         (x1, lp, core_in, core_out) = mm_t(x, control_seq[t - 1], Δt; test_consistency)
         x = x1 |> assert_finite
@@ -330,7 +330,6 @@ mlp_with_skip(n_in, n_out, out_activation=identity; h_dim) =
 
 function mk_guide(;
     sketch::BatchedMotionSketch,
-    dynamics_core,
     h_dim,
     y_dim,
     normal_transforms,
@@ -365,34 +364,38 @@ function mk_guide(;
     # end
     x0_sampler = nothing
 
+    # implement the Combiner logic 
     guide_core = FluxLayer(
         Val(:guide_core),
         (
-            propose_linear=Dense(core_in_dim, core_out_dim; init=zero_init),
-            propose_left=mlp(core_in_dim, h_dim, tanh),
-            propose_right=mlp(rnn_dim + x_dim, h_dim, tanh),
-            mean_net=Dense(h_dim, core_out_dim; init=zero_init),
+            core_in_encoder=mlp(core_in_dim, rnn_dim),
+            state_encoder=mlp(x_dim, rnn_dim),
+            mean_net=Chain(
+                Dense(rnn_dim, h_dim, tanh),
+                Dense(h_dim, core_out_dim; init=zero_init)
+            ),
             scale_net=Dense(
-                h_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
+                rnn_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
             ),
         ),
-    ) do (; propose_linear, propose_left, propose_right, mean_net, scale_net)
+    ) do (; core_in_encoder, state_encoder, mean_net, scale_net)
         (core_input::BatchTuple, state::BatchTuple, future::BatchTuple) -> begin
             local batch_size = common_batch_size(core_input, state, future)
 
-            local left_input = vcat_bc(inv(core_in_trans)(core_input.val)...; batch_size)
-            local right_input = vcat_bc(
-                inv(state_trans)(state.val)..., future.val...; batch_size
+            local h_core_in = core_in_encoder(
+                vcat_bc(inv(core_in_trans)(core_input.val)...; batch_size)
             )
-            local prop = propose_left(left_input) + propose_right(right_input)
-            local mean_prop = propose_linear(left_input) + mean_net(prop)
+            local h_state = state_encoder(
+                vcat_bc(inv(state_trans)(state.val)...; batch_size)
+            )
+            local h_future = vcat_bc(future.val.future_info; batch_size)
+            local h_combined = (h_core_in .+ h_state .+ h_future) ./ 3
+
+            local mean_prop = mean_net(h_combined)
+            local scale_prop = scale_net(h_combined)
 
             local μs = core_out_trans(split_components(mean_prop, sketch.output_vars))
-            local σs = map(
-                .*,
-                core_out_trans.scale,
-                split_components(scale_net(prop), sketch.output_vars),
-            )
+            local σs = split_components(scale_prop, sketch.output_vars)
             map((; μs, σs)) do nt
                 BatchTuple(core_input.tconf, batch_size, nt)
             end

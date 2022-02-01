@@ -71,6 +71,16 @@ end
         n_particles=20_000,  # how many particles to use for the EM training.
         h_dim=64,
     )
+    # discard params that are the same as the default
+    global script_args = let changes = []
+        foreach(keys(script_args)) do k
+            @smart_assert k in keys(config)
+            if script_args[k] != config[k]
+                push!(changes, k => script_args[k])
+            end
+        end
+        (; changes...)
+    end
     merge(config, script_args::NamedTuple)
 end
 is_quick_test && @info "Quick testing model training..."
@@ -293,10 +303,7 @@ plot_posterior(
 ) |> display
 
 if train_method == :VI
-    guide =
-        SEDL.mk_guide(;
-            sketch, dynamics_core=learned_motion_model.core, h_dim, y_dim, normal_transforms
-        ) |> device
+    guide = SEDL.mk_guide(; sketch, h_dim, y_dim, normal_transforms) |> device
 
     SEDL.plot_guide_posterior(guide, data_train, 1; title="Guide posterior (initial)") |>
     display
@@ -523,7 +530,7 @@ end
             data_train.times,
             getindex.(states_train, 1);
             truth=getindex.(data_train.states, 1),
-            title="Training data"
+            title="Training data",
         ) |> display
 
         core_in_set, core_out_set = SEDL.input_output_from_trajectory(
