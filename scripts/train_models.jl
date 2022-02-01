@@ -49,6 +49,7 @@ end
     σ_bearing,
     use_fixed_variance,
     train_method,
+    n_train_ex,
     lr,
     max_train_steps,
     exp_name,
@@ -65,6 +66,7 @@ end
         σ_bearing=5°,
         use_fixed_variance=false,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
+        n_train_ex=16,  # number of training trajectories when using simulation data
         lr=1e-4,
         max_train_steps=40_000,
         exp_name=nothing,
@@ -99,7 +101,7 @@ tconf = SEDL.TensorConfig(use_gpu, Float32)
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
-    SimulationData(; n_train_ex=16, n_test_ex=32, times=0:tconf(0.1):10)
+    SimulationData(; n_train_ex, n_test_ex=32, times=0:tconf(0.1):10)
 else
     RealData(
         SEDL.data_dir("real_data", "simple_loop"),
@@ -118,7 +120,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=σ_bearing) #, vel=0.4, ω=0.4)
+    let σs = (pos=0.1, angle_2d=σ_bearing, vel=0.4, ω=0.4)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -269,7 +271,9 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-save_dir = SEDL.data_dir("sims", savename("train_models", script_args; connector="-"))
+save_dir = SEDL.data_dir(
+    "sims", savename("train_models-$(summary(scenario))", script_args; connector="-")
+)
 if !load_trained && isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
