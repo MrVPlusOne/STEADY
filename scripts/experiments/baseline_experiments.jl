@@ -5,7 +5,7 @@ SEDL.should_check_finite[] = false
 
 my_include = include # to avoid mess up the VSCode linter
 
-result_name = "comparisons-hovercraft-gaussian"
+result_name = "comparisons-real-gaussian"
 mkpath("results")
 result_path = joinpath("results", "$result_name.csv")
 if isfile(result_path)
@@ -18,7 +18,7 @@ for train_method in [:Handwritten, :Super_Hand, :Super_TV, :Super_noiseless, :EM
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
         is_quick_test=false,
-        scenario=SEDL.HovercraftScenario(),
+        # scenario=SEDL.HovercraftScenario(),
         gpu_id=5,
         # load_trained=true, 
         use_fixed_variance=false,

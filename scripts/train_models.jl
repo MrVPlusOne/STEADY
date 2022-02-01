@@ -108,7 +108,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=σ_bearing, vel=0.4, ω=0.4)  # FIXME: remove velocity measurements
+    let σs = (pos=0.1, angle_2d=σ_bearing) #, vel=0.4, ω=0.4)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -665,9 +665,9 @@ if !load_trained && train_method == :VI
             callback=vi_callback(
                 learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1
             ),
-            lr_schedule=let β = 10^2 / total_steps
-                step -> 1e-4 / sqrt(β * step)
-            end,
+            # lr_schedule=let β = 10^2 / total_steps
+            #     step -> 1e-4 / sqrt(β * step)
+            # end,
         )
         display(train_result)
         load_model_weights!()
