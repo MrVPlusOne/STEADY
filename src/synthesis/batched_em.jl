@@ -20,7 +20,7 @@ end
 
 function train_dynamics_em!(
     motion_model::BatchedMotionModel,
-    obs_model,
+    logpdf_obs::Function,
     x0_batch,
     obs_seq,
     control_seq,
@@ -30,14 +30,15 @@ function train_dynamics_em!(
     sampling_model=motion_model,
     lr_schedule=nothing,
     n_particles=100_000,
-    trajs_per_step=1, # the number of examples in each learning step
-    trajs_per_ex=10,
+    examples_per_step=1, # the number of examples in each learning step
+    trajs_per_ex=10,  # the number of posterior trajectories to draw per example
+    obs_weight_schedule=step -> 1.0,  # returns a multiplier for the observation logpdf.
     callback::Function=_ -> nothing,
     weight_decay=1.0f-4,
 )
     gradient_time = optimization_time = callback_time = smoothing_time = 0.0
     n_examples = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
-    @smart_assert n_examples >= trajs_per_step > 0
+    @smart_assert n_examples >= examples_per_step > 0
     T = length(obs_seq)
 
     all_ps = Flux.params(motion_model.core)
@@ -47,7 +48,8 @@ function train_dynamics_em!(
     @info "total number of regular parameters: $(length(reg_ps))"
 
     for step in 1:n_steps
-        ex_ids = shuffle(1:n_examples)[1:trajs_per_step]
+        ex_ids = shuffle(1:n_examples)[1:examples_per_step]
+        obs_weight = obs_weight_schedule(step)
         log_obs_set = []
         core_in_set, core_out_set = BatchTuple[], BatchTuple[]
         foreach(ex_ids) do ex_id
@@ -59,7 +61,7 @@ function train_dynamics_em!(
                     x0,
                     (; times, obs_frames, controls, observations);
                     motion_model=sampling_model,
-                    obs_model,
+                    logpdf_obs=(args...) -> logpdf_obs(args...) * obs_weight,
                     record_io=true,
                     showprogress=false,
                 )
@@ -93,7 +95,7 @@ function train_dynamics_em!(
             end
         end
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
-        callback_args = (; step, loss=val, log_obs, lr=optimizer.eta, time_stats)
+        callback_args = (; step, loss=val, log_obs, obs_weight, lr=optimizer.eta, time_stats)
         callback_time += @elapsed callback(callback_args)
     end
     @info "Training finished ($n_steps steps)."

@@ -16,6 +16,7 @@ using Random
 using Statistics
 using Setfield
 using BSON: BSON
+using Distributions: logpdf
 
 !true && begin
     include("../src/SEDL.jl")
@@ -120,7 +121,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=σ_bearing, vel=0.4, ω=0.4)
+    let σs = (pos=0.1, angle_2d=σ_bearing) #, vel=0.4, ω=0.4)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -128,6 +129,7 @@ else
         state -> SEDL.landmark_obs_model_warp(state, (; landmarks=landmark_tensor, σ_bearing))
     end
 end
+logpdf_obs(x, y) = logpdf(obs_model(x), y)
 
 data_train, data_test = if data_source isa SimulationData
     true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
@@ -184,7 +186,7 @@ function plot_posterior(
     plot_args...,
 )
     pf_trajs = SEDL.sample_posterior_pf(
-        motion_model, obs_model, data, sample_id; n_particles, n_trajs, obs_frames
+        motion_model, logpdf_obs, data, sample_id; n_particles, n_trajs, obs_frames
     )
     plot_batched_series(
         data.times, pf_trajs; truth=getindex.(data.states, sample_id), plot_args...
@@ -202,7 +204,7 @@ function plot_core_io(
 )
     pf_trajs, core_in, core_out = SEDL.sample_posterior_pf(
         motion_model,
-        obs_model,
+        logpdf_obs,
         data,
         sample_id;
         n_particles,
@@ -226,7 +228,7 @@ function posterior_metrics(
 )
     rows = @showprogress 0.1 "posterior_metrics" map(1:n_repeats) do _
         SEDL.estimate_posterior_quality(
-            motion_model, obs_model, data; n_particles, obs_frames, state_L2_loss
+            motion_model, logpdf_obs, data; n_particles, obs_frames, state_L2_loss
         )
     end
     if n_repeats == 1
@@ -374,7 +376,7 @@ if !load_trained && (train_method == :EM)
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
             learned_motion_model,
-            obs_model,
+            logpdf_obs,
             data_train.states[1],
             data_train.observations,
             data_train.controls,
@@ -382,12 +384,8 @@ if !load_trained && (train_method == :EM)
             optimizer=adam,
             n_steps,
             n_particles,
-            trajs_per_step=1,
-            # sampling_model=motion_model,
             callback=em_callback(learned_motion_model; n_steps, test_every=500),
-            # lr_schedule=let β = 20^2 / total_steps
-            #     step -> 1e-3 / sqrt(β * step)
-            # end,
+            obs_weight_schedule=step -> 0.1 # linear(1e-3, 1.0)(min(1, 1.2step / n_steps))
         )
     end
     save_model_weights!()
@@ -505,7 +503,7 @@ end
                         observations=getindex.(data_train.observations, i),
                     );
                     motion_model=simplifed_model,
-                    obs_model,
+                    logpdf_obs,
                     showprogress=false,
                 )
                 pf_trajs = SEDL.batched_trajectories(pf_result, data_multiplicity)
@@ -655,13 +653,13 @@ if !load_trained && train_method == :VI
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
 
-        n_repeat = 10
+        n_repeat = min(10, 1024 ÷ n_train_ex)
         vi_x0 = repeat(data_train.states[1], n_repeat)
         vi_obs_seq = repeat.(data_train.observations, n_repeat)
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; max_iters_to_wait=999999)# turned off
+        es = SEDL.EarlyStopping(; max_iters_to_wait=999999)  # turned off
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,

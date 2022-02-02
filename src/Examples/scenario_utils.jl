@@ -506,7 +506,7 @@ end
 
 function sample_posterior_pf(
     motion_model,
-    obs_model,
+    logpdf_obs,
     (; times, states, controls, observations),
     sample_id=1;
     n_particles=100_000,
@@ -524,7 +524,7 @@ function sample_posterior_pf(
             observations=getindex.(observations, sample_id),
         );
         motion_model,
-        obs_model,
+        logpdf_obs,
         record_io,
         showprogress=false,
     )
@@ -564,7 +564,7 @@ Returns (; log_obs, RMSE)
 """
 function estimate_posterior_quality(
     motion_model,
-    obs_model,
+    logpdf_obs,
     data;
     state_L2_loss,
     obs_frames=nothing,
@@ -585,7 +585,7 @@ function estimate_posterior_quality(
             );
             motion_model,
             showprogress=false,
-            obs_model,
+            logpdf_obs,
         )
         post_traj = SEDL.batched_trajectories(pf_result, 1000)
         true_traj = getindex.(data.states, sample_id)

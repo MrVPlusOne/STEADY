@@ -93,11 +93,14 @@ function observation_logp(
 end
 ##-----------------------------------------------------------
 # batched particle filtering
+"""
+The observation likelihood should be a function of the form `logpdf_obs(state, obs) -> logp`.
+"""
 function batched_particle_filter(
     x0::BatchTuple,
     (; times, obs_frames, controls, observations);
     motion_model::BatchedMotionModel,
-    obs_model,
+    logpdf_obs, 
     record_io=false,
     resample_threshold::Float64=0.5,
     showprogress=true,
@@ -127,7 +130,7 @@ function batched_particle_filter(
     )
     for t in 1:T
         if t in obs_frames
-            lp = logpdf(obs_model(particles[t]), observations[t]::BatchTuple)
+            lp = logpdf_obs(particles[t], observations[t]::BatchTuple)
             @smart_assert length(lp) == N
             log_weights += reshape(lp, N)
             log_z_t = logsumexp(log_weights)
