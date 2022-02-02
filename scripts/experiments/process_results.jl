@@ -50,6 +50,7 @@ function print_baseline_tables()
         ("Hover-Fixed", "results/comparisons-hovercraft-fixed_var.csv"),
         ("Hover-Gaussian", "results/comparisons-hovercraft-gaussian.csv"),
         ("RealCar", "results/comparisons-real.csv"),
+        ("RealCar-Gaussian", "results/comparisons-real-gaussian.csv"),
     ]
 
     println("==== State estimation RMSE ====")
@@ -73,5 +74,5 @@ function plot_perf_vs_noise()
     )
 end
 
-
+print_baseline_tables()
 plot_perf_vs_noise()
