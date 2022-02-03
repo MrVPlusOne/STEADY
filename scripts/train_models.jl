@@ -281,7 +281,7 @@ save_dir = let prefix = is_quick_test ? "sims-quick" : "sims"
     save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test))
     SEDL.data_dir(
         prefix,
-        savename("train_models-$(summary(scenario))", script_args; connector="-"),
+        savename("train_models-$(summary(scenario))", save_args; connector="-"),
     )
 end
 
@@ -389,11 +389,11 @@ if !load_trained && (train_method == :EM)
     with_alert("EM training") do
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
-        es = SEDL.EarlyStopping(9999)
+        es = SEDL.EarlyStopping(; patience=9999)
         obs_weight_schedule = if use_obs_weight_schedule
-            linear(1e-3, 1.0)(min(max_obs_weight, step / n_steps))
+            step -> linear(1e-3, 1.0)(min(max_obs_weight, step / n_steps))
         else
-            max_obs_weight
+            step -> max_obs_weight
         end
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
@@ -409,7 +409,7 @@ if !load_trained && (train_method == :EM)
             callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
             obs_weight_schedule,
         )
-        @info "Best model: $(es.best_model)" 
+        @info "Best model: $(es.model_info)" 
     end
     load_model_weights!()
 end
@@ -501,7 +501,7 @@ end
 !load_trained &&
     (train_method ∈ [:Super_TV, :Super_noiseless, :Super_Hand]) &&
     let
-        data_multiplicity = (train_method == :Super_Hand) ? 10 : 1
+        data_multiplicity = (train_method == :Super_Hand) ? max(128 ÷ n_train_ex, 1) : 1
         states_train = if train_method == :Super_TV
             est_result = SEDL.estimate_states_from_observations_SE2(
                 scenario,
@@ -572,7 +572,7 @@ end
         with_alert("Supervised training") do
             total_steps = 50_000
             n_steps = is_quick_test ? 3 : total_steps + 1
-            es = SEDL.EarlyStopping(; max_iters_to_wait=100)
+            es = SEDL.EarlyStopping(; patience=100)
             SEDL.train_dynamics_supervised!(
                 learned_motion_model.core,
                 BatchTuple(core_in_set),
@@ -584,7 +584,7 @@ end
                     learned_motion_model, es; n_steps, test_every=50
                 ),
             )
-            @info "Best model: $(es.best_model)" 
+            @info "Best model: $(es.model_info)" 
         end
         load_model_weights!()
     end
@@ -682,7 +682,7 @@ if !load_trained && train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; max_iters_to_wait=9999)  # turned off
+        es = SEDL.EarlyStopping(; patience=9999)  # turned off
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -699,7 +699,7 @@ if !load_trained && train_method == :VI
             ),
         )
         display(train_result)
-        @info "Best model: $(es.best_model)" 
+        @info "Best model: $(es.model_info)" 
         load_model_weights!()
     end
     # save the model weights

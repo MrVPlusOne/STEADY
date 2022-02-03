@@ -1,7 +1,6 @@
-# todo: change to callback-based
 @kwdef mutable struct EarlyStopping
-    max_iters_to_wait::Int
-    best_model::Any = nothing
+    patience::Int
+    model_info::Any = nothing
     best_loss::Real = Inf
     iters_waited::Int = 0
 end
@@ -9,13 +8,13 @@ end
 function (early_stopping::EarlyStopping)(current_loss::Real, model_info, save_model_f)
     if current_loss < early_stopping.best_loss
         early_stopping.best_loss = current_loss
-        early_stopping.best_model = model_info
+        early_stopping.model_info = model_info
         early_stopping.iters_waited = 0
         save_model_f()
     else
         early_stopping.iters_waited += 1
     end
-    should_stop = early_stopping.iters_waited >= early_stopping.max_iters_to_wait
+    should_stop = early_stopping.iters_waited >= early_stopping.patience
     (; should_stop)
 end
 
@@ -141,6 +140,7 @@ function train_dynamics_supervised!(
     n_steps::Int,
     lr_schedule=nothing,
     callback::Function=_ -> nothing,
+    max_batch_size=1024,
     weight_decay=1.0f-4,
 )
     gradient_time = optimization_time = callback_time = smoothing_time = 0.0
@@ -151,8 +151,13 @@ function train_dynamics_supervised!(
     reg_ps = Flux.Params(collect(regular_params(motion_core)))
     @info "total number of regular parameters: $(length(reg_ps))"
 
-    loss() =
-        -transition_logp(motion_core, core_input, core_output, Δt) / core_input.batch_size
+    n_data = core_input.batch_size
+    mini_batch_size = min(max_batch_size, n_data)
+
+    loss() = begin
+        ids = sample(1:n_data, mini_batch_size, replace=false)
+        -transition_logp(motion_core, core_input[ids], core_output[ids], Δt) / core_input.batch_size
+    end
 
     steps_trained = 0
     for step in 1:n_steps
