@@ -627,7 +627,7 @@ function vi_callback(
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
             should_stop =
-                early_stopping(-test_scores.log_obs, (; r.step), save_model_weights!).should_stop
+                early_stopping(-test_scores.RMSE, (; r.step), save_model_weights!).should_stop
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -682,7 +682,7 @@ if !load_trained && train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; max_iters_to_wait=999999)  # turned off
+        es = SEDL.EarlyStopping(; max_iters_to_wait=9999)  # turned off
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -695,7 +695,7 @@ if !load_trained && train_method == :VI
             n_steps,
             anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.2step / n_steps)),
             callback=vi_callback(
-                learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1
+                learned_motion_model, es; n_steps, test_every=500, trajs_per_ex=1
             ),
         )
         display(train_result)

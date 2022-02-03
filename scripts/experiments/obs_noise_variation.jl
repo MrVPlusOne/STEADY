@@ -5,24 +5,24 @@ my_include = include # to avoid mess up the VSCode linter
 perf_list = []
 
 let ° = π / 180
-
-    for σ_bearing in [1°] # [5°, 1°, 2.5°, 10°, 20°]
+    # for obs_w in [0.1, 0.4, 1.0], schedule in [true, false]
+    for obs_w in [0.1], schedule in [true, false]
+    # for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
         # you can find the available args inside `train_models.jl`.
         global script_args = (;
-            gpu_id=7,
-            σ_bearing,
-            exp_name="obs_weight=0.1, σ_bearing=$(σ_bearing/°)°",
+            gpu_id=1,
+            is_quick_test=true,
+            σ_bearing=1°,
+            use_obs_weight_schedule=schedule,
+            max_obs_weight=obs_w,
+            max_train_steps=20_000,
+            exp_name="obs_w=$obs_w, schedule=$(schedule)",
         )
         my_include("../train_models.jl")
         push!(perf_list, Main.perf)
-
-        dest_dir = SEDL.data_dir("obs_noise_variation/$(Main.exp_name)")
-        isdir(dest_dir) && rm(dest_dir; recursive=true)
-        mkpath(dirname(dest_dir))
-        run(`cp -r "$(Main.save_dir)/tb_logs" "$dest_dir"`)
     end
 end
 
-result_path = joinpath("results", "obs_noise_variation.csv")
+result_path = joinpath("results", "obs_schedule_variation.csv")
 DataFrame(perf_list) |> display
 CSV.write(result_path, DataFrame(perf_list))
