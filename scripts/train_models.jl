@@ -52,6 +52,8 @@ end
     train_method,
     n_train_ex,
     lr,
+    max_obs_weight,
+    use_obs_weight_schedule,
     max_train_steps,
     exp_name,
     n_particles,
@@ -69,6 +71,8 @@ end
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
         n_train_ex=16,  # number of training trajectories when using simulation data
         lr=1e-4,
+        max_obs_weight=1.0,
+        use_obs_weight_schedule=false,
         max_train_steps=40_000,
         exp_name=nothing,
         n_particles=20_000,  # how many particles to use for the EM training.
@@ -273,14 +277,20 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-save_dir = SEDL.data_dir(
-    "sims", savename("train_models-$(summary(scenario))", script_args; connector="-")
-)
+save_dir = let prefix = is_quick_test ? "sims-quick" : "sims"
+    save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test))
+    SEDL.data_dir(
+        prefix,
+        savename("train_models-$(summary(scenario))", script_args; connector="-"),
+    )
+end
+
 if !load_trained && isdir(save_dir)
     @warn "removing old data at $save_dir..."
     rm(save_dir; recursive=true)
     @tagsave(joinpath(save_dir, "settings.bson"), @dict(script_args))
 end
+mkpath(joinpath(save_dir, ".."))
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
 @info """To view tensorboard logs, use the following command: 
@@ -324,17 +334,23 @@ adam = Flux.ADAM(lr)
 ##-----------------------------------------------------------
 # train the model using expectation maximization
 
-function em_callback(learned_motion_model::BatchedMotionModel; n_steps, test_every=100)
+function em_callback(
+    learned_motion_model::BatchedMotionModel,
+    early_stopping::SEDL.EarlyStopping;
+    n_steps,
+    test_every=100,
+)
     prog = Progress(n_steps; showspeed=true)
     function (r)
         Base.with_logger(logger) do
-            @info "training" r.log_obs r.loss r.lr
+            @info "training" r.log_obs r.loss r.lr r.obs_weight
             @info "statistics" r.time_stats... log_step_increment = 0
         end
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
             test_scores = posterior_metrics(learned_motion_model, data_test)
+            early_stopping(test_scores.RMSE, (step=r.step,), save_model_weights!)
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -373,6 +389,12 @@ if !load_trained && (train_method == :EM)
     with_alert("EM training") do
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
+        es = SEDL.EarlyStopping(9999)
+        obs_weight_schedule = if use_obs_weight_schedule
+            linear(1e-3, 1.0)(min(max_obs_weight, step / n_steps))
+        else
+            max_obs_weight
+        end
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_em!(
             learned_motion_model,
@@ -384,11 +406,12 @@ if !load_trained && (train_method == :EM)
             optimizer=adam,
             n_steps,
             n_particles,
-            callback=em_callback(learned_motion_model; n_steps, test_every=500),
-            obs_weight_schedule=step -> 0.1 # linear(1e-3, 1.0)(min(1, 1.2step / n_steps))
+            callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
+            obs_weight_schedule,
         )
+        @info "Best model: $(es.best_model)" 
     end
-    save_model_weights!()
+    load_model_weights!()
 end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
@@ -423,7 +446,7 @@ function supervised_callback(
             Base.with_logger(logger) do
                 @info("testing", test_loss, log_step_increment = 0)
             end
-            should_stop = early_stopping(test_loss, save_model_weights!).should_stop
+            should_stop = early_stopping(test_loss, (;r.step), save_model_weights!).should_stop
         else
             should_stop = false
         end
@@ -561,9 +584,9 @@ end
                     learned_motion_model, es; n_steps, test_every=50
                 ),
             )
-            load_model_weights!()
+            @info "Best model: $(es.best_model)" 
         end
-        save_model_weights!()
+        load_model_weights!()
     end
 ##-----------------------------------------------------------
 # train the guide using variational inference
@@ -604,7 +627,7 @@ function vi_callback(
 
             test_scores = posterior_metrics(learned_motion_model, data_test)
             should_stop =
-                early_stopping(-test_scores.log_obs, save_model_weights!).should_stop
+                early_stopping(-test_scores.log_obs, (; r.step), save_model_weights!).should_stop
 
             Base.with_logger(logger) do
                 @info "testing" test_scores... log_step_increment = 0
@@ -674,11 +697,9 @@ if !load_trained && train_method == :VI
             callback=vi_callback(
                 learned_motion_model, es; n_steps, test_every=200, trajs_per_ex=1
             ),
-            # lr_schedule=let β = 10^2 / total_steps
-            #     step -> 1e-4 / sqrt(β * step)
-            # end,
         )
         display(train_result)
+        @info "Best model: $(es.best_model)" 
         load_model_weights!()
     end
     # save the model weights

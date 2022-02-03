@@ -593,12 +593,8 @@ function estimate_posterior_quality(
             map(1:length(true_traj), true_traj, post_traj) do t, x1, x2
                 state_L2_loss(x1, x2; include_velocity=true) |> mean
             end |> mean |> sqrt
-        local RMSE_pos::Real =
-            map(true_traj, post_traj) do x1, x2
-                state_L2_loss(x1, x2; include_velocity=false) |> mean
-            end |> mean |> sqrt
         next!(prog)
-        (; pf_result.log_obs, RMSE, RMSE_pos)
+        (; pf_result.log_obs, RMSE)
     end
     named_tuple_reduce(metric_rows, mean)
 end

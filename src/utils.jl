@@ -209,7 +209,15 @@ Base.inv(trans::NormalTransform{<:NamedTuple}) =
     end
 ##-----------------------------------------------------------
 # utility functions
-export hcatreduce, vcatreduce, specific_elems
+export hcatreduce, dropnames, vcatreduce, specific_elems
+
+"""
+Drop the compoenents of a NamedTuple.
+"""
+function dropnames(namedtuple::NamedTuple, names::Tuple{Vararg{Symbol}}) 
+    keepnames = Base.diff_names(Base._nt_names(namedtuple), names)
+   return NamedTuple{keepnames}(namedtuple)
+end
 
 specific_elems(xs::AbstractArray{T}) where {T} = Base.isconcretetype(T) ? xs : identity.(xs)
 
