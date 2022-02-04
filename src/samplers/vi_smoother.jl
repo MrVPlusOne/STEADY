@@ -47,7 +47,7 @@ function (motion_model::BatchedMotionModel{TC})(
     check_type(TC(), Δt)
     assert_finite(x)
     assert_finite(u)
-    bs = common_batch_size(x.batch_size, u.batch_size)
+    bs = common_batch_size(x, u)
     sketch, core = motion_model.sketch, motion_model.core
 
     core_input = assert_finite(sketch.state_to_input(x, u))::BatchTuple{TC}

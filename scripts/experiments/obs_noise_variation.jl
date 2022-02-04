@@ -5,7 +5,7 @@ my_include = include # to avoid mess up the VSCode linter
 perf_list = []
 
 let ° = π / 180
-    for obs_w in [0.1, 0.4, 1.0], schedule in [false]
+    for obs_w in [0.4, 1.0], schedule in [false]
     # for obs_w in [0.1], schedule in [true, false]
     # for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
         # you can find the available args inside `train_models.jl`.
@@ -26,3 +26,5 @@ end
 result_path = joinpath("results", "obs_schedule_variation_false.csv")
 DataFrame(perf_list) |> display
 CSV.write(result_path, DataFrame(perf_list))
+
+CSV.read(joinpath("results", "obs_schedule_variation.csv"), DataFrame)

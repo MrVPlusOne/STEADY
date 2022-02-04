@@ -8,79 +8,12 @@ using ForwardDiff: Dual
 # import ReverseDiff
 using LineSearches: LineSearches
 using Logging: Logging
+using SmartAsserts: @smart_assert
 
 ##-----------------------------------------------------------
 # macros
 export @unzip, @unzip_named, @smart_assert, @use_short_show
 
-"""
-Like @assert, but try to also print out additional information about the arguments.
-Note that each argument is only evaluated once, so there is no extra overhead compared 
-to a normal assert.
-## Examples
-```julia
-julia> let a=4, b=2; @smart_assert(a < b, "Some extra info.") end
-
-ERROR: LoadError: AssertionError: Some extra info. | Caused by: Condition `a < b` failed due to:
-        `a` evaluates to 4
-        `b` evaluates to 2
-Stacktrace:
-...
-```
-"""
-macro smart_assert(ex, msg=nothing)
-    has_msg = msg !== nothing
-    is_type_assert = @capture(ex, t1_ <: t2_)
-    if is_type_assert
-        args = (t1, t2)
-        to_cond_ex = arg_names -> Expr(:(<:), arg_names...)
-    else
-        is_func_call =
-            @capture(ex, op_(args__)) && !any(a -> a isa Expr && a.head == :kw, args)
-        if is_func_call
-            to_cond_ex = arg_names -> Expr(:call, esc(op), arg_names...)
-        end
-    end
-    if is_type_assert || is_func_call
-        ex_q = QuoteNode(ex)
-        args_q = Expr(:tuple, QuoteNode.(args)...)
-        arg_names = [gensym("arg$i") for i in 1:length(args)]
-        cond_ex = to_cond_ex(arg_names)
-        assigns = Expr(
-            :block, (Expr(:(=), n, esc(e)) for (n, e) in zip(arg_names, args))...
-        )
-        args_tuple = Expr(:tuple, arg_names...)
-        @q begin
-            $assigns
-            if !$(cond_ex)
-                eval_string = join(
-                    [
-                        "\t`$ex` evaluates to $val" for
-                        (ex, val) in zip($args_q, $args_tuple)
-                    ],
-                    "\n",
-                )
-                reason_text = "Condition `$($ex_q)` failed due to:\n" * eval_string
-                if $has_msg
-                    msg_v = $(esc(msg))
-                    throw(AssertionError("$msg_v | Caused by: $reason_text"))
-                else
-                    throw(AssertionError(reason_text))
-                end
-            end
-        end
-    else
-        if has_msg
-            esc(:(@assert($ex, $msg)))
-        else
-            esc(:(@assert($ex)))
-        end
-    end
-end
-
-function test_smart_assert()
-    @smart_assert typeof(1) <: Int
-end
 
 """
 Specify that the given type `t` should be displayed as `"t{...}"`.
