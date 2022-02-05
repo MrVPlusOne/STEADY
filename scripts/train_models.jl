@@ -15,8 +15,8 @@ using Alert
 using Random
 using Statistics
 using Setfield
-using BSON: BSON
 using Distributions: logpdf
+using CSV: CSV
 
 !true && begin
     include("../src/SEDL.jl")
@@ -33,7 +33,7 @@ if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
         is_quick_test=true,
-        gpu_id=1,
+        gpu_id=7,
         use_simple_obs_model=true,
         train_method=:EM,
         n_particles=1000,
@@ -106,9 +106,10 @@ tconf = SEDL.TensorConfig(use_gpu, Float32)
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
-    SimulationData(; n_train_ex, n_test_ex=32, times=0:tconf(0.1):10)
+    SimulationData(; n_train_ex, n_valid_ex=32, n_test_ex=32, times=0:tconf(0.1):10)
 else
     RealData(
+        SEDL.data_dir("real_data", "difficult"),
         SEDL.data_dir("real_data", "simple_loop"),
         SEDL.data_dir("real_data", "simple_loop_test"),
     )
@@ -135,7 +136,7 @@ else
 end
 logpdf_obs(x, y) = logpdf(obs_model(x), y)
 
-data_train, data_test = if data_source isa SimulationData
+data_train, data_valid, data_test = if data_source isa SimulationData
     true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
     motion_model = SEDL.BatchedMotionModel(
         tconf, sketch, SEDL.batched_core(scenario, true_params)
@@ -349,11 +350,11 @@ function em_callback(
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
-            test_scores = posterior_metrics(learned_motion_model, data_test)
-            early_stopping(test_scores.RMSE, (step=r.step,), save_model_weights!)
+            valid_scores = posterior_metrics(learned_motion_model, data_valid)
+            early_stopping(valid_scores.RMSE, (step=r.step,), save_model_weights!)
 
             Base.with_logger(logger) do
-                @info "testing" test_scores... log_step_increment = 0
+                @info "validation" valid_scores... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -423,15 +424,15 @@ function supervised_callback(
     plot_every=2_500,
 )
     prog = Progress(n_steps; showspeed=true)
-    test_in_set, test_out_set = SEDL.input_output_from_trajectory(
-        learned_motion_model.sketch, data_test.states, data_test.controls, data_test.times
+    valid_in_set, valid_out_set = SEDL.input_output_from_trajectory(
+        learned_motion_model.sketch, data_valid.states, data_valid.controls, data_test.times
     )
-    test_input = BatchTuple(test_in_set)
-    test_output = BatchTuple(test_out_set)
-    compute_test_loss() =
+    valid_input = BatchTuple(valid_in_set)
+    valid_output = BatchTuple(valid_out_set)
+    compute_valid_loss() =
         -SEDL.transition_logp(
-            learned_motion_model.core, test_input, test_output, data_test.Δt
-        ) / test_input.batch_size
+            learned_motion_model.core, valid_input, valid_output, data_valid.Δt
+        ) / valid_input.batch_size
 
 
     function (r)
@@ -442,11 +443,11 @@ function supervised_callback(
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
-            test_loss = compute_test_loss()
+            valid_loss = compute_valid_loss()
             Base.with_logger(logger) do
-                @info("testing", test_loss, log_step_increment = 0)
+                @info("validation", valid_loss, log_step_increment = 0)
             end
-            should_stop = early_stopping(test_loss, (;r.step), save_model_weights!).should_stop
+            should_stop = early_stopping(valid_loss, (;r.step), save_model_weights!).should_stop
         else
             should_stop = false
         end
@@ -625,12 +626,12 @@ function vi_callback(
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            test_scores = posterior_metrics(learned_motion_model, data_test)
+            valid_scores = posterior_metrics(learned_motion_model, data_valid)
             should_stop =
-                early_stopping(-test_scores.RMSE, (; r.step), save_model_weights!).should_stop
+                early_stopping(-valid_scores.RMSE, (; r.step), save_model_weights!).should_stop
 
             Base.with_logger(logger) do
-                @info "testing" test_scores... log_step_increment = 0
+                @info "validation" valid_scores... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -738,9 +739,11 @@ function evaluate_model(motion_model, data_test, name)
     (; name, metrics..., open_loop)
 end
 
-@info "Testing dynamics model performance on the test set"
+println("Testing dynamics model final performance...")
 exp_name = isnothing(exp_name) ? string(train_method) : exp_name
-perf = evaluate_model(learned_motion_model, data_test, exp_name)
-DataFrame([perf]) |> display
-wsave(joinpath(save_dir, "logp_obs_table.bson"), @dict perf)
+test_performance = evaluate_model(learned_motion_model, data_test, exp_name)
+valid_performance = evaluate_model(learned_motion_model, data_valid, "(valid) $exp_name")
+perf_table = DataFrame([valid_performance, test_performance])
+display(perf_table)
+CSV.write(joinpath(save_dir, "performance.csv"), perf_table)
 ##-----------------------------------------------------------
