@@ -72,7 +72,7 @@ end
         n_train_ex=16,  # number of training trajectories when using simulation data
         lr=1e-4,
         max_obs_weight=1.0,
-        use_obs_weight_schedule=false,
+        use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
         max_train_steps=40_000,
         exp_name=nothing,
         n_particles=20_000,  # how many particles to use for the EM training.
@@ -246,7 +246,7 @@ end
 function with_alert(task::Function, task_name::String)
     try
         local result = task()
-        is_quick_test || alert("$task_name finished.")
+        is_quick_test || alert("$task_name finished. Setting: $script_args.")
         result
     catch e
         alert("$task_name stopped due to exception: $(summary(e)).")
@@ -351,7 +351,7 @@ function em_callback(
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
             valid_scores = posterior_metrics(learned_motion_model, data_valid)
-            early_stopping(valid_scores.RMSE, (step=r.step,), save_model_weights!)
+            early_stopping(-valid_scores.log_obs, (step=r.step,), save_model_weights!)
 
             Base.with_logger(logger) do
                 @info "validation" valid_scores... log_step_increment = 0
@@ -570,7 +570,7 @@ end
 
         @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
-        with_alert("Supervised training") do
+        let
             total_steps = 50_000
             n_steps = is_quick_test ? 3 : total_steps + 1
             es = SEDL.EarlyStopping(; patience=100)
@@ -628,7 +628,7 @@ function vi_callback(
 
             valid_scores = posterior_metrics(learned_motion_model, data_valid)
             should_stop =
-                early_stopping(-valid_scores.RMSE, (; r.step), save_model_weights!).should_stop
+                early_stopping(-valid_scores.log_obs, (; r.step), save_model_weights!).should_stop
 
             Base.with_logger(logger) do
                 @info "validation" valid_scores... log_step_increment = 0
