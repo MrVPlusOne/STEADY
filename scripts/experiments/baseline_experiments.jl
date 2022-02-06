@@ -5,7 +5,7 @@ SEDL.should_check_finite[] = false
 
 my_include = include # to avoid mess up the VSCode linter
 
-result_name = "comparisons-hovercraft-gaussian-fixed-128"
+result_name = "comparisons-hovercraft-16"
 mkpath("results")
 result_path = joinpath("results", "$result_name.csv")
 if isfile(result_path)
@@ -17,16 +17,16 @@ perf_list = []
 for train_method in [:Handwritten, :Super_Hand, :Super_TV, :Super_noiseless, :EM, :VI] # :VI
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
-        is_quick_test=true,
+        is_quick_test=false,
         scenario=SEDL.HovercraftScenario(),
-        n_train_ex=128,
-        gpu_id=7,
-        use_fixed_variance=true,
-        use_simple_obs_model=true,
+        n_train_ex=16,
+        gpu_id=Main.GPU_ID, # set this in the REPL before running the script
+        use_fixed_variance=false,
+        use_simple_obs_model=false,
         train_method,
     )
     my_include("../train_models.jl")
-    push!(perf_list, Main.perf)
+    push!(perf_list, Main.test_performance)
 end
 
 results = DataFrame(perf_list)

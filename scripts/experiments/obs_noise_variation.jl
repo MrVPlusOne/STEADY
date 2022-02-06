@@ -4,18 +4,20 @@ my_include = include # to avoid mess up the VSCode linter
 
 perf_list = []
 
+schedule = false
+σ_bearing_deg = 5.0
+
 let ° = π / 180
-    for obs_w in [0.4, 1.0], schedule in [false]
-    # for obs_w in [0.1], schedule in [true, false]
+    for obs_w in [0.2, 1.0, 1.5]
     # for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
         # you can find the available args inside `train_models.jl`.
         global script_args = (;
-            gpu_id=7,
+            gpu_id=Main.GPU_ID, # set this in the REPL before running the script
             # is_quick_test=true,
-            σ_bearing=1°,
+            σ_bearing=σ_bearing_deg * °,
             use_obs_weight_schedule=schedule,
             max_obs_weight=obs_w,
-            # max_train_steps=20_000,
+            max_train_steps=40_000,
             exp_name="obs_w=$obs_w, schedule=$(schedule)",
         )
         my_include("../train_models.jl")
@@ -23,7 +25,7 @@ let ° = π / 180
     end
 end
 
-result_path = joinpath("results", "obs_schedule_variation_false.csv")
+result_path = joinpath("results", "obs_schedule_variation_$(σ_bearing_deg)_$schedule.csv")
 DataFrame(perf_list) |> display
 CSV.write(result_path, DataFrame(perf_list))
 

@@ -95,7 +95,9 @@ function train_dynamics_em!(
             end
         end
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
-        callback_args = (; step, loss=val, log_obs, obs_weight, lr=optimizer.eta, time_stats)
+        callback_args = (;
+            step, loss=val, log_obs, obs_weight, lr=optimizer.eta, time_stats
+        )
         callback_time += @elapsed callback(callback_args)
     end
     @info "Training finished ($n_steps steps)."
@@ -154,13 +156,13 @@ function train_dynamics_supervised!(
     n_data = core_input.batch_size
     mini_batch_size = min(max_batch_size, n_data)
 
-    loss() = begin
-        ids = sample(1:n_data, mini_batch_size, replace=false)
-        -transition_logp(motion_core, core_input[ids], core_output[ids], Δt) / core_input.batch_size
-    end
-
     steps_trained = 0
     for step in 1:n_steps
+        ids = sample(1:n_data, mini_batch_size; replace=false)
+        loss() =
+            -transition_logp(motion_core, core_input[ids], core_output[ids], Δt) /
+            core_input.batch_size
+
         step == 1 && loss() # just for testing
         gradient_time += @elapsed CUDA.@sync begin
             (; val, grad) = Flux.withgradient(loss, all_ps)
