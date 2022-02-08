@@ -1,12 +1,12 @@
 pkg_list = [
     :BenchmarkTools,
     :Bijectors,
-    # :CUDA,
+    :CUDA,
     :DataFrames,
     :DataStructures,
     :ProgressMeter,
     :ReverseDiff,
-    # :RuntimeGeneratedFunctions,
+    :RuntimeGeneratedFunctions,
     :StaticArrays,
     :Statistics,
     :StatsBase,
@@ -15,7 +15,7 @@ pkg_list = [
     :SymbolicRegression,
     :TensorBoardLogger,
     :ThreadPools,
-    # :Zygote,
+    :Zygote,
 ]
 
 using PackageCompiler

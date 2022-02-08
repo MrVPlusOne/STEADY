@@ -33,7 +33,7 @@ if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
         is_quick_test=true,
-        gpu_id=7,
+        gpu_id=1,
         use_simple_obs_model=true,
         train_method=:EM,
         n_particles=1000,

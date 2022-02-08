@@ -19,10 +19,10 @@ path_list = []
 # first, install julia
 if which("julia") is None:
     print("Installing Julia...")
-    subprocess.call(["wget", "https://julialang-s3.julialang.org/bin/linux/x64/1.7/julia-1.7.1-linux-x86_64.tar.gz", "-O", "julia-install.tar.gz"])
+    subprocess.call(["wget", "https://julialang-s3.julialang.org/bin/linux/x64/1.7/julia-1.7.2-linux-x86_64.tar.gz", "-O", "julia-install.tar.gz"])
     subprocess.call(["tar", "-xf", "julia-install.tar.gz"])
     subprocess.call(["rm", "julia-install.tar.gz"])
-    path_list.append(f"{os.getcwd()}/julia-1.7.1/bin")
+    path_list.append(f"{os.getcwd()}/julia-1.7.2/bin")
 
 julia_startup_path = Path(expanduser("~/.julia/config/startup.jl"))
 if not exists(julia_startup_path):
