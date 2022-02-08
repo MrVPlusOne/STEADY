@@ -5,10 +5,10 @@ my_include = include # to avoid mess up the VSCode linter
 perf_list = []
 
 schedule = false
-σ_bearing_deg = 5.0
+σ_bearing_deg = 1.0
 
 let ° = π / 180
-    for obs_w in [0.2, 1.0, 1.5]
+    for obs_w in [0.25, 4.0]
     # for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
         # you can find the available args inside `train_models.jl`.
         global script_args = (;
@@ -21,12 +21,10 @@ let ° = π / 180
             exp_name="obs_w=$obs_w, schedule=$(schedule)",
         )
         my_include("../train_models.jl")
-        push!(perf_list, Main.perf)
+        push!(perf_list, Main.test_performance)
     end
 end
 
 result_path = joinpath("results", "obs_schedule_variation_$(σ_bearing_deg)_$schedule.csv")
 DataFrame(perf_list) |> display
 CSV.write(result_path, DataFrame(perf_list))
-
-CSV.read(joinpath("results", "obs_schedule_variation.csv"), DataFrame)

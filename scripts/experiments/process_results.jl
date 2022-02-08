@@ -59,7 +59,19 @@ function print_baseline_tables()
     show_baseline_comparison(data_paths, "open_loop")
 end
 
-function plot_perf_vs_noise() 
+function print_perf_vs_schedule() 
+    data_paths = [
+        ("σ=1°", "results/obs_schedule_variation_1.0.csv"),
+        ("σ=5°", "results/obs_schedule_variation_5.0.csv"),
+    ]
+
+    println("==== State estimation RMSE ====")
+    show_baseline_comparison(data_paths, "RMSE")
+    println("==== Forward prediction RMSE ====")
+    show_baseline_comparison(data_paths, "open_loop")
+end
+
+function print_perf_vs_noise() 
     table = CSV.read("results/obs_noise_variation.csv", DataFrame)
     RMSE = parse_measurement.(table[:, "RMSE"])
     open_loop = parse_measurement.(table[:, "open_loop"])
@@ -73,6 +85,8 @@ function plot_perf_vs_noise()
         alignment=:l,
     )
 end
+##-----------------------------------------------------------
 
 print_baseline_tables()
+print_perf_vs_schedule()
 plot_perf_vs_noise()

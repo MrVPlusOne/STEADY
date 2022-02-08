@@ -392,7 +392,7 @@ if !load_trained && (train_method == :EM)
         n_steps = is_quick_test ? 3 : total_steps + 1
         es = SEDL.EarlyStopping(; patience=9999)
         obs_weight_schedule = if use_obs_weight_schedule
-            step -> linear(1e-3, 1.0)(min(max_obs_weight, step / n_steps))
+            step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
             step -> max_obs_weight
         end
