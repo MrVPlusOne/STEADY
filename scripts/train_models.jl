@@ -51,6 +51,7 @@ end
     use_fixed_variance,
     train_method,
     n_train_ex,
+    validation_metric,
     lr,
     max_obs_weight,
     use_obs_weight_schedule,
@@ -70,6 +71,7 @@ end
         use_fixed_variance=false,
         train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
         n_train_ex=16,  # number of training trajectories when using simulation data
+        validation_metric=:RMSE,  # :RMSE or :log_obs
         lr=1e-4,
         max_obs_weight=1.0,
         use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
@@ -91,6 +93,13 @@ end
     merge(config, script_args::NamedTuple)
 end
 is_quick_test && @info "Quick testing model training..."
+
+println("--------------------")
+println("training settings: ")
+for (k, v) in pairs(script_args)
+    println("  $k: $v")
+end
+println("--------------------")
 
 Random.seed!(123)
 
@@ -272,6 +281,18 @@ function load_model_weights!()
     end
 end
 
+function save_best_model(es::SEDL.EarlyStopping, metrics::NamedTuple, model_info::NamedTuple)
+    loss = if validation_metric == :RMSE
+        metrics.RMSE
+    elseif validation_metric == :log_obs
+        -metrics.log_obs
+    else
+        error("Not implemented for metric: $validation_metric.")
+    end
+
+    es(loss, model_info, save_model_weights!)
+end
+
 use_sim_data && display(plot_posterior(motion_model, data_train; title="true posterior"))
 ##-----------------------------------------------------------
 # load or set up the NN models
@@ -345,16 +366,15 @@ function em_callback(
     function (r)
         Base.with_logger(logger) do
             @info "training" r.log_obs r.loss r.lr r.obs_weight
-            @info "statistics" r.time_stats... log_step_increment = 0
         end
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1
-            valid_scores = posterior_metrics(learned_motion_model, data_valid)
-            early_stopping(-valid_scores.log_obs, (step=r.step,), save_model_weights!)
+            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
 
             Base.with_logger(logger) do
-                @info "validation" valid_scores... log_step_increment = 0
+                @info "validation" valid_metrics... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -372,6 +392,8 @@ function em_callback(
                 end
                 # display(plt)
             end
+        else
+            to_stop = (; should_stop = false)
         end
 
         next!(
@@ -383,6 +405,7 @@ function em_callback(
                 (:learning_rate, r.lr),
             ],
         )
+        to_stop
     end
 end
 
@@ -390,7 +413,7 @@ if !load_trained && (train_method == :EM)
     with_alert("EM training") do
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
-        es = SEDL.EarlyStopping(; patience=9999)
+        es = SEDL.EarlyStopping(; patience=10)
         obs_weight_schedule = if use_obs_weight_schedule
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
@@ -438,18 +461,18 @@ function supervised_callback(
     function (r)
         Base.with_logger(logger) do
             @info "training" r.loss r.lr
-            @info "statistics" r.time_stats... log_step_increment = 0
         end
 
         # Compute test log_obs and plot a few trajectories.
-        if r.step % test_every == 1
+        to_stop = if r.step % test_every == 1
             valid_loss = compute_valid_loss()
             Base.with_logger(logger) do
                 @info("validation", valid_loss, log_step_increment = 0)
             end
-            should_stop = early_stopping(valid_loss, (;r.step), save_model_weights!).should_stop
+            # TODO: might need to change this to other metric
+            early_stopping(valid_loss, (;r.step), save_model_weights!)
         else
-            should_stop = false
+            (; should_stop = false)
         end
         if r.step % plot_every == 1
             test_metrics = posterior_metrics(learned_motion_model, data_test)
@@ -475,7 +498,7 @@ function supervised_callback(
         end
 
         next!(prog; showvalues=[(:loss, r.loss), (:step, r.step), (:learning_rate, r.lr)])
-        (; should_stop)
+        to_stop
     end
 end
 
@@ -606,7 +629,6 @@ function vi_callback(
     function (r)
         Base.with_logger(logger) do
             @info "training" r.elbo r.obs_logp r.loss r.lr r.annealing
-            @info "statistics" r.time_stats... log_step_increment = 0
         end
 
         # Compute test elbo and plot a few trajectories.
@@ -626,12 +648,11 @@ function vi_callback(
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            valid_scores = posterior_metrics(learned_motion_model, data_valid)
-            should_stop =
-                early_stopping(-valid_scores.log_obs, (; r.step), save_model_weights!).should_stop
+            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            to_stop = save_best_model(early_stopping, valid_metrics, (; r.step))
 
             Base.with_logger(logger) do
-                @info "validation" valid_scores... log_step_increment = 0
+                @info "validation" valid_metrics... log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -655,7 +676,7 @@ function vi_callback(
                 end
             end
         else
-            should_stop = false
+            to_stop = (; should_stop = false)
         end
 
         next!(
@@ -668,7 +689,7 @@ function vi_callback(
                 (:learning_rate, r.lr),
             ],
         )
-        (; should_stop)
+        to_stop
     end
 end
 
@@ -683,7 +704,7 @@ if !load_trained && train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; patience=9999)  # turned off
+        es = SEDL.EarlyStopping(; patience=10)
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -703,8 +724,6 @@ if !load_trained && train_method == :VI
         @info "Best model: $(es.model_info)" 
         load_model_weights!()
     end
-    # save the model weights
-    save_model_weights!()
 end
 ##-----------------------------------------------------------
 plot_posterior(

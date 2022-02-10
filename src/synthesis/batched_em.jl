@@ -33,10 +33,9 @@ function train_dynamics_em!(
     examples_per_step=1, # the number of examples in each learning step
     trajs_per_ex=10,  # the number of posterior trajectories to draw per example
     obs_weight_schedule=step -> 1.0,  # returns a multiplier for the observation logpdf.
-    callback::Function=_ -> nothing,
+    callback::Function=_ -> (; should_stop = false),
     weight_decay=1.0f-4,
 )
-    gradient_time = optimization_time = callback_time = smoothing_time = 0.0
     n_examples = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
     @smart_assert n_examples >= examples_per_step > 0
     T = length(obs_seq)
@@ -56,22 +55,20 @@ function train_dynamics_em!(
             x0 = repeat(x0_batch[ex_id], n_particles)
             controls = getindex.(control_seq, ex_id)
             observations = getindex.(obs_seq, ex_id)
-            smoothing_time += @elapsed begin
-                local pf_result = batched_particle_filter(
-                    x0,
-                    (; times, obs_frames, controls, observations);
-                    motion_model=sampling_model,
-                    logpdf_obs=(args...) -> logpdf_obs(args...) * obs_weight,
-                    record_io=true,
-                    showprogress=false,
-                )
-                push!(log_obs_set, pf_result.log_obs)
-                (; core_input_seq, core_output_seq) = batched_trajectories(
-                    pf_result, trajs_per_ex; record_io=true
-                )
-                append!(core_in_set, core_input_seq)
-                append!(core_out_set, core_output_seq)
-            end
+            local pf_result = batched_particle_filter(
+                x0,
+                (; times, obs_frames, controls, observations);
+                motion_model=sampling_model,
+                logpdf_obs=(args...) -> logpdf_obs(args...) * obs_weight,
+                record_io=true,
+                showprogress=false,
+            )
+            push!(log_obs_set, pf_result.log_obs)
+            (; core_input_seq, core_output_seq) = batched_trajectories(
+                pf_result, trajs_per_ex; record_io=true
+            )
+            append!(core_in_set, core_input_seq)
+            append!(core_out_set, core_output_seq)
         end
         log_obs = mean(log_obs_set)
         n_trans = sum(x -> x.batch_size, core_in_set)
@@ -81,24 +78,20 @@ function train_dynamics_em!(
         loss() = -transition_logp(core, core_in_set, core_out_set, Δt) / n_trans
 
         step == 1 && loss() # just for testing
-        gradient_time += @elapsed CUDA.@sync begin
-            (; val, grad) = Flux.withgradient(loss, all_ps)
-            isfinite(val) || error("Loss is not finite: $val")
-        end
+        (; val, grad) = Flux.withgradient(loss, all_ps)
+        isfinite(val) || error("Loss is not finite: $val")
         if lr_schedule !== nothing
             optimizer.eta = lr_schedule(step)
         end
-        optimization_time += @elapsed CUDA.@sync begin
-            Flux.update!(optimizer, all_ps, grad) # update parameters
-            for p in reg_ps
-                p .-= weight_decay .* p
-            end
+            
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        for p in reg_ps
+            p .-= weight_decay .* p
         end
-        time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
         callback_args = (;
-            step, loss=val, log_obs, obs_weight, lr=optimizer.eta, time_stats
+            step, loss=val, log_obs, obs_weight, lr=optimizer.eta
         )
-        callback_time += @elapsed callback(callback_args)
+        callback(callback_args).should_stop && break
     end
     @info "Training finished ($n_steps steps)."
 end
@@ -141,7 +134,7 @@ function train_dynamics_supervised!(
     optimizer,
     n_steps::Int,
     lr_schedule=nothing,
-    callback::Function=_ -> nothing,
+    callback::Function=_ -> (; should_stop = false),
     max_batch_size=1024,
     weight_decay=1.0f-4,
 )
@@ -179,11 +172,12 @@ function train_dynamics_supervised!(
         end
         time_stats = (; gradient_time, optimization_time, smoothing_time, callback_time)
         callback_args = (; step, loss=val, lr=optimizer.eta, time_stats)
-        callback_time += @elapsed begin
+        callback_time += @elapsed CUDA.@sync begin
             to_stop = callback(callback_args).should_stop
         end
         steps_trained += 1
         to_stop && break
+        GC.gc(false)  # To avoid running out of memory on GPU.
     end
     @info "Training finished ($steps_trained / $n_steps steps trained)."
 end

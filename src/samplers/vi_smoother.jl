@@ -520,10 +520,10 @@ function train_VI!(
     n_steps::Int,
     anneal_schedule::Function=step -> 1.0,
     lr_schedule=nothing,
-    callback::Function=_ -> nothing,
+    callback::Function=_ -> (; should_stop = false),
     weight_decay=1.0f-4,
 )
-    guide_time = dynamics_time = gradient_time = obs_time = callback_time = 0.0
+    guide_time = dynamics_time = gradient_time = obs_time = 0.0
     batch_size = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
     T = length(obs_seq)
 
@@ -585,7 +585,7 @@ function train_VI!(
             p .-= weight_decay .* p
         end
 
-        time_stats = (; guide_time, dynamics_time, obs_time, gradient_time, callback_time)
+        time_stats = (; guide_time, dynamics_time, obs_time, gradient_time)
         callback_args = (;
             step,
             loss=val,
@@ -596,11 +596,9 @@ function train_VI!(
             lr=optimizer.eta,
             time_stats,
         )
-        callback_time += @elapsed begin
-            to_stop = callback(callback_args).should_stop
-        end
+        
         steps_trained += 1
-        to_stop && break
+        callback(callback_args).should_stop && break
     end
     @info "Training finished ($steps_trained / $n_steps steps trained)."
 end
