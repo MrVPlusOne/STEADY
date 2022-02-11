@@ -81,7 +81,8 @@ function landmark_obs_model_old(state::BatchTuple, (; landmarks, σ_bearing))
     bearing_mean = rotate2d(θ_neg, rel_dir)  # shape (n_landmarks, 2, batch_size)
     # make the measurement more uncertain when being too close
     σ_bearing1 =
-        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .* tconf(σ_bearing)
+        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .*
+        tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     # range_mean = distance[:, 1, :]  # shape (n_landmarks, batch_size)
@@ -130,7 +131,8 @@ function landmark_obs_model_warp(state::BatchTuple, (; landmarks, σ_bearing))
     bearing_mean = _restrict_angle.(rel_angle .- reshape(θ, 1, 1, :))  # shape (n_landmarks, 1, batch_size)
     # make the measurement more uncertain when being too close
     σ_bearing1 =
-        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .* tconf(σ_bearing)
+        (x -> ifelse(x <= 0.1f0, min(0.1f0 / x, 10.0f0), one(x))).(distance) .*
+        tconf(σ_bearing)
     @smart_assert size(σ_bearing1) == (n_landmarks, 1, batch_size)
 
     GenericSamplable(;
@@ -929,6 +931,7 @@ function estimate_states_from_observations_SE2(
     obs_seq,
     true_states,
     Δt;
+    observe_velocities::Bool,
     n_steps=5000,
     showprogress=true,
 )
@@ -946,21 +949,37 @@ function estimate_states_from_observations_SE2(
         next!(prog)
         (; should_stop=false)
     end
-    poses_est::BatchTuple = SEDL.optimize_states_from_observations(
-        sce,
-        obs_model,
-        observations,
-        poses_guess;
-        optimizer,
-        n_steps,
-        lr_schedule=nothing,
-        callback,
-    )
-    pose0 = BatchTuple(true_states[1]) do (; pos, angle_2d)
-        (; pos, angle_2d)
+    states = if observe_velocities
+        states_tuple::BatchTuple = SEDL.optimize_states_from_observations(
+            sce,
+            obs_model,
+            observations,
+            states_guess;
+            observe_velocities,
+            optimizer,
+            n_steps,
+            lr_schedule=nothing,
+            callback,
+        )
+        vcat(true_states[1], split(states_tuple, T - 1))
+    else
+        poses_est::BatchTuple = SEDL.optimize_states_from_observations(
+            sce,
+            obs_model,
+            observations,
+            poses_guess;
+            observe_velocities,
+            optimizer,
+            n_steps,
+            lr_schedule=nothing,
+            callback,
+        )
+        pose0 = BatchTuple(true_states[1]) do (; pos, angle_2d)
+            (; pos, angle_2d)
+        end
+        poses = vcat(pose0, split(poses_est, T - 1))
+        states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps ÷ 5)
     end
-    poses = vcat(pose0, split(poses_est, T - 1))
-    states = states_from_poses_tv(poses, Δt; α=0.01, n_iters=n_steps ÷ 5)
     (; states, loss_history)
 end
 
@@ -972,6 +991,7 @@ function optimize_states_from_observations(
     obs_model,
     observations::BatchTuple,
     state_guess::BatchTuple;
+    observe_velocities::Bool,
     optimizer,
     n_steps,
     lr_schedule,
@@ -982,12 +1002,16 @@ function optimize_states_from_observations(
         "There must be an observation for each state"
     )
 
-    vars = pose_to_opt_vars(sce)(deepcopy(state_guess))
+    vars = if observe_velocities
+        deepcopy(state_guess)
+    else
+        pose_to_opt_vars(sce)(deepcopy(state_guess))
+    end
     all_ps = Flux.params(vars.val)
     @smart_assert length(all_ps) > 0 "No state parameters to optimize."
     @info "total number of array parameters: $(length(all_ps))"
 
-    to_state = pose_from_opt_vars(sce)
+    to_state = observe_velocities ? identity : pose_from_opt_vars(sce)
 
     loss() = -mean(logpdf(obs_model(to_state(vars)), observations)::AbsMat)
 

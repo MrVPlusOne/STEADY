@@ -135,7 +135,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=σ_bearing) #, vel=0.4, ω=0.4)
+    let σs = (pos=0.1, angle_2d=0.1, vel=0.1, ω=0.1)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -238,7 +238,7 @@ function plot_core_io(
 end
 
 function posterior_metrics(
-    motion_model, data; n_repeats=1, obs_frames=nothing, n_particles=100_000
+    motion_model, data; n_repeats=1, obs_frames=1:10:length(data.times), n_particles=100_000
 )
     rows = @showprogress 0.1 "posterior_metrics" map(1:n_repeats) do _
         SEDL.estimate_posterior_quality(
@@ -281,7 +281,9 @@ function load_model_weights!()
     end
 end
 
-function save_best_model(es::SEDL.EarlyStopping, metrics::NamedTuple, model_info::NamedTuple)
+function save_best_model(
+    es::SEDL.EarlyStopping, metrics::NamedTuple, model_info::NamedTuple
+)
     loss = if validation_metric == :RMSE
         metrics.RMSE
     elseif validation_metric == :log_obs
@@ -302,8 +304,7 @@ y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 save_dir = let prefix = is_quick_test ? "sims-quick" : "sims"
     save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test))
     SEDL.data_dir(
-        prefix,
-        savename("train_models-$(summary(scenario))", save_args; connector="-"),
+        prefix, savename("train_models-$(summary(scenario))", save_args; connector="-")
     )
 end
 
@@ -393,7 +394,7 @@ function em_callback(
                 # display(plt)
             end
         else
-            to_stop = (; should_stop = false)
+            to_stop = (; should_stop=false)
         end
 
         next!(
@@ -433,7 +434,7 @@ if !load_trained && (train_method == :EM)
             callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
             obs_weight_schedule,
         )
-        @info "Best model: $(es.model_info)" 
+        @info "Best model: $(es.model_info)"
     end
     load_model_weights!()
 end
@@ -447,15 +448,15 @@ function supervised_callback(
     plot_every=2_500,
 )
     prog = Progress(n_steps; showspeed=true)
-    valid_in_set, valid_out_set = SEDL.input_output_from_trajectory(
-        learned_motion_model.sketch, data_valid.states, data_valid.controls, data_test.times
-    )
-    valid_input = BatchTuple(valid_in_set)
-    valid_output = BatchTuple(valid_out_set)
-    compute_valid_loss() =
-        -SEDL.transition_logp(
-            learned_motion_model.core, valid_input, valid_output, data_valid.Δt
-        ) / valid_input.batch_size
+    # valid_in_set, valid_out_set = SEDL.input_output_from_trajectory(
+    #     learned_motion_model.sketch, data_valid.states, data_valid.controls, data_test.times
+    # )
+    # valid_input = BatchTuple(valid_in_set)
+    # valid_output = BatchTuple(valid_out_set)
+    # compute_valid_loss() =
+    #     -SEDL.transition_logp(
+    #         learned_motion_model.core, valid_input, valid_output, data_valid.Δt
+    #     ) / valid_input.batch_size
 
 
     function (r)
@@ -464,15 +465,15 @@ function supervised_callback(
         end
 
         # Compute test log_obs and plot a few trajectories.
-        to_stop = if r.step % test_every == 1
-            valid_loss = compute_valid_loss()
+        if r.step % test_every == 1
+            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
+
             Base.with_logger(logger) do
-                @info("validation", valid_loss, log_step_increment = 0)
+                @info "validation" valid_metrics... log_step_increment = 0
             end
-            # TODO: might need to change this to other metric
-            early_stopping(valid_loss, (;r.step), save_model_weights!)
         else
-            (; should_stop = false)
+            to_stop = (; should_stop=false)
         end
         if r.step % plot_every == 1
             test_metrics = posterior_metrics(learned_motion_model, data_test)
@@ -533,6 +534,7 @@ end
                 data_train.observations,
                 data_train.states,
                 data_train.Δt;
+                observe_velocities=use_simple_obs_model,
                 n_steps=5000,
             )
             plot(est_result.loss_history; title="state estimation loss history") |> display
@@ -594,9 +596,9 @@ end
         @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
 
         let
-            total_steps = 50_000
+            total_steps = 40_000
             n_steps = is_quick_test ? 3 : total_steps + 1
-            es = SEDL.EarlyStopping(; patience=100)
+            es = SEDL.EarlyStopping(; patience=40)
             SEDL.train_dynamics_supervised!(
                 learned_motion_model.core,
                 BatchTuple(core_in_set),
@@ -605,10 +607,10 @@ end
                 optimizer=adam,
                 n_steps,
                 callback=supervised_callback(
-                    learned_motion_model, es; n_steps, test_every=50
+                    learned_motion_model, es; n_steps, test_every=200
                 ),
             )
-            @info "Best model: $(es.model_info)" 
+            @info "Best model: $(es.model_info)"
         end
         load_model_weights!()
     end
@@ -676,7 +678,7 @@ function vi_callback(
                 end
             end
         else
-            to_stop = (; should_stop = false)
+            to_stop = (; should_stop=false)
         end
 
         next!(
@@ -704,7 +706,7 @@ if !load_trained && train_method == :VI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; patience=10)
+        es = SEDL.EarlyStopping(; patience=40)
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,
@@ -715,13 +717,13 @@ if !load_trained && train_method == :VI
             data_train.Δt;
             optimizer=adam,
             n_steps,
-            anneal_schedule=step -> linear(1e-3, 1.0)(min(1, 1.2step / n_steps)),
+            # anneal_schedule=step -> linear(1e-3, 1.0)(min(1, step / n_steps)),
             callback=vi_callback(
                 learned_motion_model, es; n_steps, test_every=500, trajs_per_ex=1
             ),
         )
         display(train_result)
-        @info "Best model: $(es.model_info)" 
+        @info "Best model: $(es.model_info)"
         load_model_weights!()
     end
 end
@@ -752,7 +754,7 @@ plot_core_io(
 ) |> display
 
 function evaluate_model(motion_model, data_test, name)
-    n_repeats = is_quick_test ? 2 : 5
+    n_repeats = 10
     metrics = posterior_metrics(motion_model, data_test; n_repeats)
     open_loop = posterior_metrics(motion_model, data_test; n_repeats, obs_frames=1:1).RMSE
     (; name, metrics..., open_loop)
