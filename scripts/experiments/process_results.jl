@@ -6,6 +6,7 @@ using Measurements
 function show_baseline_comparison(
     scenarios_and_csv::Vector{Tuple{String,String}},
     metric::String;
+    backend,
     drop_uncertainty=true,
     lower_is_better=true,
 )
@@ -27,15 +28,19 @@ function show_baseline_comparison(
         _, row = find_f(scores)
         (row, col)
     end
-    hl_best = Highlighter(
-        (data, i, j) -> (i, j - 1) in best_ids; bold=true, foreground=:green
-    )
+    hl_best = if backend == :text
+        Highlighter((data, i, j) -> (i, j - 1) in best_ids; bold=true, foreground=:green)
+    else
+        LatexHighlighter((data, i, j) -> (i, j - 1) in best_ids, ["textbf"])
+    end
 
     scenarios = getindex.(scenarios_and_csv, 1)
 
     table_header = ["method \\ data"; scenarios]
     table_data = hcat(method_names::Vector, sce_results...)
-    pretty_table(table_data; header=table_header, highlighters=hl_best, alignment=:l)
+    pretty_table(
+        table_data; backend, header=table_header, highlighters=hl_best, alignment=:l
+    )
 end
 
 function parse_measurement(text::AbstractString)
@@ -44,34 +49,34 @@ function parse_measurement(text::AbstractString)
     parse(Float64, segs[1])
 end
 
-function print_baseline_tables()
+function print_baseline_tables(backend=:text)
     data_paths = [
-        ("Hover", "results/comparisons-hovercraft.csv"),
-        ("Hover-Fixed", "results/comparisons-hovercraft-fixed_var.csv"),
-        ("Hover-Gaussian", "results/comparisons-hovercraft-gaussian.csv"),
-        ("RealCar", "results/comparisons-real.csv"),
-        ("RealCar-Gaussian", "results/comparisons-real-gaussian.csv"),
+        ("Hover", "results/comparisons/comparisons-hovercraft-16.csv"),
+        ("Hover-256", "results/comparisons/comparisons-hovercraft-128.csv"),
+        ("RealCar", "results/comparisons/comparisons-real.csv"),
+        ("RealCar-F", "results/comparisons/comparisons-real-F.csv"),
+        ("RealCar-S", "results/comparisons/comparisons-real-S.csv"),
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE")
+    show_baseline_comparison(data_paths, "RMSE"; backend)
     println("==== Forward prediction RMSE ====")
-    show_baseline_comparison(data_paths, "open_loop")
+    show_baseline_comparison(data_paths, "open_loop"; backend)
 end
 
-function print_perf_vs_schedule() 
+function print_perf_vs_schedule(backend=:text)
     data_paths = [
         ("σ=1°", "results/obs_schedule_variation_1.0.csv"),
         ("σ=5°", "results/obs_schedule_variation_5.0.csv"),
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE")
+    show_baseline_comparison(data_paths, "RMSE"; backend)
     println("==== Forward prediction RMSE ====")
-    show_baseline_comparison(data_paths, "open_loop")
+    show_baseline_comparison(data_paths, "open_loop"; backend)
 end
 
-function print_perf_vs_noise() 
+function print_perf_vs_noise(backend=:text)
     table = CSV.read("results/obs_noise_variation.csv", DataFrame)
     RMSE = parse_measurement.(table[:, "RMSE"])
     open_loop = parse_measurement.(table[:, "open_loop"])
@@ -80,13 +85,14 @@ function print_perf_vs_noise()
     end
     println("==== Performance vs. observation noise ====")
     pretty_table(
-        [σs RMSE open_loop],
+        [σs RMSE open_loop];
         header=["σ_bearing", "state est.", "forward pred."],
         alignment=:l,
+        backend,
     )
 end
 ##-----------------------------------------------------------
 
-print_baseline_tables()
+print_baseline_tables(:latex)
 print_perf_vs_schedule()
-plot_perf_vs_noise()
+print_perf_vs_noise()
