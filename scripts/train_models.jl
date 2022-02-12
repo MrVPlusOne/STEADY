@@ -33,7 +33,8 @@ if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
         is_quick_test=true,
-        gpu_id=1,
+        gpu_id=7,
+        scenario=SEDL.HovercraftScenario(),
         use_simple_obs_model=true,
         train_method=:EM,
         n_particles=1000,
@@ -102,6 +103,7 @@ end
 println("--------------------")
 
 Random.seed!(123)
+CUDA.seed!(456)
 
 use_gpu = gpu_id !== nothing
 if use_gpu
@@ -129,7 +131,7 @@ state_L2_loss = SEDL.state_L2_loss_batched(scenario)
 sketch = SEDL.batched_sketch(scenario)
 
 landmarks = if use_sim_data
-    [[10.0, -2.0], [-4.0, -2.0], [-6.0, 10.0]]
+    [[12.0, -8.0], [-6.0, -4.0], [-4.0, 10.0], [6.0, 7.0]]
 else
     [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
 end
@@ -150,7 +152,25 @@ data_train, data_valid, data_test = if data_source isa SimulationData
     motion_model = SEDL.BatchedMotionModel(
         tconf, sketch, SEDL.batched_core(scenario, true_params)
     )
-    data_from_source(scenario, data_source, tconf; motion_model, obs_model)
+
+    data_path = let
+        data_name = savename(
+            (;
+                scenario=summary(scenario),
+                source=string(data_source),
+                use_simple_obs_model,
+                σ_bearing,
+                data_source,
+            ),
+            "serial";
+            connector="-",
+        )
+        SEDL.data_dir("simulation_data", data_name)
+    end
+    # cache results to ensure reproducibility
+    generate_or_load(data_path) do 
+        data_from_source(scenario, data_source, tconf; motion_model, obs_model)
+    end
 else
     data_from_source(scenario, data_source, tconf; obs_model)
 end

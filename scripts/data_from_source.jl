@@ -59,3 +59,16 @@ function data_from_source(sce::SEDL.Scenario, src::RealData, tconf::TensorConfig
         merge(data, (; observations, Δt))
     end
 end
+
+function generate_or_load(gen_fn, path)
+    if isfile(path)
+        @info "Loading from $data_path..."
+        deserialize(data_path)
+    else
+        result = gen_fn()
+        @info "Saving to $data_path..."
+        mkpath(dirname(data_path))
+        serialize(data_path, result)
+        result
+    end
+end

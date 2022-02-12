@@ -49,9 +49,11 @@ function batched_core(::HovercraftScenario, params)
         (; mass, drag_x, drag_y, rot_mass, rot_drag, σ_v, σ_ω) = map(tconf, params)
 
         (; loc_v, ω, ul, ur) = input.val
-        a_x = (ul .+ ur .- drag_x * loc_v[1:1, :]) / mass
-        a_y = -drag_y * loc_v[2:2, :] / mass
-        a_rot = (ur .- ul .- rot_drag * ω) / rot_mass
+        vx = loc_v[1:1, :]
+        vy = loc_v[2:2, :]
+        a_x = @. (ul + ur - drag_x * vx * abs(vx)) / mass
+        a_y = @. -drag_y * vy * abs(vy) / mass
+        a_rot = @. (ur - ul - rot_drag * ω) / rot_mass
         a_loc = vcat(a_x, a_y)
         @smart_assert size(a_loc) == size(loc_v)
         μs = BatchTuple(tconf, batch_size, (; a_loc, a_rot))
@@ -63,8 +65,8 @@ end
 function simulation_params(::HovercraftScenario)
     (;
         mass=1.5,
-        drag_x=0.06,
-        drag_y=0.10,
+        drag_x=0.015,
+        drag_y=0.03,
         rot_mass=1.5,
         rot_drag=0.07,
         sep=0.81,
@@ -79,11 +81,11 @@ function simulation_controller(::HovercraftScenario; noise=0.5)
         (t=0.0, ul=0.0, ur=0.0),
         (t=0.5, ul=pert(1.0, 0.2), ur=pert(0.4, 0.1)),
         (t=2.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
-        (t=3.0, ul=pert(0.5, 0.2), ur=pert(0.5, 0.1)),
+        (t=3.0, ul=pert(0.7, 0.2), ur=pert(0.5, 0.1)),
         (t=5.0, ul=pert(1.1, 0.2), ur=pert(0.5, 0.1)),
         (t=6.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
-        (t=9.0, ul=pert(0.5, 0.2), ur=pert(1.0, 0.1)),
-        (t=10.0, ul=pert(0.0, 0.2), ur=pert(0.4, 0.1)),
+        (t=9.0, ul=pert(0.4, 0.2), ur=pert(1.0, 0.2)),
+        (t=10.0, ul=pert(0.0, 0.2), ur=pert(0.5, 0.2)),
         (t=12.0, ul=pert(0.0, 0.2), ur=pert(0.0, 0.1)),
         (t=15.0, ul=0.0, ur=0.0),
     ]
