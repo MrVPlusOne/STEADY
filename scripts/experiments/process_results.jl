@@ -9,6 +9,7 @@ function show_baseline_comparison(
     backend,
     drop_uncertainty=true,
     lower_is_better=true,
+    exclude=[],
 )
     @assert drop_uncertainty "current only drop_uncertainty=true is supported"
 
@@ -20,7 +21,7 @@ function show_baseline_comparison(
         scores = parse_measurement.(table[:, metric])
         method_names === nothing && (method_names = table[:, "name"])
         d = Dict(zip(method_names, scores))
-        [d[n] for n in method_names]
+        [d[n] for n in method_names if n ∉ exclude]
     end
 
     best_ids = map(enumerate(sce_results)) do (col, scores)
@@ -36,8 +37,8 @@ function show_baseline_comparison(
 
     scenarios = getindex.(scenarios_and_csv, 1)
 
-    table_header = ["method \\ data"; scenarios]
-    table_data = hcat(method_names::Vector, sce_results...)
+    table_header = ["method - data"; scenarios]
+    table_data = hcat(filter(n -> n ∉ exclude, method_names), sce_results...)
     pretty_table(
         table_data; backend, header=table_header, highlighters=hl_best, alignment=:l
     )
@@ -51,17 +52,19 @@ end
 
 function print_baseline_tables(backend=:text)
     data_paths = [
-        ("Hover", "results/comparisons/comparisons-hovercraft-16.csv"),
-        ("Hover-256", "results/comparisons/comparisons-hovercraft-128.csv"),
-        ("RealCar", "results/comparisons/comparisons-real.csv"),
-        ("RealCar-F", "results/comparisons/comparisons-real-F.csv"),
-        ("RealCar-S", "results/comparisons/comparisons-real-S.csv"),
+        ("Hover", "results/comparisons/hover.csv"),
+        ("HoverS", "results/comparisons/hover-S.csv"),
+        ("HoverS256", "results/comparisons/hover-S-256.csv"),
+        ("Car", "results/comparisons/real.csv"),
+        ("CarS", "results/comparisons/real-S.csv"),
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE"; backend)
-    println("==== Forward prediction RMSE ====")
-    show_baseline_comparison(data_paths, "open_loop"; backend)
+    show_baseline_comparison(data_paths, "RMSE"; backend, exclude=["Super_noiseless"])
+    println("==== Observation Log Probability ====")
+    show_baseline_comparison(
+        data_paths, "log_obs"; lower_is_better=false, backend, exclude=["Super_noiseless"]
+    )
 end
 
 function print_perf_vs_schedule(backend=:text)
