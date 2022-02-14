@@ -1,30 +1,38 @@
-using DataFrames, CSV
+using SEDL
+using CSV
+using DataFrames
+SEDL.should_check_finite[] = false
 
 my_include = include # to avoid mess up the VSCode linter
 
-perf_list = []
-
-schedule = false
-σ_bearing_deg = 1.0
-
-let ° = π / 180
-    for obs_w in [0.25, 4.0]
-    # for σ_bearing in [1°, 2.5°, 5°, 10°, 20°]
-        # you can find the available args inside `train_models.jl`.
-        global script_args = (;
-            gpu_id=Main.GPU_ID, # set this in the REPL before running the script
-            # is_quick_test=true,
-            σ_bearing=σ_bearing_deg * °,
-            use_obs_weight_schedule=schedule,
-            max_obs_weight=obs_w,
-            max_train_steps=40_000,
-            exp_name="obs_w=$obs_w, schedule=$(schedule)",
-        )
-        my_include("../train_models.jl")
-        push!(perf_list, Main.test_performance)
-    end
+σ_deg=12
+result_name = "$(σ_deg)°"
+println("Starting experiment: $result_name...")
+result_path = joinpath("results/vary_obs_noise", "$result_name.csv")
+mkpath(dirname(result_path))
+if isfile(result_path)
+    error("file $result_path already exists")
 end
 
-result_path = joinpath("results", "obs_schedule_variation_$(σ_bearing_deg)_$schedule.csv")
-DataFrame(perf_list) |> display
-CSV.write(result_path, DataFrame(perf_list))
+perf_list = []
+
+for train_method in [:Handwritten, :Super_Hand, :Super_TV, :Super_noiseless, :EM, :VI]
+    # you can find the available args inside `train_models.jl`.
+    global script_args = (;
+        # is_quick_test=true,
+        # scenario=SEDL.HovercraftScenario(),
+        validation_metric=:RMSE,
+        # n_train_ex=256,
+        gpu_id=Main.GPU_ID, # set this in the REPL before running the script
+        # use_fixed_variance=true,
+        # use_simple_obs_model=true,
+        σ_bearing=σ_deg * °,
+        train_method,
+    )
+    my_include("../train_models.jl")
+    push!(perf_list, Main.test_performance)
+end
+
+results = DataFrame(perf_list)
+results|> display
+CSV.write(result_path, results)

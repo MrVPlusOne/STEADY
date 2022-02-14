@@ -2,6 +2,8 @@ using PrettyTables
 using DataFrames
 using CSV
 using Measurements
+using StatsPlots
+StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 function show_baseline_comparison(
     scenarios_and_csv::Vector{Tuple{String,String}},
@@ -94,8 +96,53 @@ function print_perf_vs_noise(backend=:text)
         backend,
     )
 end
+
+function plot_perf_vs_noise(; plot_args...)
+    method_names = [
+        "Handwritten" => "Handwritten",
+        "Super_TV" => "FitTV",
+        "Super_Hand" => "FitHand",
+        "VI" => "SVI",
+        "EM" => "STEADY",
+        "Super_noiseless" => "FitTruth",
+    ]
+    data_files = map([1, 4, 8, 12, 16]) do deg
+        deg => "results/vary_obs_noise/$(deg)°.csv"
+    end
+
+    xs = getindex.(data_files, 1)
+    errors = map(data_files) do (_, file)
+        table = CSV.read(file, DataFrame)
+        methods = table[:, "name"]
+        RMSE = parse_measurement.(table[:, "RMSE"])
+        Dict(zip(methods, RMSE))
+    end
+
+    plt = plot(;
+        xlabel="bearing σ (in degree)",
+        ylabel="Posterior RMSE",
+        legend=:topleft,
+        plot_args...,
+    )
+    for (method, method_name) in method_names
+        ys = [d[method] for d in errors]
+        extra_args = if method == "Super_noiseless"
+            [:linestyle => :dash]
+        else
+            []
+        end
+        plot!(xs, ys; label=method_name, markershape=:auto, markersize=3, extra_args...)
+    end
+    plt
+end
 ##-----------------------------------------------------------
 
 print_baseline_tables(:latex)
 print_perf_vs_schedule()
 print_perf_vs_noise()
+let plt = plot_perf_vs_noise(size=(450, 300))
+    display(plt)
+    savefig(plt, "results/vary_obs_noise/vary_obs_noise.svg")
+end
+
+StatsPlots.plotattr(:Series)
