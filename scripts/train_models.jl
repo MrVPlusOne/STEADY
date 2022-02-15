@@ -436,8 +436,7 @@ end
 
 if !load_trained && (train_method == :EM)
     with_alert("EM training") do
-        total_steps = max_train_steps
-        n_steps = is_quick_test ? 3 : total_steps + 1
+        n_steps = is_quick_test ? 3 : max_train_steps + 1
         es = SEDL.EarlyStopping(; patience=40)
         obs_weight_schedule = if use_obs_weight_schedule
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
@@ -446,6 +445,39 @@ if !load_trained && (train_method == :EM)
         end
         @info "Training the dynamics using EM"
         SEDL.train_dynamics_EM!(
+            learned_motion_model,
+            logpdf_obs,
+            data_train.states[1],
+            data_train.observations,
+            data_train.controls,
+            (; data_train.times, obs_frames);
+            optimizer=adam,
+            n_steps,
+            n_particles,
+            callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
+            obs_weight_schedule,
+        )
+        @info "Best model: $(es.model_info)"
+    end
+    load_model_weights!()
+end
+##-----------------------------------------------------------
+# simultaneous SLAM + dynamics learnings
+
+if !load_trained && (train_method == :EM_SLAM)
+    with_alert("EM_SLAM training") do
+        n_steps = is_quick_test ? 3 : max_train_steps + 1
+        es = SEDL.EarlyStopping(; patience=40)
+        obs_weight_schedule = if use_obs_weight_schedule
+            step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
+        else
+            step -> max_obs_weight
+        end
+
+        landmark_guess = error("todo")
+
+        @info "EM_SLAM: Starting training..."
+        SEDL.train_dynamics_EM(
             learned_motion_model,
             logpdf_obs,
             data_train.states[1],

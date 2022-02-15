@@ -107,7 +107,7 @@ translational invariant.
 distributions will be optimized in the EM loop and should support 
 `rand`, `logpdf`, and `Flux.params`.
 """
-function train_dynamics_slam_EM!(
+function train_dynamics_EM_SLAM!(
     motion_model::BatchedMotionModel,
     landmarks_guess::AbstractArray,
     landmarks_to_logpdf_obs::Function,

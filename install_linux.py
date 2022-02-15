@@ -54,6 +54,7 @@ if which("conda") is None:
     subprocess.call(["rm", "conda-install.sh"])
     path_list.append(f"{conda_path}/bin")
 
+# todo: fix this by checking if sedl env exists.
 if which("tensorboard") is None:
     # create a new environment named "SEDL"
     print("Installing Tensorboard into a environment called `sedl` ...")
