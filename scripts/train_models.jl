@@ -119,7 +119,9 @@ tconf = SEDL.TensorConfig(use_gpu, Float32)
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
 data_source = if use_sim_data
-    SimulationData(; n_train_ex, n_valid_ex=32, n_test_ex=32, times=0:tconf(0.1):10)
+    SimulationData(;
+        n_train_ex, n_valid_ex=min(n_train_ex, 32), n_test_ex=32, times=0:tconf(0.1):10
+    )
 else
     RealData(
         SEDL.data_dir("real_data", "difficult"),
@@ -149,7 +151,7 @@ else
 end
 logpdf_obs(x, y) = logpdf(obs_model(x), y)
 
-data_train, data_valid, data_test = if data_source isa SimulationData
+datasets = if data_source isa SimulationData
     true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
     motion_model = SEDL.BatchedMotionModel(
         tconf, sketch, SEDL.batched_core(scenario, true_params)
@@ -177,6 +179,8 @@ data_train, data_valid, data_test = if data_source isa SimulationData
 else
     data_from_source(scenario, data_source, tconf; obs_model)
 end
+
+data_train, data_valid, data_test = datasets.train, datasets.valid, datasets.test
 
 n_train_ex = data_train.states[1].batch_size
 obs_frames = eachindex(data_train.times)
@@ -473,16 +477,6 @@ function supervised_callback(
     plot_every=2_500,
 )
     prog = Progress(n_steps; showspeed=true)
-    # valid_in_set, valid_out_set = SEDL.input_output_from_trajectory(
-    #     learned_motion_model.sketch, data_valid.states, data_valid.controls, data_test.times
-    # )
-    # valid_input = BatchTuple(valid_in_set)
-    # valid_output = BatchTuple(valid_out_set)
-    # compute_valid_loss() =
-    #     -SEDL.transition_logp(
-    #         learned_motion_model.core, valid_input, valid_output, data_valid.Δt
-    #     ) / valid_input.batch_size
-
 
     function (r)
         Base.with_logger(logger) do
@@ -560,7 +554,7 @@ end
                 data_train.states,
                 data_train.Δt;
                 observe_velocities=use_simple_obs_model,
-                n_steps=5000,
+                n_steps=is_quick_test ? 200 : 5000,
             )
             plot(est_result.loss_history; title="state estimation loss history") |> display
             est_result.states

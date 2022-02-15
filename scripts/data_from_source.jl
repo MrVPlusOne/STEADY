@@ -43,16 +43,16 @@ function data_from_source(
     end
 
     (
-        train=mk_sim_data(n_train_ex),
-        valid=mk_sim_data(n_valid_ex),
         test=mk_sim_data(n_test_ex),
+        valid=mk_sim_data(n_valid_ex),
+        train=mk_sim_data(n_train_ex),
     )
 end
 
 function data_from_source(sce::SEDL.Scenario, src::RealData, tconf::TensorConfig; obs_model)
     (; train_data_path, valid_data_path, test_data_path) = src
 
-    map((train=train_data_path, valid=valid_data_path, test=test_data_path)) do path
+    map((test=test_data_path, valid=valid_data_path, train=train_data_path)) do path
         data = SEDL.Dataset.read_data_from_csv(sce, path, tconf)
         observations = (x -> rand(obs_model(x))).(data.states)
         Δt = tconf(data.times[2] - data.times[1])
@@ -62,7 +62,7 @@ end
 
 function generate_or_load(gen_fn, path, result_name; should_warn=true)
     if isfile(path)
-        should_warn && @warn "Loading $task_name from $path..."
+        should_warn && @warn "Loading $result_name from $path..."
         deserialize(data_path)
     else
         result = gen_fn()

@@ -3,6 +3,7 @@
     using .SEDL
 end
 using SEDL
+using Alert
 
 dynamic_include = include # to avoid mess up the VSCode linter
 
