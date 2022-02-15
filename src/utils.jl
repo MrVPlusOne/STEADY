@@ -357,6 +357,12 @@ function named_tuple_reduce(xs::AbstractArray{<:NamedTuple{keys}}, reduce_f) whe
     NamedTuple{keys}(vals)
 end
 
+function named_tuple_reduce(xs::AbstractArray{Any}, f) 
+    xs1 = specific_elems(xs)
+    @smart_assert eltype(xs1) <: NamedTuple
+    named_tuple_reduce(xs1, f)
+end
+
 """
 Warp the given angle into the range [0, 2π].
 """

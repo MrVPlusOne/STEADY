@@ -127,7 +127,7 @@ function plot_perf_vs_noise(; plot_args...)
     for (method, method_name) in method_names
         ys = [d[method] for d in errors]
         extra_args = if method == "Super_noiseless"
-            [:linestyle => :dash]
+            [:linestyle => :dash, :markershape => :none]
         else
             []
         end
@@ -140,9 +140,9 @@ end
 print_baseline_tables(:latex)
 print_perf_vs_schedule()
 print_perf_vs_noise()
-let plt = plot_perf_vs_noise(size=(450, 300))
+let plt = plot_perf_vs_noise(size=(450, 300), xticks=[1,4,8,12,16])
     display(plt)
-    savefig(plt, "results/vary_obs_noise/vary_obs_noise.svg")
+    savefig(plt, "results/vary_obs_noise/vary_obs_noise.pdf")
 end
 
 StatsPlots.plotattr(:Series)

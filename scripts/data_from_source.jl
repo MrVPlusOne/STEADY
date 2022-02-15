@@ -60,13 +60,13 @@ function data_from_source(sce::SEDL.Scenario, src::RealData, tconf::TensorConfig
     end
 end
 
-function generate_or_load(gen_fn, path)
+function generate_or_load(gen_fn, path, result_name; should_warn=true)
     if isfile(path)
-        @info "Loading from $data_path..."
+        should_warn && @warn "Loading $task_name from $path..."
         deserialize(data_path)
     else
         result = gen_fn()
-        @info "Saving to $data_path..."
+        should_warn && @warn "Saving $result_name to $path..."
         mkpath(dirname(data_path))
         serialize(data_path, result)
         result

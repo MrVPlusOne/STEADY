@@ -60,6 +60,7 @@ end
     exp_name,
     n_particles,
     h_dim,
+    run_id,
 ) = let
     config = (;
         scenario=SEDL.RealCarScenario(),
@@ -80,6 +81,7 @@ end
         exp_name=nothing,
         n_particles=20_000,  # how many particles to use for the EM training.
         h_dim=64,
+        run_id=1,
     )
     # discard params that are the same as the default
     global script_args = let changes = []
@@ -102,8 +104,8 @@ for (k, v) in pairs(script_args)
 end
 println("--------------------")
 
-Random.seed!(123)
-CUDA.seed!(456)
+Random.seed!(123 + run_id)
+CUDA.seed!(456 + run_id)
 
 use_gpu = gpu_id !== nothing
 if use_gpu
@@ -137,7 +139,7 @@ else
 end
 
 obs_model = if use_simple_obs_model
-    let σs = (pos=0.1, angle_2d=0.1, vel=0.1, ω=0.1)
+    let σs = (pos=0.2, angle_2d=0.2, vel=0.2, ω=0.2)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
@@ -168,9 +170,10 @@ data_train, data_valid, data_test = if data_source isa SimulationData
         SEDL.data_dir("simulation_data", data_name)
     end
     # cache results to ensure reproducibility
-    generate_or_load(data_path) do 
-        data_from_source(scenario, data_source, tconf; motion_model, obs_model)
+    data_cpu = generate_or_load(data_path, "datasets") do
+        Flux.cpu(data_from_source(scenario, data_source, tconf; motion_model, obs_model))
     end
+    device(data_cpu)
 else
     data_from_source(scenario, data_source, tconf; obs_model)
 end
@@ -268,7 +271,7 @@ function posterior_metrics(
     if n_repeats == 1
         rows[1]
     else
-        SEDL.named_tuple_reduce(rows, SEDL.to_measurement)
+        SEDL.named_tuple_reduce(rows, mean)
     end
 end
 
@@ -321,25 +324,27 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-save_dir = let prefix = is_quick_test ? "sims-quick" : "sims"
-    save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test))
+save_dir = let prefix = is_quick_test ? "sims-quick" : "sims", postfix = "run-$(run_id)"
+    save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test, :run_id))
     SEDL.data_dir(
-        prefix, savename("train_models-$(summary(scenario))", save_args; connector="-")
+        prefix,
+        savename("train_models-$(summary(scenario))", save_args; connector="-"),
+        postfix,
     )
 end
 
 if !load_trained && isdir(save_dir)
-    @warn "removing old data at $save_dir..."
+    @warn "removing old data at '$save_dir' ..."
     rm(save_dir; recursive=true)
-    @tagsave(joinpath(save_dir, "settings.bson"), @dict(script_args))
 end
-mkpath(joinpath(save_dir, ".."))
+mkpath(save_dir)
+write(joinpath(save_dir, "settings.txt"), string(script_args))
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
-@info """To view tensorboard logs, use the following command: 
+println("""To view tensorboard logs, use the following command:
 ```
 tensorboard --samples_per_plugin "images=100" --logdir "$save_dir/tb_logs"
-```"""
+```""")
 
 @info "Computing normal transforms..."
 normal_transforms = @time SEDL.compute_normal_transforms(
@@ -434,14 +439,14 @@ if !load_trained && (train_method == :EM)
     with_alert("EM training") do
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
-        es = SEDL.EarlyStopping(; patience=10)
+        es = SEDL.EarlyStopping(; patience=40)
         obs_weight_schedule = if use_obs_weight_schedule
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
             step -> max_obs_weight
         end
         @info "Training the dynamics using EM"
-        SEDL.train_dynamics_em!(
+        SEDL.train_dynamics_EM!(
             learned_motion_model,
             logpdf_obs,
             data_train.states[1],
@@ -720,7 +725,7 @@ if !load_trained && train_method == :VI
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1
 
-        n_repeat = min(10, 1024 ÷ n_train_ex)
+        n_repeat = min(10, 512 ÷ n_train_ex)
         vi_x0 = repeat(data_train.states[1], n_repeat)
         vi_obs_seq = repeat.(data_train.observations, n_repeat)
         vi_control_seq = repeat.(data_train.controls, n_repeat)
@@ -773,18 +778,22 @@ plot_core_io(
     title="IO Open-loop prediction ($train_method learned)",
 ) |> display
 
-function evaluate_model(motion_model, data_test, name)
-    n_repeats = 10
-    metrics = posterior_metrics(motion_model, data_test; n_repeats)
-    open_loop = posterior_metrics(motion_model, data_test; n_repeats, obs_frames=1:1).RMSE
-    (; name, metrics..., open_loop)
+function evaluate_model(motion_model, data_test)
+    n_repeats = is_quick_test ? 3 : 10
+    n_particles = is_quick_test ? 10_000 : 100_000
+    metrics = posterior_metrics(motion_model, data_test; n_repeats, n_particles)
+    # open_loop = posterior_metrics(motion_model, data_test; n_repeats, obs_frames=1:1).RMSE
+    metrics
 end
 
 println("Testing dynamics model final performance...")
 exp_name = isnothing(exp_name) ? string(train_method) : exp_name
-test_performance = evaluate_model(learned_motion_model, data_test, exp_name)
-valid_performance = evaluate_model(learned_motion_model, data_valid, "(valid) $exp_name")
-perf_table = DataFrame([valid_performance, test_performance])
+test_performance = evaluate_model(learned_motion_model, data_test)
+valid_performance = evaluate_model(learned_motion_model, data_valid)
+perf_table = DataFrame([
+    (; name=exp_name, valid_performance...),
+    (; name="(valid) $exp_name", test_performance...),
+])
 display(perf_table)
 CSV.write(joinpath(save_dir, "performance.csv"), perf_table)
 ##-----------------------------------------------------------
