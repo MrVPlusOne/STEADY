@@ -18,13 +18,7 @@ using Setfield
 using Distributions: logpdf
 using CSV: CSV
 
-!true && begin
-    include("../src/SEDL.jl")
-    using .SEDL
-end
-using SEDL
-using .SEDL: @kwdef, @smart_assert, °
-
+include("experiments/experiment_common.jl")
 include("data_from_source.jl")
 ##-----------------------------------------------------------
 # set up scenario and simulate some data
@@ -71,7 +65,7 @@ end
         use_simple_obs_model=false,
         σ_bearing=5°,
         use_fixed_variance=false,
-        train_method=:EM, # :VI or :EM or :Super_noisy or :Super_noiseless
+        train_method=:EM, # see `AllTrainingMethods`.
         n_train_ex=16,  # number of training trajectories when using simulation data
         validation_metric=:RMSE,  # :RMSE or :log_obs
         lr=1e-4,
@@ -95,6 +89,7 @@ end
     end
     merge(config, script_args::NamedTuple)
 end
+check_training_method(train_method)
 is_quick_test && @info "Quick testing model training..."
 
 println("--------------------")
@@ -293,7 +288,7 @@ end
 function save_model_weights!()
     mm_weights = Flux.params(Main.learned_motion_model)
     serialize(joinpath(save_dir, "mm_weights.bson"), mm_weights)
-    if train_method == :VI
+    if train_method == :SVI
         guide_weights = Flux.params(guide)
         serialize(joinpath(save_dir, "guide_weights.bson"), guide_weights)
     end
@@ -302,7 +297,7 @@ end
 function load_model_weights!()
     mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson"))
     Flux.loadparams!(Main.learned_motion_model, device(mm_weights))
-    if train_method == :VI
+    if train_method == :SVI
         guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
         Flux.loadparams!(guide, device(guide_weights))
     end
@@ -370,7 +365,7 @@ plot_posterior(
     learned_motion_model, data_train; obs_frames=1:1, title="Motion model prior (initial)"
 ) |> display
 
-if train_method == :VI
+if train_method == :SVI
     guide = SEDL.mk_guide(; sketch, h_dim, y_dim, normal_transforms) |> device
 
     SEDL.plot_guide_posterior(guide, data_train, 1; title="Guide posterior (initial)") |>
@@ -543,10 +538,10 @@ if train_method == :Handwritten
 end
 
 !load_trained &&
-    (train_method ∈ [:Super_TV, :Super_noiseless, :Super_Hand]) &&
+    (train_method ∈ [:FitTV, :FitTruth, :FitHand]) &&
     let
-        data_multiplicity = (train_method == :Super_Hand) ? max(128 ÷ n_train_ex, 1) : 1
-        states_train = if train_method == :Super_TV
+        data_multiplicity = (train_method == :FitHand) ? max(128 ÷ n_train_ex, 1) : 1
+        states_train = if train_method == :FitTV
             est_result = SEDL.estimate_states_from_observations_SE2(
                 scenario,
                 obs_model,
@@ -558,7 +553,7 @@ end
             )
             plot(est_result.loss_history; title="state estimation loss history") |> display
             est_result.states
-        elseif train_method == :Super_Hand
+        elseif train_method == :FitHand
             est_trajs = [BatchTuple[] for t in data_train.times]
             @info "Generating trajectories using the hand-written model..."
             for i in 1:n_train_ex
@@ -580,7 +575,7 @@ end
             map(est_trajs) do batches
                 BatchTuple(specific_elems(batches))
             end
-        elseif train_method == :Super_noiseless
+        elseif train_method == :FitTruth
             data_train.states
         else
             error("Unknown train_method: $train_method")
@@ -609,7 +604,7 @@ end
             repeat_seq(data_train.controls, data_multiplicity),
             data_train.times;
             # do not test if the graident is regularized
-            test_consistency=train_method == :Super_noiseless,
+            test_consistency=train_method == :FitTruth,
         )
 
         @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
@@ -714,7 +709,7 @@ function vi_callback(
     end
 end
 
-if !load_trained && train_method == :VI
+if !load_trained && train_method == :SVI
     with_alert("VI training") do
         total_steps = max_train_steps
         n_steps = is_quick_test ? 3 : total_steps + 1

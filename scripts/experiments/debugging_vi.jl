@@ -6,7 +6,7 @@ global script_args = (;
     # scenario=SEDL.HovercraftScenario(),
     use_fixed_variance=false,
     # use_simple_obs_model=true,
-    train_method=:VI,
+    train_method=:SVI,
     # n_train_ex=128,
 )
 my_include("../train_models.jl")

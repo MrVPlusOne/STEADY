@@ -62,10 +62,10 @@ function print_baseline_tables(backend=:text)
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE"; backend, exclude=["Super_noiseless"])
+    show_baseline_comparison(data_paths, "RMSE"; backend, exclude=["FitTruth"])
     println("==== Observation Log Probability ====")
     show_baseline_comparison(
-        data_paths, "log_obs"; lower_is_better=false, backend, exclude=["Super_noiseless"]
+        data_paths, "log_obs"; lower_is_better=false, backend, exclude=["FitTruth"]
     )
 end
 
@@ -100,11 +100,11 @@ end
 function plot_perf_vs_noise(; plot_args...)
     method_names = [
         "Handwritten" => "Handwritten",
-        "Super_TV" => "FitTV",
-        "Super_Hand" => "FitHand",
-        "VI" => "SVI",
+        "FitTV" => "FitTV",
+        "FitHand" => "FitHand",
+        "SVI" => "SVI",
         "EM" => "STEADY",
-        "Super_noiseless" => "FitTruth",
+        "FitTruth" => "FitTruth",
     ]
     data_files = map([1, 4, 8, 12, 16]) do deg
         deg => "results/vary_obs_noise/$(deg)°.csv"
@@ -126,7 +126,7 @@ function plot_perf_vs_noise(; plot_args...)
     )
     for (method, method_name) in method_names
         ys = [d[method] for d in errors]
-        extra_args = if method == "Super_noiseless"
+        extra_args = if method == "FitTruth"
             [:linestyle => :dash, :markershape => :none]
         else
             []

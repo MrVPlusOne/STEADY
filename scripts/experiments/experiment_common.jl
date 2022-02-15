@@ -1,9 +1,30 @@
 !true && begin
     include("../../src/SEDL.jl")
     using .SEDL
+    using .SEDL: @kwdef, @smart_assert, °
 end
 using SEDL
 using Alert
+
+AllTrainingMethods = [
+    # Use Handwritten models provided by each scenario, no learning performed.
+    :Handwritten,
+    # Use handwritten to estimate states, then learning from them.
+    :FitHand,
+    # Use MAP estimation to obtain states from observations, then apply total 
+    # variation regularization to obtain learning data.
+    :FitTv,
+    # Directly learning from ground truth states. Does not use the observation model.
+    :FitTruth,
+    # Stochastic variational inference.
+    :SVI,
+    # Simultaneous state estimation and dynamics learning using EM.
+    :EM,
+    # Simultaneous SLAM and dynamics learning using EM.
+    :EM_SLAM,
+]
+
+check_training_method(method::Symbol) = @smart_assert method ∈ AllTrainingMethods
 
 dynamic_include = include # to avoid mess up the VSCode linter
 

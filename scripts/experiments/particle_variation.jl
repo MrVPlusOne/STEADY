@@ -1,7 +1,7 @@
 my_include = include # to avoid mess up the VSCode linter
 
 perf_list = []
-for n_particles in [1000, 10_000, 100_000] #[:Super_noiseless, :Handwritten, :Super_Hand, :Super_TV, :EM, :VI]
+for n_particles in [1000, 10_000, 100_000]
     # you can find the available args inside `train_models.jl`.
     global script_args = (;
         gpu_id=1,
