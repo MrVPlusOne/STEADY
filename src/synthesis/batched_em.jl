@@ -18,7 +18,7 @@ function (early_stopping::EarlyStopping)(current_loss::Real, model_info, save_mo
     (; should_stop)
 end
 
-function train_dynamics_em!(
+function train_dynamics_EM!(
     motion_model::BatchedMotionModel,
     logpdf_obs::Function,
     x0_batch,
@@ -27,7 +27,6 @@ function train_dynamics_em!(
     (; times, obs_frames);
     optimizer,
     n_steps::Int,
-    sampling_model=motion_model,
     lr_schedule=nothing,
     n_particles=100_000,
     examples_per_step=1, # the number of examples in each learning step
@@ -58,7 +57,7 @@ function train_dynamics_em!(
             local pf_result = batched_particle_filter(
                 x0,
                 (; times, obs_frames, controls, observations);
-                motion_model=sampling_model,
+                motion_model,
                 logpdf_obs=(args...) -> logpdf_obs(args...) * obs_weight,
                 record_io=true,
                 showprogress=false,
@@ -76,6 +75,96 @@ function train_dynamics_em!(
         core = motion_model.core
 
         loss() = -transition_logp(core, core_in_set, core_out_set, Δt) / n_trans
+
+        step == 1 && loss() # just for testing
+        (; val, grad) = Flux.withgradient(loss, all_ps)
+        isfinite(val) || error("Loss is not finite: $val")
+        if lr_schedule !== nothing
+            optimizer.eta = lr_schedule(step)
+        end
+            
+        Flux.update!(optimizer, all_ps, grad) # update parameters
+        for p in reg_ps
+            p .-= weight_decay .* p
+        end
+        callback_args = (;
+            step, loss=val, log_obs, obs_weight, lr=optimizer.eta
+        )
+        callback(callback_args).should_stop && break
+    end
+    @info "Training finished ($n_steps steps)."
+end
+
+
+"""
+Simulatneous SLAM + dynamics learning using expectation-maximization.
+
+Note: may need to fix the location of one of the landmarks if the observations are 
+translational invariant.
+
+## Parameters
+- `x0_dists`: Should be a vector of distributions over initial states. These 
+distributions will be optimized in the EM loop and should support 
+`rand`, `logpdf`, and `Flux.params`.
+"""
+function train_dynamics_slam_EM!(
+    motion_model::BatchedMotionModel,
+    landmarks_guess::AbstractArray,
+    landmarks_to_logpdf_obs::Function,
+    x0_dists::Vector,
+    obs_seq,
+    control_seq,
+    (; times, obs_frames);
+    optimizer,
+    n_steps::Int,
+    lr_schedule=nothing,
+    n_particles=100_000,
+    trajs_per_ex=10,  # the number of posterior trajectories to draw per example
+    obs_weight_schedule=step -> 1.0,  # returns a multiplier for the observation logpdf.
+    callback::Function=_ -> (; should_stop = false),
+    weight_decay=1.0f-4,
+)
+    n_examples = length(x0_dists)
+
+    landmarks = deepcopy(landmarks_guess)
+    tconf = motion_model.tconf
+
+    all_ps = Flux.params(motion_model.core, landmarks, x0_dists)
+    @smart_assert length(all_ps) > 0 "No parameters to optimize."
+    @info "total number of array parameters: $(length(all_ps))"
+    reg_ps = Flux.Params(collect(regular_params(motion_model.core)))
+    @info "total number of regular parameters: $(length(reg_ps))"
+
+    for step in 1:n_steps
+        ex_id = rand(1:n_examples)
+        obs_weight = obs_weight_schedule(step)
+        x0 = tconf(rand(x0_dists[ex_id], n_particles)::BatchTuple)
+        controls = getindex.(control_seq, ex_id)
+        observations = getindex.(obs_seq, ex_id)
+        log_obs_original = landmarks_to_logpdf_obs(landmarks)
+        logpdf_obs = (args...) -> log_obs_original(args...) * obs_weight
+        local pf_result = batched_particle_filter(
+            x0,
+            (; times, obs_frames, controls, observations);
+            motion_model,
+            logpdf_obs,
+            record_io=true,
+            showprogress=false,
+        )
+        (; trajectory, core_input_seq, core_output_seq) = batched_trajectories(
+            pf_result, trajs_per_ex; record_io=true
+        )
+        log_obs = pf_result.log_obs
+        n_trans = sum(x -> x.batch_size, core_input_seq)
+        Δt = times[2] - times[1]
+        core = motion_model.core
+
+        loss() = begin 
+            log_initial = logpdf(x0_dists, trajectory[1])
+            log_transition = transition_logp(core, core_input_seq, core_output_seq, Δt)
+            log_obs = sum(logpdf_obs.(trajectory, observations))
+            -(log_obs + log_transition + log_initial) / n_trans
+        end
 
         step == 1 && loss() # just for testing
         (; val, grad) = Flux.withgradient(loss, all_ps)

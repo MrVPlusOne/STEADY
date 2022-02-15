@@ -534,6 +534,28 @@ function Flux.trainable(l::FluxLayer)
     Flux.trainable(l.trainable)
 end
 ##-----------------------------------------------------------
+# trainable multivairate Normal distributions
+struct MvNormalLayer{Conf, V<:AbsVec, M<:AbsMat}
+    tconf::Conf
+    μ::V
+    U::M  # used as an upper-triangular matrix (the Cholesky decomposition of Σ)
+end
+Flux.@functor MvNormalLayer
+
+function Statistics.cov(layer::MvNormalLayer) 
+    # generate a mask that is 1 for all upper-triangular elements
+    U = UpperTriangular(layer.U)
+    U' * U
+end
+
+function rand(layer::MvNormalLayer)
+    layer.μ + rand(MvNormal(cov(layer)))
+end
+
+function logpdf(layer::MvNormalLayer, x::AbsVec)
+    logpdf(MvNormal(cov(layer)), x - layer.μ)
+end
+##-----------------------------------------------------------
 """
 A wrapper over a trainalbe array parameter that carries the information about whether it 
 requires regularization.

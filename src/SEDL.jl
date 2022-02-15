@@ -26,6 +26,7 @@ using SplitApplyCombine: group as to_groups
 using TimerOutputs
 using Alert, AlertPushover # for notifications
 using RuntimeGeneratedFunctions
+using LinearAlgebra
 RuntimeGeneratedFunctions.init(@__MODULE__)
 
 include("utils.jl")
