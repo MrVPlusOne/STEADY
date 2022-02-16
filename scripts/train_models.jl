@@ -100,12 +100,12 @@ end
 println("--------------------")
 
 Random.seed!(123 + run_id)
-CUDA.seed!(456 + run_id)
 
 use_gpu = gpu_id !== nothing
 if use_gpu
     CUDA.device!(gpu_id)
     @info "Using GPU #$(gpu_id)"
+    CUDA.seed!(456 + run_id)
 else
     @warn "gpu_id = $gpu_id, using CPU."
 end
