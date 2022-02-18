@@ -1,6 +1,6 @@
-struct RealCarScenario <: Scenario end
-
-Base.summary(io::IO, ::RealCarScenario) = print(io, "RealCarScenario")
+struct RealCarScenario <: Scenario
+    data_name::String
+end
 
 function batched_sketch(::RealCarScenario)
     control_vars = (; twist_linear=1, twist_angular=1)
@@ -20,6 +20,8 @@ function pose_from_opt_vars(::RealCarScenario)
 end
 
 function get_simplified_motion_core(::RealCarScenario)
+    # these data are estimated for the AlphaTruck
+
     twist_linear_scale = 1.0f0
     twist_angular_scale = 0.5f0
     max_a_linear = 6.0f0
@@ -144,7 +146,7 @@ function read_data_from_csv(::RealCarScenario, data_dir, tconf::TensorConfig)
     all_data =
         pose_data, control_data = [
             CSV.read(joinpath(data_dir, "$name.csv"), DataFrame) for
-            name in ["vrpn_client_node-alpha_truck-pose", "vesc_drive"]
+            name in ["vrpn-pose", "vesc_drive"]
         ]
 
     sec_start = maximum(l -> l[1, "header.stamp.secs"], all_data)
@@ -195,7 +197,8 @@ function read_data_from_csv(::RealCarScenario, data_dir, tconf::TensorConfig)
     speed_data = (; vel=(pos[ids2, :] .- pos[ids1, :]) ./ ΔT, ω)
 
     states = merge(pose_data, speed_data)
-    batch_data = (
+    batch_data = (;
+        n_trajs,
         times=map(tconf, times[1:(end ÷ n_trajs)]),
         states=break_trajectories(states, n_trajs, tconf),
         controls=break_trajectories(control_data, n_trajs, tconf),

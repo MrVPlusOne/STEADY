@@ -29,7 +29,7 @@ if !isdefined(Main, :script_args)
     script_args = (
         is_quick_test=true,
         gpu_id=0,
-        # scenario=SEDL.HovercraftScenario(),
+        scenario=SEDL.RealCarScenario("ut_automata"),
         # use_simple_obs_model=true,
         train_method=:EM_SLAM,
         n_particles=1000,
@@ -58,7 +58,7 @@ end
     run_id,
 ) = let
     config = (;
-        scenario=SEDL.RealCarScenario(),
+        scenario=SEDL.RealCarScenario("alpha_truck"),
         is_quick_test=false,
         load_trained=false,
         should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
@@ -119,11 +119,21 @@ data_source = if use_sim_data
         n_train_ex, n_valid_ex=min(n_train_ex, 32), n_test_ex=32, times=0:tconf(0.1):10
     )
 else
-    RealData(
-        SEDL.data_dir("real_data", "difficult"),
-        SEDL.data_dir("real_data", "simple_loop"),
-        SEDL.data_dir("real_data", "simple_loop_test"),
-    )
+    @smart_assert scenario isa SEDL.RealCarScenario
+    if scenario.data_name == "alpha_truck"
+        # lagacy format
+        SeparateData(;
+            train_data_dir="datasets/alpha_truck/train",
+            valid_data_dir="datasets/alpha_truck/valid",
+            test_data_dir="datasets/alpha_truck/test",
+        )
+    else
+        MixedData(;
+            data_dir="datasets/$(scenario.data_name)",
+            test_data_ratio=0.25,
+            valid_data_ratio=0.25,
+        )
+    end
 end
 
 state_L2_loss = SEDL.state_L2_loss_batched(scenario)
@@ -151,37 +161,38 @@ landmarks_to_logpdf_obs = landmarks -> begin
     (x, y) -> logpdf(obs_m(x), y)
 end
 
+data_cache_path = let
+    cache_name = savename(
+        (;
+            scenario=summary(scenario),
+            source=string(data_source),
+            use_simple_obs_model,
+            σ_bearing,
+            data_source,
+        ),
+        "serial";
+        connector="-",
+    )
+    SEDL.data_dir("data_cache", cache_name)
+end
 datasets = if data_source isa SimulationData
     true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
     motion_model = SEDL.BatchedMotionModel(
         tconf, sketch, SEDL.batched_core(scenario, true_params)
     )
-
-    data_path = let
-        data_name = savename(
-            (;
-                scenario=summary(scenario),
-                source=string(data_source),
-                use_simple_obs_model,
-                σ_bearing,
-                data_source,
-            ),
-            "serial";
-            connector="-",
-        )
-        SEDL.data_dir("simulation_data", data_name)
-    end
     # cache results to ensure reproducibility
-    data_cpu = generate_or_load(data_path, "datasets") do
-        Flux.cpu(data_from_source(scenario, data_source, tconf; motion_model, obs_model))
+    data_cpu = generate_or_load(data_cache_path, "datasets") do
+        data_from_source(scenario, data_source, tconf; motion_model, obs_model)
     end
-    device(data_cpu)
 else
-    data_from_source(scenario, data_source, tconf; obs_model)
+    data_cpu = generate_or_load(data_cache_path, "datasets") do
+        data_from_source(scenario, data_source, tconf; obs_model)
+    end
 end
 
 data_train, data_valid, data_test = datasets.train, datasets.valid, datasets.test
 
+@smart_assert data_train.states[1].tconf == tconf
 n_train_ex = data_train.states[1].batch_size
 obs_frames = eachindex(data_train.times)
 

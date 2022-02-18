@@ -363,6 +363,7 @@ function plot_batched_series(
     plot_width=600,
     plot_args...,
 )
+    times = TensorConfig(false).(times)
     series = TensorConfig(false).(series)
     truth === nothing || (truth = TensorConfig(false).(truth))
     plot_batched_series(Val(mode), times, series; truth, plot_width, plot_args...)
