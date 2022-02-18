@@ -142,7 +142,7 @@ function train_dynamics_EM_SLAM!(
         controls = getindex.(control_seq, ex_id)
         observations = getindex.(obs_seq, ex_id)
         log_obs_original = landmarks_to_logpdf_obs(landmarks)
-        logpdf_obs = (args...) -> log_obs_original(args...) * obs_weight
+        logpdf_obs = (args...) -> log_obs_original(args...) .* obs_weight
         local pf_result = batched_particle_filter(
             x0,
             (; times, obs_frames, controls, observations);
@@ -160,14 +160,14 @@ function train_dynamics_EM_SLAM!(
         core = motion_model.core
 
         loss() = begin 
-            log_initial = logpdf(x0_dists, trajectory[1])
-            log_transition = transition_logp(core, core_input_seq, core_output_seq, Δt)
-            log_obs = sum(logpdf_obs.(trajectory, observations))
-            -(log_obs + log_transition + log_initial) / n_trans
+            log_initial = sum(logpdf(x0_dists[ex_id], trajectory[1]))
+            log_transition = sum(transition_logp(core, core_input_seq, core_output_seq, Δt))
+            log_obs = sum(logpdf_obs.(trajectory, observations)) |> sum
+            -(log_transition + log_initial + log_obs) / n_trans
         end
 
         step == 1 && loss() # just for testing
-        (; val, grad) = Flux.withgradient(loss, all_ps)
+        (; val, grad) = CUDA.@allowscalar Flux.withgradient(loss, all_ps)
         isfinite(val) || error("Loss is not finite: $val")
         if lr_schedule !== nothing
             optimizer.eta = lr_schedule(step)

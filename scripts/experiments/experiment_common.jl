@@ -28,7 +28,7 @@ check_training_method(method::Symbol) = @smart_assert method ∈ AllTrainingMeth
 
 dynamic_include = include # to avoid mess up the VSCode linter
 
-function run_multiple_times(run_args, n_repeats)
+function train_multiple_times(run_args, n_repeats)
     valid_perfs = []
     test_perfs = []
     for i in 1:n_repeats

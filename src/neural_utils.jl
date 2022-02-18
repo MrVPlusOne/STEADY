@@ -5,6 +5,7 @@ using Flux: @functor, softplus
 using Adapt: Adapt
 using Setfield: @set
 using Zygote: Zygote
+using Distributions: PDMat
 
 export TensorConfig, tensor_type, check_type
 """
@@ -535,8 +536,11 @@ function Flux.trainable(l::FluxLayer)
 end
 ##-----------------------------------------------------------
 # trainable multivairate Normal distributions
-struct MvNormalLayer{Conf, V<:AbsVec, M<:AbsMat}
-    tconf::Conf
+"""
+Currently, this is only supported on CPUs due to the underlying Distributions.jl's 
+implementation.
+"""
+struct MvNormalLayer{V<:AbsVec, M<:AbsMat}
     μ::V
     U::M  # used as an upper-triangular matrix (the Cholesky decomposition of Σ)
 end
@@ -545,15 +549,15 @@ Flux.@functor MvNormalLayer
 function Statistics.cov(layer::MvNormalLayer) 
     # generate a mask that is 1 for all upper-triangular elements
     U = UpperTriangular(layer.U)
-    U' * U
+    PDMat(Cholesky(U))
 end
 
-function rand(layer::MvNormalLayer)
-    layer.μ + rand(MvNormal(cov(layer)))
+function rand(layer::MvNormalLayer, n::Integer)
+    rand(MvNormal(layer.μ, cov(layer)), n)
 end
 
-function logpdf(layer::MvNormalLayer, x::AbsVec)
-    logpdf(MvNormal(cov(layer)), x - layer.μ)
+function logpdf(layer::MvNormalLayer, x)
+    logpdf(MvNormal(layer.μ, cov(layer)), x)
 end
 ##-----------------------------------------------------------
 """

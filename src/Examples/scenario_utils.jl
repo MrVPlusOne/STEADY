@@ -9,6 +9,7 @@ StatsPlots.default(; dpi=300, legend=:outerbottom)
 using Flux: Dense, Chain, Dropout, relu, ADAM
 using CSV: CSV
 using NoiseRobustDifferentiation: NoiseRobustDifferentiation as NDiff
+import Distributions: rand, logpdf
 
 abstract type Scenario end
 
@@ -55,6 +56,12 @@ function landmarks_to_tensor(tconf::TensorConfig, landmarks::AbsVec{<:AbsVec{<:R
     r = landmarks |> SEDL.hcatreduce |> x -> Flux.cat(x'; dims=3)
     @smart_assert size(r) == (length(landmarks), 2, 1)
     tconf(r)
+end
+
+function landmarks_from_tensor(landmark_tensor)::Vector{<:AbsVec{<:Real}}
+    @smart_assert ndims(landmark_tensor) == 3
+    n = size(landmark_tensor,1)
+    [landmark_tensor[i, :, 1] for i in 1:n]
 end
 
 """
@@ -174,6 +181,48 @@ function gaussian_obs_model(state::BatchTuple, σs::NamedTuple{names}) where {na
         end,
     )
 end
+
+struct SE2Distribution{Conf,V,M}
+    tconf::Conf
+    normal_layer::MvNormalLayer{V,M}
+end
+Flux.@functor SE2Distribution
+
+function SE2Distribution(tconf::TensorConfig, μ::AbsVec=randn(6), Σ::AbsMat=Diagonal(ones(6, 6)))
+    @smart_assert size(μ) == (6,)
+    @smart_assert size(Σ) == (6, 6)
+    μ_param = zeros(6)
+    μ_param .= μ
+    U = zeros(6, 6)
+    U .= cholesky(Σ).U
+    normal_layer = MvNormalLayer(μ_param, U)
+    SE2Distribution(tconf, normal_layer)
+end
+
+function rand(dist::SE2Distribution, batchsize::Integer)
+    x = rand(dist.normal_layer, batchsize) |> dist.tconf
+    pos = x[1:2, :]
+    θ = x[3:3, :]
+    angle_2d = vcat(cos.(θ), sin.(θ))
+    vel = x[4:5, :]
+    ω = x[6:6, :]
+    BatchTuple(dist.tconf, batchsize, (; pos, angle_2d, vel, ω))
+end
+
+function logpdf(dist::SE2Distribution, state::BatchTuple)
+    (; pos, angle_2d, vel, ω) = state.val
+    tconf = state.tconf
+    μ = tconf(reshape(dist.normal_layer.μ, 6, 1))
+    dθ = @. _restrict_angle(atan(angle_2d[2:2, :], angle_2d[1:1, :]) - μ[3:3, :])
+    diff = vcat(
+        pos .- μ[1:2, :],
+        dθ,
+        vel .- μ[4:5, :],
+        ω .- μ[6:6, :],
+    ) |> Flux.cpu
+    logpdf(MvNormal(cov(dist.normal_layer)), diff) |> tconf
+end
+
 
 function batched_sketch_SE2(control_vars)
     state_vars = (; pos=2, angle_2d=2, vel=2, ω=1)
@@ -444,6 +493,11 @@ function plot_2d_trajectories!(
     xs = eachrow(xs_mat) |> collect |> vcatreduce
     ys = eachrow(ys_mat) |> collect |> vcatreduce
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha, aspect_ratio=1.0)
+end
+
+function plot_2d_landmarks!(landmarks::AbsVec{<:AbsVec}, name::String; color=2, plt_args...)
+    @unzip xs, ys = Flux.cpu(landmarks)
+    scatter!(xs, ys; label="Landmarks ($name)", color, plt_args...)
 end
 
 @kwdef struct ScenarioSetup{A<:AbsVec{Float64},B<:AbsVec{Int},X<:NamedTuple,Ctrl<:Function}

@@ -195,8 +195,8 @@ function batched_trajectories(pf_result, n_trajs; record_io=false)
         pf_result
     if record_io
         (; core_inputs, core_outputs) = pf_result
-        core_input_seq = []
-        core_output_seq = []
+        core_input_seq = BatchTuple[]
+        core_output_seq = BatchTuple[]
     end
     # first sample indices at the last time step according to the final weights
     indices = systematic_resample(weights, n_trajs)

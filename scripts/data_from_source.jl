@@ -1,3 +1,5 @@
+using Base: @kwdef
+
 abstract type DataSource end
 
 @kwdef struct SimulationData <: DataSource

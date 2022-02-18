@@ -26,7 +26,7 @@ let
             use_simple_obs_model=true,
             train_method,
         )
-        local perfs = run_multiple_times(script_args, 5).test_performance
+        local perfs = train_multiple_times(script_args, 5).test_performance
         local measure = map(SEDL.to_measurement, perfs)
         local best = (; log_obs=maximum(perfs.log_obs), RMSE=minimum(perfs.RMSE))
         push!(perf_measure, merge((; method=train_method), measure))

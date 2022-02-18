@@ -623,6 +623,12 @@ function combine_functions(functions::NamedTuple{names}) where {names}
 end
 
 function data_dir(segs...)
-    path = read(projectdir("configs/datadir.txt"), String) |> strip
+    fpath = projectdir("configs/datadir.txt")
+    if !isfile(fpath)
+        @warn "Couldn't find $fpath. It will be created and default to `data`."
+        mkpath(dirname(fpath))
+        write(fpath, "data")
+    end
+    path = read(fpath, String) |> strip
     joinpath(path, segs...)
 end

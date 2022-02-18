@@ -17,6 +17,7 @@ using Statistics
 using Setfield
 using Distributions: logpdf
 using CSV: CSV
+using LinearAlgebra
 
 include("experiments/experiment_common.jl")
 include("data_from_source.jl")
@@ -27,10 +28,10 @@ if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
         is_quick_test=true,
-        gpu_id=7,
-        scenario=SEDL.HovercraftScenario(),
-        use_simple_obs_model=true,
-        train_method=:EM,
+        gpu_id=0,
+        # scenario=SEDL.HovercraftScenario(),
+        # use_simple_obs_model=true,
+        train_method=:EM_SLAM,
         n_particles=1000,
     )
 end
@@ -135,16 +136,20 @@ else
     [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
 end
 
-obs_model = if use_simple_obs_model
-    let σs = (pos=0.2, angle_2d=0.2, vel=0.2, ω=0.2)
+if use_simple_obs_model
+    obs_model = let σs = (pos=0.2, angle_2d=0.2, vel=0.2, ω=0.2)
         state -> SEDL.gaussian_obs_model(state, σs)
     end
 else
-    let landmark_tensor = SEDL.landmarks_to_tensor(tconf, landmarks)
-        state -> SEDL.landmark_obs_model_warp(state, (; landmarks=landmark_tensor, σ_bearing))
-    end
+    landmarks_to_obs_model =
+        landmarks -> x -> SEDL.landmark_obs_model_warp(x, (; landmarks, σ_bearing))
+    obs_model = landmarks_to_obs_model(SEDL.landmarks_to_tensor(tconf, landmarks))
 end
 logpdf_obs(x, y) = logpdf(obs_model(x), y)
+landmarks_to_logpdf_obs = landmarks -> begin
+    obs_m = landmarks_to_obs_model(landmarks)
+    (x, y) -> logpdf(obs_m(x), y)
+end
 
 datasets = if data_source isa SimulationData
     true_params = map(p -> convert(tconf.ftype, p), SEDL.simulation_params(scenario))
@@ -181,14 +186,10 @@ n_train_ex = data_train.states[1].batch_size
 obs_frames = eachindex(data_train.times)
 
 let
-    visual_id = 1
-    first_states = [map(m -> m[:], Flux.cpu(b[visual_id].val)) for b in data_train.states]
-    landmark_obs = [((; landmarks=fill(true, length(landmarks)))) for _ in first_states]
-    obs_data = (; obs_frames=1:10:length(data_train.times), observations=landmark_obs)
     plot()
-    SEDL.plot_2d_scenario!(first_states, obs_data, "Ground truth"; landmarks)
-    SEDL.plot_2d_trajectories!(data_train.states, "forward simulation") |> display
-end
+    SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+    SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+end |> display
 
 SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.states, 1); title="States"
@@ -287,19 +288,29 @@ end
 
 function save_model_weights!()
     mm_weights = Flux.params(Main.learned_motion_model)
-    serialize(joinpath(save_dir, "mm_weights.bson"), mm_weights)
+    serialize(joinpath(save_dir, "mm_weights.serial"), mm_weights)
     if train_method == :SVI
         guide_weights = Flux.params(guide)
-        serialize(joinpath(save_dir, "guide_weights.bson"), guide_weights)
+        serialize(joinpath(save_dir, "guide_weights.serial"), guide_weights)
+    end
+    if train_method == :EM_SLAM
+        serialize(joinpath(save_dir, "landmark_guess.serial"), landmark_guess)
+        serialize(joinpath(save_dir, "x0_dists.serial"), Flux.params(x0_dists))
     end
 end
 
 function load_model_weights!()
-    mm_weights = deserialize(joinpath(save_dir, "mm_weights.bson"))
+    mm_weights = deserialize(joinpath(save_dir, "mm_weights.serial"))
     Flux.loadparams!(Main.learned_motion_model, device(mm_weights))
     if train_method == :SVI
-        guide_weights = deserialize(joinpath(save_dir, "guide_weights.bson"))
+        guide_weights = deserialize(joinpath(save_dir, "guide_weights.serial"))
         Flux.loadparams!(guide, device(guide_weights))
+    end
+    if train_method == :EM_SLAM
+        Main.landmark_guess .= deserialize(joinpath(save_dir, "landmark_guess.serial"))
+        Flux.loadparams!(
+            x0_dists, device(deserialize(joinpath(save_dir, "x0_dists.serial")))
+        )
     end
 end
 
@@ -372,6 +383,15 @@ if train_method == :SVI
     display
 end
 
+if train_method == :EM_SLAM
+    landmark_guess = SEDL.landmarks_to_tensor(tconf, [randn(size(l)) for l in landmarks])
+
+    x0_dists = map(1:n_train_ex) do _
+        Σ = Diagonal(5 * ones(6, 6))
+        SEDL.SE2Distribution(tconf, randn(6), Σ)
+    end
+end
+
 if load_trained && train_method != :Handwritten
     @warn "Loading motion model weights from file..."
     load_model_weights!()
@@ -386,6 +406,7 @@ function em_callback(
     early_stopping::SEDL.EarlyStopping;
     n_steps,
     test_every=100,
+    landmark_est=nothing,
 )
     prog = Progress(n_steps; showspeed=true)
     function (r)
@@ -400,6 +421,28 @@ function em_callback(
 
             Base.with_logger(logger) do
                 @info "validation" valid_metrics... log_step_increment = 0
+            end
+
+            # plot 2d trajectories
+            scenario_plt = plot()
+            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+            if landmark_est !== nothing
+                SEDL.plot_2d_landmarks!(
+                    SEDL.landmarks_from_tensor(landmark_est), "estimated"; color=4
+                )
+                logpdf_obs_est = landmarks_to_logpdf_obs(landmark_est)
+            else
+                logpdf_obs_est = logpdf_obs
+            end
+
+            let pf_trajs = SEDL.sample_posterior_pf(
+                    learned_motion_model, logpdf_obs_est, data_train, 1; obs_frames
+                )
+                SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=3)
+            end
+
+            Base.with_logger(logger) do
+                @info "training" scenario_plt log_step_increment = 0
             end
 
             for name in ["training", "testing"], id in [1, 2]
@@ -463,7 +506,6 @@ if !load_trained && (train_method == :EM)
 end
 ##-----------------------------------------------------------
 # simultaneous SLAM + dynamics learnings
-
 if !load_trained && (train_method == :EM_SLAM)
     with_alert("EM_SLAM training") do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
@@ -474,26 +516,44 @@ if !load_trained && (train_method == :EM_SLAM)
             step -> max_obs_weight
         end
 
-        landmark_guess = error("todo")
+        @smart_assert !use_simple_obs_model "Cannot use simple obs model with EM_SLAM"
 
         @info "EM_SLAM: Starting training..."
-        SEDL.train_dynamics_EM(
+        SEDL.train_dynamics_EM_SLAM!(
             learned_motion_model,
-            logpdf_obs,
-            data_train.states[1],
+            landmark_guess,
+            landmarks_to_logpdf_obs,
+            x0_dists,
             data_train.observations,
             data_train.controls,
             (; data_train.times, obs_frames);
             optimizer=adam,
             n_steps,
             n_particles,
-            callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
+            callback=em_callback(
+                learned_motion_model,
+                es;
+                landmark_est=landmark_guess,
+                n_steps,
+                test_every=500,
+            ),
             obs_weight_schedule,
         )
         @info "Best model: $(es.model_info)"
     end
     load_model_weights!()
 end
+
+landmark_plt = let
+    plot()
+    SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+    SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+    SEDL.plot_2d_landmarks!(
+        SEDL.landmarks_from_tensor(landmark_guess), "estimated"; color=4, marker=:auto
+    )
+end
+display(landmark_plt)
+savefig(landmark_plt, joinpath(save_dir, "landmarks.pdf"))
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
 function supervised_callback(
