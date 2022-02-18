@@ -140,10 +140,18 @@ state_L2_loss = SEDL.state_L2_loss_batched(scenario)
 
 sketch = SEDL.batched_sketch(scenario)
 
+# temporarily hardcoded
 landmarks = if use_sim_data
     [[12.0, -8.0], [-6.0, -4.0], [-4.0, 10.0], [6.0, 7.0]]
 else
-    [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
+    if scenario.data_name == "alpha_truck"
+        # lagacy format
+        [[-1.230314, -0.606814], [0.797073, 0.889471], [-3.496525, 0.207874], [0.0, 6.0]]
+    elseif scenario.data_name == "ut_automata"
+        [[1.2, -1], [0.6, -4], [-1.5, 1.1], [-4.2, -1.0]]
+    else
+        error("Not implemented.")
+    end
 end
 
 if use_simple_obs_model
