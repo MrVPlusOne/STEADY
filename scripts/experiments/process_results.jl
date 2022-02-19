@@ -7,23 +7,21 @@ StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 function show_baseline_comparison(
     scenarios_and_csv::Vector{Tuple{String,String}},
-    metric::String;
+    metric::String,
+    method_names::Vector{String};
     backend,
     drop_uncertainty=true,
     lower_is_better=true,
-    exclude=[],
 )
     @assert drop_uncertainty "current only drop_uncertainty=true is supported"
-
-    method_names = nothing
 
     sce_results = map(scenarios_and_csv) do (_, csv_file)
         table = CSV.read(csv_file, DataFrame)
         # get the column corresponding to the metric
-        scores = parse_measurement.(table[:, metric])
-        method_names === nothing && (method_names = table[:, "name"])
-        d = Dict(zip(method_names, scores))
-        [d[n] for n in method_names if n ∉ exclude]
+        scores = parse_measurement_mean.(table[:, metric])
+        keys = table[:, "method"]
+        d = Dict(zip(keys, scores))
+        [get(d, k, missing) for k in method_names]
     end
 
     best_ids = map(enumerate(sce_results)) do (col, scores)
@@ -39,36 +37,46 @@ function show_baseline_comparison(
 
     scenarios = getindex.(scenarios_and_csv, 1)
 
-    table_header = ["method - data"; scenarios]
-    table_data = hcat(filter(n -> n ∉ exclude, method_names), sce_results...)
+    table_header = ["method vs. data"; scenarios]
+    table_data = hcat(method_names, sce_results...)
     pretty_table(
         table_data; backend, header=table_header, highlighters=hl_best, alignment=:l
     )
 end
 
-function parse_measurement(text::AbstractString)
+function parse_measurement_mean(text::AbstractString)
     segs = split(text, "±")
     @assert length(segs) == 2
     parse(Float64, segs[1])
 end
 
+methods_of_interest = [
+    "Handwritten",
+    "FitTV",
+    "FitHand",
+    "SVI",
+    "EM",
+    # "FitTruth",
+]
+
 function print_baseline_tables(backend=:text)
     data_paths = [
-        ("Hover", "results/comparisons/hover.csv"),
-        ("HoverS", "results/comparisons/hover-S.csv"),
-        ("HoverS256", "results/comparisons/hover-S-256.csv"),
-        ("Car", "results/comparisons/real.csv"),
-        ("CarS", "results/comparisons/real-S.csv"),
+        ("Hover", "results/comparisons/Hover/average.csv"),
+        ("HoverS", "results/comparisons/HoverS/average.csv"),
+        ("Hover256", "results/comparisons/Hover256/average.csv"),
+        ("Car", "results/comparisons/Car/average.csv"),
+        ("CarS", "results/comparisons/CarS/average.csv"),
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE"; backend, exclude=["FitTruth"])
+    show_baseline_comparison(data_paths, "RMSE", methods_of_interest; backend)
     println("==== Observation Log Probability ====")
     show_baseline_comparison(
-        data_paths, "log_obs"; lower_is_better=false, backend, exclude=["FitTruth"]
+        data_paths, "log_obs", methods_of_interest; lower_is_better=false, backend
     )
 end
 
+# FIXME: outdated
 function print_perf_vs_schedule(backend=:text)
     data_paths = [
         ("σ=1°", "results/obs_schedule_variation_1.0.csv"),
@@ -76,15 +84,15 @@ function print_perf_vs_schedule(backend=:text)
     ]
 
     println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE"; backend)
+    show_baseline_comparison(data_paths, "RMSE", methods_of_interest; backend)
     println("==== Forward prediction RMSE ====")
-    show_baseline_comparison(data_paths, "open_loop"; backend)
+    show_baseline_comparison(data_paths, "open_loop", methods_of_interest; backend)
 end
 
 function print_perf_vs_noise(backend=:text)
     table = CSV.read("results/obs_noise_variation.csv", DataFrame)
-    RMSE = parse_measurement.(table[:, "RMSE"])
-    open_loop = parse_measurement.(table[:, "open_loop"])
+    RMSE = parse_measurement_mean.(table[:, "RMSE"])
+    open_loop = parse_measurement_mean.(table[:, "open_loop"])
     σs = map(table[:, "name"]) do name
         split(name, "=")[2]
     end
@@ -114,7 +122,7 @@ function plot_perf_vs_noise(; plot_args...)
     errors = map(data_files) do (_, file)
         table = CSV.read(file, DataFrame)
         methods = table[:, "name"]
-        RMSE = parse_measurement.(table[:, "RMSE"])
+        RMSE = parse_measurement_mean.(table[:, "RMSE"])
         Dict(zip(methods, RMSE))
     end
 
@@ -137,10 +145,11 @@ function plot_perf_vs_noise(; plot_args...)
 end
 ##-----------------------------------------------------------
 
+print_baseline_tables()
 print_baseline_tables(:latex)
 print_perf_vs_schedule()
 print_perf_vs_noise()
-let plt = plot_perf_vs_noise(size=(450, 300), xticks=[1,4,8,12,16])
+let plt = plot_perf_vs_noise(; size=(450, 300), xticks=[1, 4, 8, 12, 16])
     display(plt)
     savefig(plt, "results/vary_obs_noise/vary_obs_noise.pdf")
 end

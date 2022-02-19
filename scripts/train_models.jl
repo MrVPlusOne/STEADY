@@ -905,8 +905,8 @@ exp_name = isnothing(exp_name) ? string(train_method) : exp_name
 test_performance = evaluate_model(learned_motion_model, data_test)
 valid_performance = evaluate_model(learned_motion_model, data_valid)
 perf_table = DataFrame([
-    (; name=exp_name, valid_performance...),
-    (; name="(valid) $exp_name", test_performance...),
+    (; name=exp_name, test_performance...),
+    (; name="(valid) $exp_name", valid_performance...),
 ])
 display(perf_table)
 CSV.write(joinpath(save_dir, "performance.csv"), perf_table)
