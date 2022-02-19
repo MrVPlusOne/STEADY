@@ -1,0 +1,6 @@
+method,log_obs,RMSE
+Handwritten,9.3 ± 1.7,1.063 ± 0.028
+Super_Hand,23.9 ± 1.5,0.718 ± 0.018
+Super_TV,19.6 ± 1.0,0.731 ± 0.025
+Super_noiseless,33.1 ± 1.2,0.406 ± 0.022
+EM,35.07 ± 0.69,0.444 ± 0.019
