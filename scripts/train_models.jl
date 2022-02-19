@@ -244,7 +244,7 @@ function plot_posterior(
     pf_trajs = SEDL.sample_posterior_pf(
         motion_model, logpdf_obs, data, sample_id; n_particles, n_trajs, obs_frames
     )
-    plot_batched_series(
+    SEDL.plot_batched_series(
         data.times, pf_trajs; truth=getindex.(data.states, sample_id), plot_args...
     )
 end
@@ -300,6 +300,9 @@ function with_alert(task::Function, task_name::String)
         is_quick_test || alert("$task_name finished. Setting: $script_args.")
         result
     catch e
+        if e isa InterruptException
+            throw(InterruptException()) # don't need the notification and stack trace.
+        end
         alert("$task_name stopped due to exception: $(summary(e)).")
         rethrow()
     end
@@ -434,7 +437,7 @@ function em_callback(
         end
 
         # Compute test log_obs and plot a few trajectories.
-        if r.step % test_every == 1
+        if r.step % test_every == 1 || r.step == n_steps
             valid_metrics = posterior_metrics(learned_motion_model, data_valid)
             to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
 
@@ -447,18 +450,27 @@ function em_callback(
             SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
             if landmark_est !== nothing
                 SEDL.plot_2d_landmarks!(
-                    SEDL.landmarks_from_tensor(landmark_est), "estimated"; color=4
+                    SEDL.landmarks_from_tensor(landmark_est),
+                    "estimated";
+                    color=4,
+                    marker=:auto,
                 )
                 logpdf_obs_est = landmarks_to_logpdf_obs(landmark_est)
             else
                 logpdf_obs_est = logpdf_obs
             end
 
+            Base.with_logger(logger) do
+                @info "training" landmarks=scenario_plt log_step_increment = 0
+            end
+
             let pf_trajs = SEDL.sample_posterior_pf(
                     learned_motion_model, logpdf_obs_est, data_train, 1; obs_frames
                 )
-                SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=3)
+                SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=1)
             end
+            SEDL.plot_2d_trajectories!(getindex.(data_train.states, 1), "truth"; linecolor=3)
+
 
             Base.with_logger(logger) do
                 @info "training" scenario_plt log_step_increment = 0
@@ -561,18 +573,21 @@ if !load_trained && (train_method == :EM_SLAM)
         @info "Best model: $(es.model_info)"
     end
     load_model_weights!()
-end
 
-landmark_plt = let
-    plot()
-    SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
-    SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
-    SEDL.plot_2d_landmarks!(
-        SEDL.landmarks_from_tensor(landmark_guess), "estimated"; color=4, marker=:auto
-    )
+    landmark_plt = let
+        plot()
+        SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+        SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+        SEDL.plot_2d_landmarks!(
+            SEDL.landmarks_from_tensor(landmark_guess),
+            "estimated";
+            color=4,
+            marker=:auto,
+        )
+    end
+    display(landmark_plt)
+    savefig(landmark_plt, joinpath(save_dir, "landmarks.pdf"))
 end
-display(landmark_plt)
-savefig(landmark_plt, joinpath(save_dir, "landmarks.pdf"))
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
 function supervised_callback(
@@ -590,7 +605,7 @@ function supervised_callback(
         end
 
         # Compute test log_obs and plot a few trajectories.
-        if r.step % test_every == 1
+        if r.step % test_every == 1 || r.step == n_steps
             valid_metrics = posterior_metrics(learned_motion_model, data_valid)
             to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
 
@@ -759,7 +774,7 @@ function vi_callback(
         end
 
         # Compute test elbo and plot a few trajectories.
-        if r.step % test_every == 1
+        if r.step % test_every == 1 || r.step == n_steps
             test_trajs, test_lp_guide, test_core_in, test_core_out = guide(
                 test_x0_batch, repeated_obs_seq, repeated_control_seq, data_test.Δt
             )
@@ -822,8 +837,7 @@ end
 
 if !load_trained && train_method == :SVI
     with_alert("VI training") do
-        total_steps = max_train_steps
-        n_steps = is_quick_test ? 3 : total_steps + 1
+        n_steps = is_quick_test ? 3 : max_train_steps + 1
 
         n_repeat = min(10, 512 ÷ n_train_ex)
         vi_x0 = repeat(data_train.states[1], n_repeat)

@@ -109,7 +109,7 @@ distributions will be optimized in the EM loop and should support
 """
 function train_dynamics_EM_SLAM!(
     motion_model::BatchedMotionModel,
-    landmarks_guess::AbstractArray,
+    landmarks::AbstractArray,
     landmarks_to_logpdf_obs::Function,
     x0_dists::Vector,
     obs_seq,
@@ -125,8 +125,6 @@ function train_dynamics_EM_SLAM!(
     weight_decay=1.0f-4,
 )
     n_examples = length(x0_dists)
-
-    landmarks = deepcopy(landmarks_guess)
     tconf = motion_model.tconf
 
     all_ps = Flux.params(motion_model.core, landmarks, x0_dists)

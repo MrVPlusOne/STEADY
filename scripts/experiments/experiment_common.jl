@@ -1,8 +1,9 @@
 !true && begin
     include("../../src/SEDL.jl")
     using .SEDL
-    using .SEDL: @kwdef, @smart_assert, °
+    using .SEDL: @kwdef, °
 end
+using SmartAsserts: @smart_assert
 using SEDL
 using Alert
 
@@ -13,7 +14,7 @@ AllTrainingMethods = [
     :FitHand,
     # Use MAP estimation to obtain states from observations, then apply total 
     # variation regularization to obtain learning data.
-    :FitTv,
+    :FitTV,
     # Directly learning from ground truth states. Does not use the observation model.
     :FitTruth,
     # Stochastic variational inference.

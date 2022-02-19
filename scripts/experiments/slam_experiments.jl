@@ -10,7 +10,7 @@ perfs = let script_args = (;
     train_method=:EM_SLAM,
 )
 
-    train_multiple_times(script_args, 5).test_performance
+    train_multiple_times(script_args, 1).test_performance
 end
 
 display(DataFrame([map(SEDL.to_measurement, perfs)]))

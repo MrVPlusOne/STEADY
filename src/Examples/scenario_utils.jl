@@ -401,7 +401,7 @@ end
 """
 The state needs to contain the properties `pos` and `θ`.
 """
-function plot_2d_scenario!(
+function plot_2d_scenario_old!(
     states::AbsVec,
     obs_data,
     name::String;
@@ -484,7 +484,7 @@ function plot_2d_trajectories!(
     trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1
 )
     n_trajs = trajectories[1].batch_size
-    linealpha = min(2.0 / sqrt(length(n_trajs)), 1.0)
+    linealpha = min(1.0 / sqrt(length(n_trajs)), 1.0)
     pos_seq = (x -> Flux.cpu(x.val.pos)).(trajectories)
     end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
     push!(pos_seq, end_marker)
