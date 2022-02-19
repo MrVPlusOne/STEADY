@@ -5,28 +5,47 @@ using Measurements
 using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 
+MethodRenamingTable = [
+    "Super_Hand" => "FitHand",
+    "Super_TV" => "FitTV",
+    "Super_noiseless" => "FitTruth",
+    "VI" => "SVI",
+]
+
+MethodsOfInterest = [
+    "Handwritten",
+    "FitTV",
+    "FitHand",
+    "SVI",
+    "EM",
+    # "FitTruth",
+]
+
 function show_baseline_comparison(
-    scenarios_and_csv::Vector{Tuple{String,String}},
+    scenarios::Vector{String},
+    tables::Vector{<:DataFrame},
     metric::String,
-    method_names::Vector{String};
+    method_names::Vector{String}=MethodsOfInterest;
     backend,
     drop_uncertainty=true,
     lower_is_better=true,
 )
     @assert drop_uncertainty "current only drop_uncertainty=true is supported"
 
-    sce_results = map(scenarios_and_csv) do (_, csv_file)
-        table = CSV.read(csv_file, DataFrame)
+    sce_results = map(tables) do table
         # get the column corresponding to the metric
         scores = parse_measurement_mean.(table[:, metric])
-        keys = table[:, "method"]
+        keys = replace(table[:, "method"], MethodRenamingTable...)
         d = Dict(zip(keys, scores))
         [get(d, k, missing) for k in method_names]
     end
 
     best_ids = map(enumerate(sce_results)) do (col, scores)
-        find_f = lower_is_better ? findmin : findmax
-        _, row = find_f(scores)
+        if lower_is_better
+            _, row = findmin(replace(scores, missing => Inf))
+        else
+            _, row = findmax(replace(scores, missing => -Inf))
+        end
         (row, col)
     end
     hl_best = if backend == :text
@@ -34,8 +53,6 @@ function show_baseline_comparison(
     else
         LatexHighlighter((data, i, j) -> (i, j - 1) in best_ids, ["textbf"])
     end
-
-    scenarios = getindex.(scenarios_and_csv, 1)
 
     table_header = ["method vs. data"; scenarios]
     table_data = hcat(method_names, sce_results...)
@@ -45,34 +62,46 @@ function show_baseline_comparison(
 end
 
 function parse_measurement_mean(text::AbstractString)
-    segs = split(text, "±")
-    @assert length(segs) == 2
-    parse(Float64, segs[1])
+    if occursin("±", text)
+        segs = split(text, "±")
+        @assert length(segs) == 2
+        parse(Float64, segs[1])
+    else
+        parse(Float64, text)
+    end
 end
-
-methods_of_interest = [
-    "Handwritten",
-    "FitTV",
-    "FitHand",
-    "SVI",
-    "EM",
-    # "FitTruth",
-]
+function parse_measurement_mean(n::AbstractFloat)
+    convert(Float64, n)
+end
 
 function print_baseline_tables(backend=:text)
     data_paths = [
-        ("Hover", "results/comparisons/Hover/average.csv"),
-        ("HoverS", "results/comparisons/HoverS/average.csv"),
-        ("Hover256", "results/comparisons/Hover256/average.csv"),
-        ("Car", "results/comparisons/Car/average.csv"),
-        ("CarS", "results/comparisons/CarS/average.csv"),
+        ("Hover", "results/comparisons/Hover/"),
+        ("HoverS", "results/comparisons/HoverS/"),
+        ("Hover256", "results/comparisons/Hover256/"),
+        ("Car", "results/comparisons/Car/"),
+        ("CarS", "results/comparisons/CarS/"),
     ]
+    scenarios = getindex.(data_paths, 1)
+    best_tables = map(data_paths) do (_, path)
+        CSV.read(joinpath(path, "best.csv"), DataFrame)
+    end
+    avg_tables = map(data_paths) do (_, path)
+        CSV.read(joinpath(path, "average.csv"),DataFrame)
+    end
 
-    println("==== State estimation RMSE ====")
-    show_baseline_comparison(data_paths, "RMSE", methods_of_interest; backend)
-    println("==== Observation Log Probability ====")
+    println("==== State Estimation RMSE (average) ====")
+    show_baseline_comparison(scenarios, avg_tables, "RMSE"; backend)
+    println("==== State Estimation RMSE (best) ====")
+    show_baseline_comparison(scenarios, best_tables, "RMSE"; backend)
+
+    println("==== Observation Log Probability (average) ====")
     show_baseline_comparison(
-        data_paths, "log_obs", methods_of_interest; lower_is_better=false, backend
+        scenarios, avg_tables, "log_obs"; lower_is_better=false, backend
+    )
+    println("==== Observation Log Probability (best) ====")
+    show_baseline_comparison(
+        scenarios, best_tables, "log_obs"; lower_is_better=false, backend
     )
 end
 
@@ -144,7 +173,6 @@ function plot_perf_vs_noise(; plot_args...)
     plt
 end
 ##-----------------------------------------------------------
-
 print_baseline_tables()
 print_baseline_tables(:latex)
 print_perf_vs_schedule()
