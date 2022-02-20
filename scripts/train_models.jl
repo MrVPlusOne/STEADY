@@ -200,9 +200,13 @@ end
 
 data_train, data_valid, data_test = datasets.train, datasets.valid, datasets.test
 
+get_n_ex(dataset) = dataset.states[1].batch_size
+
 @smart_assert data_train.states[1].tconf == tconf
-n_train_ex = data_train.states[1].batch_size
+n_train_ex = get_n_ex(data_train)
 obs_frames = eachindex(data_train.times)
+
+@info "dataset sizes" sizes = get_n_ex.((data_train, data_valid, data_test))
 
 let
     plot()
@@ -294,10 +298,12 @@ function posterior_metrics(
     end
 end
 
-function with_alert(task::Function, task_name::String)
+function with_alert(task::Function, task_name::String, report_finish=true)
     try
         local result = task()
-        is_quick_test || alert("$task_name finished. Setting: $script_args.")
+        if report_finish
+            alert("$task_name finished. Setting: $script_args.")
+        end
         result
     catch e
         if e isa InterruptException
@@ -461,7 +467,7 @@ function em_callback(
             end
 
             Base.with_logger(logger) do
-                @info "training" landmarks=scenario_plt log_step_increment = 0
+                @info "training" landmarks = scenario_plt log_step_increment = 0
             end
 
             let pf_trajs = SEDL.sample_posterior_pf(
@@ -469,7 +475,9 @@ function em_callback(
                 )
                 SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=1)
             end
-            SEDL.plot_2d_trajectories!(getindex.(data_train.states, 1), "truth"; linecolor=3)
+            SEDL.plot_2d_trajectories!(
+                getindex.(data_train.states, 1), "truth"; linecolor=3
+            )
 
 
             Base.with_logger(logger) do
@@ -509,9 +517,9 @@ function em_callback(
 end
 
 if !load_trained && (train_method == :EM)
-    with_alert("EM training") do
+    with_alert("EM training", !is_quick_test) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
-        es = SEDL.EarlyStopping(; patience=40)
+        es = SEDL.EarlyStopping(; patience=30)
         obs_weight_schedule = if use_obs_weight_schedule
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
@@ -538,9 +546,9 @@ end
 ##-----------------------------------------------------------
 # simultaneous SLAM + dynamics learnings
 if !load_trained && (train_method == :EM_SLAM)
-    with_alert("EM_SLAM training") do
+    with_alert("EM_SLAM training", !is_quick_test) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
-        es = SEDL.EarlyStopping(; patience=40)
+        es = SEDL.EarlyStopping(; patience=30)
         obs_weight_schedule = if use_obs_weight_schedule
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
@@ -571,22 +579,22 @@ if !load_trained && (train_method == :EM_SLAM)
             obs_weight_schedule,
         )
         @info "Best model: $(es.model_info)"
-    end
-    load_model_weights!()
+        load_model_weights!()
 
-    landmark_plt = let
-        plot()
-        SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
-        SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
-        SEDL.plot_2d_landmarks!(
-            SEDL.landmarks_from_tensor(landmark_guess),
-            "estimated";
-            color=4,
-            marker=:auto,
-        )
+        landmark_plt = let
+            plot()
+            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+            SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+            SEDL.plot_2d_landmarks!(
+                SEDL.landmarks_from_tensor(landmark_guess),
+                "estimated";
+                color=4,
+                marker=:auto,
+            )
+        end
+        display(landmark_plt)
+        savefig(landmark_plt, joinpath(save_dir, "landmarks.pdf"))
     end
-    display(landmark_plt)
-    savefig(landmark_plt, joinpath(save_dir, "landmarks.pdf"))
 end
 ##-----------------------------------------------------------
 # train the model using supervised learning (assuming having ground truth trajectories)
@@ -665,7 +673,7 @@ end
 
 !load_trained &&
     (train_method ∈ [:FitTV, :FitTruth, :FitHand]) &&
-    let
+    with_alert("Supervised training ($train_method)", false) do
         data_multiplicity = (train_method == :FitHand) ? max(128 ÷ n_train_ex, 1) : 1
         states_train = if train_method == :FitTV
             est_result = SEDL.estimate_states_from_observations_SE2(
@@ -730,7 +738,8 @@ end
             repeat_seq(data_train.controls, data_multiplicity),
             data_train.times;
             # do not test if the graident is regularized
-            test_consistency=train_method == :FitTruth,
+            # test_consistency=train_method == :FitTruth,
+            test_consistency=false,
         )
 
         @info "Number of training data: $(sum(x -> x.batch_size, core_in_set))"
@@ -738,7 +747,7 @@ end
         let
             total_steps = 40_000
             n_steps = is_quick_test ? 3 : total_steps + 1
-            es = SEDL.EarlyStopping(; patience=40)
+            es = SEDL.EarlyStopping(; patience=30)
             SEDL.train_dynamics_supervised!(
                 learned_motion_model.core,
                 BatchTuple(core_in_set),
@@ -836,7 +845,7 @@ function vi_callback(
 end
 
 if !load_trained && train_method == :SVI
-    with_alert("VI training") do
+    with_alert("VI training", !is_quick_test) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
 
         n_repeat = min(10, 512 ÷ n_train_ex)
@@ -845,7 +854,7 @@ if !load_trained && train_method == :SVI
         vi_control_seq = repeat.(data_train.controls, n_repeat)
 
         @info "Training the guide..."
-        es = SEDL.EarlyStopping(; patience=40)
+        es = SEDL.EarlyStopping(; patience=30)
         train_result = @time SEDL.train_VI!(
             guide,
             learned_motion_model.core,

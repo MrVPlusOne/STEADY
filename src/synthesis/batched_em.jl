@@ -194,6 +194,8 @@ function input_output_from_trajectory(
 
     core_in, core_out = BatchTuple[], BatchTuple[]
 
+    is_close(x, y) = isapprox(x, y, atol=1f-4)
+
     for t in 1:(length(state_seq) - 1)
         core_input = sketch.state_to_input(state_seq[t], control_seq[t])
         Δt = times[t + 1] - times[t]
@@ -203,7 +205,7 @@ function input_output_from_trajectory(
             foreach(
                 keys(state_pred.val), state_pred.val, state_seq[t + 1].val
             ) do comp, x̂, x1
-                @smart_assert x̂ ≈ x1 "Failed for component $comp at time $t"
+                @smart_assert is_close(x̂, x1) "Failed for component $comp at time $t"
             end
         end
         push!(core_in, core_input)
