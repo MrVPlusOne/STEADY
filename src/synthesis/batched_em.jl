@@ -37,13 +37,14 @@ function train_dynamics_EM!(
 )
     n_examples = common_batch_size(x0_batch, obs_seq[1], control_seq[1])
     @smart_assert n_examples >= examples_per_step > 0
-    T = length(obs_seq)
 
     all_ps = Flux.params(motion_model.core)
     @smart_assert length(all_ps) > 0 "No parameters to optimize."
     @info "total number of array parameters: $(length(all_ps))"
     reg_ps = Flux.Params(collect(regular_params(motion_model.core)))
     @info "total number of regular parameters: $(length(reg_ps))"
+
+    training_time = 0.0  # in seconds
 
     for step in 1:n_steps
         ex_ids = shuffle(1:n_examples)[1:examples_per_step]
@@ -77,18 +78,20 @@ function train_dynamics_EM!(
         loss() = -transition_logp(core, core_in_set, core_out_set, Δt) / n_trans
 
         step == 1 && loss() # just for testing
-        (; val, grad) = Flux.withgradient(loss, all_ps)
-        isfinite(val) || error("Loss is not finite: $val")
-        if lr_schedule !== nothing
-            optimizer.eta = lr_schedule(step)
-        end
-            
-        Flux.update!(optimizer, all_ps, grad) # update parameters
-        for p in reg_ps
-            p .-= weight_decay .* p
+        training_time += @elapsed CUDA.@sync begin
+            (; val, grad) = Flux.withgradient(loss, all_ps)
+            isfinite(val) || error("Loss is not finite: $val")
+            if lr_schedule !== nothing
+                optimizer.eta = lr_schedule(step)
+            end
+                
+            Flux.update!(optimizer, all_ps, grad) # update parameters
+            for p in reg_ps
+                p .-= weight_decay .* p
+            end
         end
         callback_args = (;
-            step, loss=val, log_obs, obs_weight, lr=optimizer.eta
+            step, loss=val, log_obs, obs_weight, lr=optimizer.eta, training_time,
         )
         callback(callback_args).should_stop && break
     end

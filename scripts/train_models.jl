@@ -57,38 +57,8 @@ end
     h_dim,
     run_id,
 ) = let
-    config = (;
-        scenario=SEDL.RealCarScenario("alpha_truck"),
-        is_quick_test=false,
-        load_trained=false,
-        should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
-        gpu_id=nothing, # integer or nothing
-        use_simple_obs_model=false,
-        σ_bearing=5°,
-        use_fixed_variance=false,
-        train_method=:EM, # see `AllTrainingMethods`.
-        n_train_ex=16,  # number of training trajectories when using simulation data
-        validation_metric=:RMSE,  # :RMSE or :log_obs
-        lr=1e-4,
-        max_obs_weight=1.0,
-        use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
-        max_train_steps=40_000,
-        exp_name=nothing,
-        n_particles=20_000,  # how many particles to use for the EM training.
-        h_dim=64,
-        run_id=1,
-    )
-    # discard params that are the same as the default
-    global script_args = let changes = []
-        foreach(keys(script_args)) do k
-            @smart_assert k in keys(config)
-            if script_args[k] != config[k]
-                push!(changes, k => script_args[k])
-            end
-        end
-        (; changes...)
-    end
-    merge(config, script_args::NamedTuple)
+    global script_args = get_training_args_delta(script_args)
+    merge(Default_Training_Args, script_args::NamedTuple)
 end
 check_training_method(train_method)
 is_quick_test && @info "Quick testing model training..."
@@ -172,7 +142,7 @@ end
 data_cache_path = let
     cache_name = savename(
         (;
-            scenario=summary(scenario),
+            scenario=string(scenario),
             source=string(data_source),
             use_simple_obs_model,
             σ_bearing,
@@ -298,22 +268,6 @@ function posterior_metrics(
     end
 end
 
-function with_alert(task::Function, task_name::String, report_finish=true)
-    try
-        local result = task()
-        if report_finish
-            alert("$task_name finished. Setting: $script_args.")
-        end
-        result
-    catch e
-        if e isa InterruptException
-            throw(InterruptException()) # don't need the notification and stack trace.
-        end
-        alert("$task_name stopped due to exception: $(summary(e)).")
-        rethrow()
-    end
-end
-
 function save_model_weights!()
     mm_weights = Flux.params(Main.learned_motion_model)
     serialize(joinpath(save_dir, "mm_weights.serial"), mm_weights)
@@ -362,14 +316,7 @@ use_sim_data && display(plot_posterior(motion_model, data_train; title="true pos
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
 
-save_dir = let prefix = is_quick_test ? "sims-quick" : "sims", postfix = "run-$(run_id)"
-    save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test, :run_id))
-    SEDL.data_dir(
-        prefix,
-        savename("train_models-$(summary(scenario))", save_args; connector="-"),
-        postfix,
-    )
-end
+save_dir = get_save_dir(script_args)
 
 if !load_trained && isdir(save_dir)
     @warn "removing old data at '$save_dir' ..."
@@ -435,6 +382,7 @@ function em_callback(
     n_steps,
     test_every=100,
     landmark_est=nothing,
+    training_curve=[],
 )
     prog = Progress(n_steps; showspeed=true)
     function (r)
@@ -446,6 +394,8 @@ function em_callback(
         if r.step % test_every == 1 || r.step == n_steps
             valid_metrics = posterior_metrics(learned_motion_model, data_valid)
             to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
+
+            push!(training_curve, (; r.step, r.training_time, valid_metrics...))
 
             Base.with_logger(logger) do
                 @info "validation" valid_metrics... log_step_increment = 0
@@ -517,7 +467,9 @@ function em_callback(
 end
 
 if !load_trained && (train_method == :EM)
-    with_alert("EM training", !is_quick_test) do
+    training_curve = []
+
+    with_alert("EM training", false) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
         es = SEDL.EarlyStopping(; patience=30)
         obs_weight_schedule = if use_obs_weight_schedule
@@ -536,17 +488,20 @@ if !load_trained && (train_method == :EM)
             optimizer=adam,
             n_steps,
             n_particles,
-            callback=em_callback(learned_motion_model, es; n_steps, test_every=500),
+            callback=em_callback(
+                learned_motion_model, es; n_steps, test_every=500, training_curve
+            ),
             obs_weight_schedule,
         )
         @info "Best model: $(es.model_info)"
     end
     load_model_weights!()
+    CSV.write(joinpath(save_dir, "training_curve.csv"), DataFrame(training_curve))
 end
 ##-----------------------------------------------------------
 # simultaneous SLAM + dynamics learnings
 if !load_trained && (train_method == :EM_SLAM)
-    with_alert("EM_SLAM training", !is_quick_test) do
+    with_alert("EM_SLAM training", false) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
         es = SEDL.EarlyStopping(; patience=30)
         obs_weight_schedule = if use_obs_weight_schedule
@@ -845,7 +800,7 @@ function vi_callback(
 end
 
 if !load_trained && train_method == :SVI
-    with_alert("VI training", !is_quick_test) do
+    with_alert("VI training", false) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
 
         n_repeat = min(10, 512 ÷ n_train_ex)
