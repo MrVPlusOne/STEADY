@@ -15,10 +15,10 @@ with_alert("baseline_experiments.jl") do
     perf_best = []
     perf_measure = []
 
-    for train_method in [:SVI] # [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :SVI]
+    for train_method in [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :SVI]
         # you can find the available args inside `train_models.jl`.
         local script_args = (;
-            is_quick_test=true,
+            # is_quick_test=true,
             scenario=SEDL.HovercraftScenario(),
             # scenario=SEDL.RealCarScenario("ut_automata"),
             # scenario=SEDL.RealCarScenario("alpha_truck"),

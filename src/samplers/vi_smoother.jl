@@ -76,7 +76,10 @@ function transition_logp(
     Δt,
 )::Real
     @smart_assert length(core_input_seq) == length(core_output_seq)
-    transition_logp(core, BatchTuple(core_input_seq), BatchTuple(core_output_seq), Δt)
+    sum([
+        transition_logp(core, core_in, core_out, Δt) for
+        (core_in, core_out) in zip(core_input_seq, core_output_seq)
+    ])
 end
 
 function transition_logp(core, core_input::BatchTuple, core_output::BatchTuple, Δt)::Real
@@ -89,7 +92,7 @@ function observation_logp(
     obs_model, x_seq::TimeSeries{<:BatchTuple}, obs_seq::TimeSeries{<:BatchTuple}
 )::Real
     @smart_assert length(x_seq) == length(obs_seq)
-    sum(logpdf(obs_model(BatchTuple(x_seq)), BatchTuple(obs_seq))::AbsMat)
+    sum([sum(logpdf(obs_model(x), y)::AbsMat) for (x, y) in zip(x_seq, obs_seq)])
 end
 ##-----------------------------------------------------------
 # batched particle filtering
@@ -100,7 +103,7 @@ function batched_particle_filter(
     x0::BatchTuple,
     (; times, obs_frames, controls, observations);
     motion_model::BatchedMotionModel,
-    logpdf_obs, 
+    logpdf_obs,
     record_io=false,
     resample_threshold::Float64=0.5,
     showprogress=true,
@@ -332,11 +335,7 @@ mlp_with_skip(n_in, n_out, out_activation=identity; h_dim) =
     Chain(Dense(n_in, h_dim, relu), Dense(h_dim, n_out, out_activation))
 
 function mk_guide(;
-    sketch::BatchedMotionSketch,
-    h_dim,
-    y_dim,
-    normal_transforms,
-    min_σ=1.0f-3,
+    sketch::BatchedMotionSketch, h_dim, y_dim, normal_transforms, min_σ=1.0f-3
 )
     (; state_trans, control_trans, core_in_trans, core_out_trans) = normal_transforms
 
@@ -374,8 +373,7 @@ function mk_guide(;
             core_in_encoder=mlp(core_in_dim, rnn_dim),
             state_encoder=mlp(x_dim, rnn_dim),
             mean_net=Chain(
-                Dense(rnn_dim, h_dim, tanh),
-                Dense(h_dim, core_out_dim; init=zero_init)
+                Dense(rnn_dim, h_dim, tanh), Dense(h_dim, core_out_dim; init=zero_init)
             ),
             scale_net=Dense(
                 rnn_dim, core_out_dim, x -> max.(softplus.(x), min_σ); init=zero_init
@@ -520,7 +518,7 @@ function train_VI!(
     n_steps::Int,
     anneal_schedule::Function=step -> 1.0,
     lr_schedule=nothing,
-    callback::Function=_ -> (; should_stop = false),
+    callback::Function=_ -> (; should_stop=false),
     weight_decay=1.0f-4,
 )
     guide_time = dynamics_time = gradient_time = obs_time = 0.0
@@ -579,8 +577,8 @@ function train_VI!(
         if lr_schedule !== nothing
             optimizer.eta = lr_schedule(step)
         end
-        # Flux.Optimiser(Flux.ClipNorm(1.0), optimizer)
-        Flux.update!(optimizer, all_ps, grad) # update parameters
+        clipped = Flux.Optimiser(Flux.ClipNorm(1.0), optimizer)
+        Flux.update!(clipped, all_ps, grad) # update parameters
         for p in reg_ps
             p .-= weight_decay .* p
         end
@@ -596,7 +594,7 @@ function train_VI!(
             lr=optimizer.eta,
             time_stats,
         )
-        
+
         steps_trained += 1
         callback(callback_args).should_stop && break
     end
