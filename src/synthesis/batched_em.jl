@@ -94,7 +94,9 @@ function train_dynamics_EM!(
             step, loss=val, log_obs, obs_weight, lr=optimizer.eta, training_time,
         )
         callback(callback_args).should_stop && break
+        GC.gc(false)  # To avoid running out of memory on GPU.
     end
+    GC.gc(false)  # To avoid running out of memory on GPU.
     @info "Training finished ($n_steps steps)."
 end
 
@@ -182,7 +184,9 @@ function train_dynamics_EM_SLAM!(
             step, loss=val, log_obs, obs_weight, lr=optimizer.eta
         )
         callback(callback_args).should_stop && break
+        GC.gc(false)  # To avoid running out of memory on GPU.
     end
+    GC.gc(false)  # To avoid running out of memory on GPU.
     @info "Training finished ($n_steps steps)."
 end
 
