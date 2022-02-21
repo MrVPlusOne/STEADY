@@ -50,14 +50,14 @@ function with_alert(task::Function, task_name::String, report_finish=true)
     try
         local result = task()
         if report_finish
-            alert("$task_name finished.")
+            alert("(GPU=$(Main.GPU_ID)) $task_name finished.")
         end
         result
     catch e
         if e isa InterruptException
             throw(InterruptException()) # don't need the notification and stack trace.
         end
-        alert("$task_name stopped due to exception: $(summary(e)).")
+        alert("(GPU=$(Main.GPU_ID)) $task_name stopped due to exception: $(summary(e)).")
         rethrow()
     end
 end

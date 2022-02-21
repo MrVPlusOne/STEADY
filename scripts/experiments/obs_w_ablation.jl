@@ -1,6 +1,7 @@
 include("experiment_common.jl")
 
-let scenarios = [
+with_alert("obs_w_ablation.jl") do
+    scenarios = [
         SEDL.HovercraftScenario(),
         SEDL.RealCarScenario("ut_automata"),
         SEDL.RealCarScenario("alpha_truck"),
