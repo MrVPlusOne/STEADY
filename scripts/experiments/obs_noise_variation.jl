@@ -4,7 +4,7 @@ using DataFrames
 SEDL.should_check_finite[] = false
 
 with_alert("obs_noise_variation.jl") do
-    σ_deg=2.5
+    σ_deg=5.0*4
     result_name = "$(σ_deg)°"
     println("Starting experiment: $result_name...")
     result_dir = joinpath("results/vary_obs_noise/$result_name")
