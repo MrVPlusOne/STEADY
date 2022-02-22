@@ -9,6 +9,28 @@ using Alert
 using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 
+Default_Training_Args = (;
+    scenario=SEDL.RealCarScenario("alpha_truck"),
+    is_quick_test=false,
+    load_trained=false,
+    should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
+    gpu_id=nothing, # integer or nothing
+    use_simple_obs_model=false,
+    σ_bearing=5°,
+    use_fixed_variance=false,
+    train_method=:EM, # see `AllTrainingMethods`.
+    n_train_ex=16,  # number of training trajectories when using simulation data
+    validation_metric=:RMSE,  # :RMSE or :log_obs
+    lr=1e-4,
+    max_obs_weight=1.0,
+    use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
+    max_train_steps=40_000,
+    exp_name=nothing,
+    n_particles=20_000,  # how many particles to use for the EM training.
+    h_dim=64,
+    run_id=1,
+)
+
 AllTrainingMethods = [
     # Use Handwritten models provided by each scenario, no learning performed.
     :Handwritten,
@@ -61,28 +83,6 @@ function with_alert(task::Function, task_name::String, report_finish=true)
         rethrow()
     end
 end
-
-Default_Training_Args = (;
-    scenario=SEDL.RealCarScenario("alpha_truck"),
-    is_quick_test=false,
-    load_trained=false,
-    should_train_dynamics=true, # whether to train a NN motion model or use the ground truth
-    gpu_id=nothing, # integer or nothing
-    use_simple_obs_model=false,
-    σ_bearing=5°,
-    use_fixed_variance=false,
-    train_method=:EM, # see `AllTrainingMethods`.
-    n_train_ex=16,  # number of training trajectories when using simulation data
-    validation_metric=:RMSE,  # :RMSE or :log_obs
-    lr=1e-4,
-    max_obs_weight=1.0,
-    use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
-    max_train_steps=40_000,
-    exp_name=nothing,
-    n_particles=20_000,  # how many particles to use for the EM training.
-    h_dim=64,
-    run_id=1,
-)
 
 """
 Discard params that are the same as the default.
