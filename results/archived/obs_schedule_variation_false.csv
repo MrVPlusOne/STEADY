@@ -1,3 +1,0 @@
-name,log_obs,RMSE,open_loop
-"obs_w=0.4, schedule=false",690.0 ± 390.0,0.249 ± 0.026,1.6591 ± 0.0065
-"obs_w=1.0, schedule=false",706.0 ± 28.0,0.3429 ± 0.0068,7.648 ± 0.029
