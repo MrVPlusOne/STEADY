@@ -106,7 +106,7 @@ function get_save_dir(script_args::NamedTuple)
     save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test, :run_id))
     SEDL.data_dir(
         prefix,
-        savename("train_models-$(summary(config.scenario))", save_args; connector="-"),
+        savename("train_models-$(config.scenario)", save_args; connector="-"),
         postfix,
     )
 end
