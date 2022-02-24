@@ -2,6 +2,8 @@ struct RealCarScenario <: Scenario
     data_name::String
 end
 
+filename(sce::RealCarScenario) = "RealCar('$(sce.data_name)')"
+
 function batched_sketch(::RealCarScenario)
     control_vars = (; twist_linear=1, twist_angular=1)
     batched_sketch_SE2(control_vars)
@@ -187,23 +189,23 @@ function read_data_from_csv(::RealCarScenario, data_dir, tconf::TensorConfig)
     T = length(times)
     ΔT = times[2] - times[1]
 
-    pose_data = resample_data(pose_data, pose_times, times)
+    pose_data_res = resample_data(pose_data, pose_times, times)
     control_data = resample_data(control_data, control_times, times)
-    (; angle_2d, pos) = pose_data
+    (; angle_2d, pos) = pose_data_res
 
     ids1 = vcat(1:(T - 1), T - 1)
     ids2 = vcat(2:T, T)
     ω = SEDL.angle_2d_diff(angle_2d[ids2, :], angle_2d[ids1, :]; dims=2) ./ ΔT
     speed_data = (; vel=(pos[ids2, :] .- pos[ids1, :]) ./ ΔT, ω)
-
-    states = merge(pose_data, speed_data)
+    
+    states = merge(pose_data_res, speed_data)
     batch_data = (;
         n_trajs,
         times=map(tconf, times[1:(end ÷ n_trajs)]),
         states=break_trajectories(states, n_trajs, tconf),
         controls=break_trajectories(control_data, n_trajs, tconf),
     )
-    batch_data
+    batch_data, (; pose_times, pose_data)
 end
 
 end

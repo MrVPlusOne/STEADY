@@ -613,6 +613,35 @@ function plot_guide_posterior(
 end
 
 """
+Take the states from the ground truth trajectories, run the motion model 
+forward for `steps_ahead` steps using only the controls, and compute the average 
+error w.r.t. the ground truth states.
+"""
+function estimate_forward_prediction_error(
+    motion_model,
+    data;
+    state_L2_loss,
+    steps_ahead=10,  # how far to predict into future
+    n_rollouts=10_000,  # how many future trajectories to rollout
+    showprogress=false,
+)
+    n_ex = data.states[1].batch_size
+    T = length(data.times)
+    prog = Progress(n_ex * T; desc="estimate_prediction_quality", enabled=showprogress)
+
+    map(1:n_ex) do sample_id
+        map(1:T-steps_ahead) do t1
+            x = repeat(data.states[t1][sample_id], n_rollouts)
+            for dt in 1:steps_ahead
+                x = rand(motion_model(x, data.controls[t1+dt-1][sample_id], Δt=data.Δt))
+            end
+            next!(prog)
+            state_L2_loss(x, data.states[t1+steps_ahead][sample_id]) |> mean
+        end |> mean
+    end |> mean |> sqrt
+end
+
+"""
 Sample posterior trajectories using a particle fitler and evaluate their quality 
 against the ground truth.
 
@@ -631,13 +660,14 @@ function estimate_posterior_quality(
     n_ex = data.states[1].batch_size
     prog = Progress(n_ex; desc="estimate_posterior_quality", enabled=showprogress)
     metric_rows = map(1:n_ex) do sample_id
+        observations=getindex.(data.observations, sample_id)
         pf_result = SEDL.batched_particle_filter(
             repeat(data.states[1][sample_id], n_particles),
             (;
                 data.times,
                 obs_frames,
                 controls=getindex.(data.controls, sample_id),
-                observations=getindex.(data.observations, sample_id),
+                observations,
             );
             motion_model,
             showprogress=false,
@@ -649,8 +679,15 @@ function estimate_posterior_quality(
             map(1:length(true_traj), true_traj, post_traj) do t, x1, x2
                 state_L2_loss(x1, x2; include_velocity=true) |> mean
             end |> mean |> sqrt
+        local post_log_obs::Real = let
+            lps = map(obs_frames) do t
+                logpdf_obs(post_traj[t], observations[t])
+            end |> sum 
+            @smart_assert size(lps, 1) == 1
+            CUDA.@allowscalar logsumexp(lps, dims=2)[1] - log(length(lps))
+        end
         next!(prog)
-        (; pf_result.log_obs, RMSE)
+        (; pf_result.log_obs, post_log_obs, RMSE)
     end
     named_tuple_reduce(metric_rows, mean)
 end

@@ -1,6 +1,5 @@
 ##-----------------------------------------------------------
 # imports
-using DrWatson
 using Revise
 using Flux: Flux
 using CUDA: CUDA, CuArray
@@ -27,14 +26,17 @@ include("data_from_source.jl")
 if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
-        is_quick_test=true,
-        gpu_id=0,
-        scenario=SEDL.RealCarScenario("ut_automata"),
+        is_quick_test=false,
+        gpu_id=Main.GPU_ID,
+        # scenario=SEDL.RealCarScenario("alpha_truck"),
+        scenario=SEDL.HovercraftScenario(16),
         # use_simple_obs_model=true,
-        train_method=:EM_SLAM,
-        n_particles=1000,
+        train_method=:EM,
     )
 end
+
+modified_args = get_modified_training_args(script_args)::NamedTuple
+training_args = merge(Default_Training_Args, modified_args)
 
 (;
     scenario,
@@ -46,7 +48,6 @@ end
     σ_bearing,
     use_fixed_variance,
     train_method,
-    n_train_ex,
     validation_metric,
     lr,
     max_obs_weight,
@@ -56,19 +57,35 @@ end
     n_particles,
     h_dim,
     run_id,
-) = let
-    global script_args = get_training_args_delta(script_args)
-    merge(Default_Training_Args, script_args::NamedTuple)
-end
+) = training_args
+
 check_training_method(train_method)
 is_quick_test && @info "Quick testing model training..."
 
 println("--------------------")
-println("training settings: ")
-for (k, v) in pairs(script_args)
+println("(modified) training settings: ")
+for (k, v) in pairs(modified_args)
     println("  $k: $v")
 end
 println("--------------------")
+
+save_dir = get_save_dir(training_args)
+if !load_trained && isdir(save_dir)
+    @warn "removing old data at '$save_dir' ..."
+    rm(save_dir; recursive=true)
+end
+mkpath(save_dir)
+write(joinpath(save_dir, "settings.txt"), string(modified_args))
+if training_args.exp_group == "ungrouped"
+    @warn "Experiment result is ungrouped."
+end
+
+function displaysave(plot_name)
+    plt -> begin
+        display(plt)
+        savefig(plt, joinpath(save_dir, plot_name))
+    end
+end
 
 Random.seed!(123 + run_id)
 
@@ -84,27 +101,6 @@ device = use_gpu ? Flux.gpu : (Flux.f32 ∘ Flux.cpu)
 tconf = SEDL.TensorConfig(use_gpu, Float32)
 
 use_sim_data = !(scenario isa SEDL.RealCarScenario)
-data_source = if use_sim_data
-    SimulationData(;
-        n_train_ex, n_valid_ex=min(n_train_ex, 32), n_test_ex=32, times=0:tconf(0.1):10
-    )
-else
-    @smart_assert scenario isa SEDL.RealCarScenario
-    if scenario.data_name == "alpha_truck"
-        # lagacy format
-        SeparateData(;
-            train_data_dir="datasets/alpha_truck/train",
-            valid_data_dir="datasets/alpha_truck/valid",
-            test_data_dir="datasets/alpha_truck/test",
-        )
-    else
-        MixedData(;
-            data_dir="datasets/$(scenario.data_name)",
-            test_data_ratio=0.25,
-            valid_data_ratio=0.25,
-        )
-    end
-end
 
 state_L2_loss = SEDL.state_L2_loss_batched(scenario)
 
@@ -139,6 +135,31 @@ landmarks_to_logpdf_obs = landmarks -> begin
     (x, y) -> logpdf(obs_m(x), y)
 end
 
+data_source = if scenario isa SEDL.HovercraftScenario
+    SimulationData(;
+        n_train_ex=scenario.n_train_ex,
+        n_valid_ex=min(scenario.n_train_ex, 32),
+        n_test_ex=32,
+        times=0:tconf(0.1):10,
+    )
+else
+    @smart_assert scenario isa SEDL.RealCarScenario
+    if scenario.data_name == "alpha_truck"
+        # lagacy format
+        SeparateData(;
+            train_data_dir="datasets/alpha_truck/train",
+            valid_data_dir="datasets/alpha_truck/valid",
+            test_data_dir="datasets/alpha_truck/test",
+        )
+    else
+        MixedData(;
+            data_dir="datasets/$(scenario.data_name)",
+            test_data_ratio=0.25,
+            valid_data_ratio=0.25,
+        )
+    end
+end
+
 data_cache_path = let
     cache_name = savename(
         (;
@@ -146,7 +167,6 @@ data_cache_path = let
             source=string(data_source),
             use_simple_obs_model,
             σ_bearing,
-            data_source,
         ),
         "serial";
         connector="-",
@@ -182,17 +202,17 @@ let
     plot()
     SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
     SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
-end |> display
+end |> displaysave("truth.png")
 
 SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.states, 1); title="States"
-) |> display
+) |> displaysave("states.png")
 SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.controls, 1); title="Controls"
-) |> display
+) |> displaysave("controls.png")
 SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.observations, 1); title="Observations"
-) |> display
+) |> displaysave("observations.png")
 ##-----------------------------------------------------------
 # utilities
 function copy_model(model)
@@ -310,20 +330,13 @@ function save_best_model(
     es(loss, model_info, save_model_weights!)
 end
 
-use_sim_data && display(plot_posterior(motion_model, data_train; title="true posterior"))
+use_sim_data && displaysave("true_posterior.png")(
+    plot_posterior(motion_model, data_train; title="true posterior")
+)
 ##-----------------------------------------------------------
 # load or set up the NN models
 
 y_dim = sum(m -> size(m, 1), data_train.observations[1].val)
-
-save_dir = get_save_dir(script_args)
-
-if !load_trained && isdir(save_dir)
-    @warn "removing old data at '$save_dir' ..."
-    rm(save_dir; recursive=true)
-end
-mkpath(save_dir)
-write(joinpath(save_dir, "settings.txt"), string(script_args))
 
 logger = TBLogger(joinpath(save_dir, "tb_logs"))
 println("""To view tensorboard logs, use the following command:
@@ -833,13 +846,13 @@ end
 ##-----------------------------------------------------------
 plot_posterior(
     learned_motion_model, data_train; title="Posterior ($train_method learned)"
-) |> display
+) |> displaysave("learned_posterior.png")
 plot_posterior(
     learned_motion_model,
     data_train;
     obs_frames=1:1,
     title="Open-loop prediction ($train_method learned)",
-) |> display
+) |> displaysave("learned_posterior_openloop.png")
 if use_sim_data
     plot_posterior(
         motion_model, data_train; obs_frames=1:1, title="Open-loop prediction (true model)"
@@ -848,7 +861,7 @@ end
 
 plot_core_io(
     learned_motion_model, data_train; title="IO Posterior ($train_method learned)"
-) |> display
+) |> displaysave("learned_io_posterior.png")
 plot_core_io(
     learned_motion_model,
     data_train;
@@ -859,9 +872,11 @@ plot_core_io(
 function evaluate_model(motion_model, data_test)
     n_repeats = is_quick_test ? 3 : 10
     n_particles = is_quick_test ? 10_000 : 100_000
-    metrics = posterior_metrics(motion_model, data_test; n_repeats, n_particles)
-    # open_loop = posterior_metrics(motion_model, data_test; n_repeats, obs_frames=1:1).RMSE
-    metrics
+    post_metrics = posterior_metrics(motion_model, data_test; n_repeats, n_particles)
+    pred_error = SEDL.estimate_forward_prediction_error(
+        motion_model, data_test; state_L2_loss, showprogress=true
+    )
+    merge(post_metrics, (; open_loop=pred_error))
 end
 
 println("Testing dynamics model final performance...")

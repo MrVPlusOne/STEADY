@@ -1,9 +1,11 @@
 """
 The 2D hovercraft scenario.
 """
-struct HovercraftScenario <: Scenario end
+struct HovercraftScenario <: Scenario 
+    n_train_ex::Int
+end
 
-Base.summary(io::IO, ::HovercraftScenario) = print(io, "HovercraftScenario")
+filename(sce::HovercraftScenario) = string(sce)
 
 function batched_sketch(::HovercraftScenario)
     control_vars = (; ul=1, ur=1)  # thrust left and thrust right

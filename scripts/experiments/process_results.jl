@@ -88,7 +88,7 @@ function print_baseline_tables(backend=:text)
     data_paths = [
         ("Hover", "results/comparisons/hovercraft/"),
         ("Hover160", "results/comparisons/hovercraft160/"),
-        ("Car", "results/comparisons/ut_automata/"),
+        # ("Car", "results/comparisons/ut_automata/"),
         ("Truck", "results/comparisons/alpha_truck/"),
     ]
     scenarios = getindex.(data_paths, 1)

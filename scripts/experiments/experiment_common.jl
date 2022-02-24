@@ -6,10 +6,12 @@ end
 using SEDL
 using SmartAsserts: @smart_assert
 using Alert
+using DrWatson
 using StatsPlots
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 Default_Training_Args = (;
+    exp_group="ungrouped",
     scenario=SEDL.RealCarScenario("alpha_truck"),
     is_quick_test=false,
     load_trained=false,
@@ -87,7 +89,7 @@ end
 """
 Discard params that are the same as the default.
 """
-function get_training_args_delta(args)
+function get_modified_training_args(args)
     changes = []
     foreach(keys(args)) do k
         @smart_assert k in keys(Default_Training_Args)
@@ -98,15 +100,16 @@ function get_training_args_delta(args)
     (; changes...)
 end
 
-function get_save_dir(script_args::NamedTuple)
-    script_args = get_training_args_delta(script_args)
-    config = merge(Default_Training_Args, script_args)
+function get_save_dir(training_args::NamedTuple)
+    modified = get_modified_training_args(training_args)
+    config = merge(Default_Training_Args, modified)
     prefix = config.is_quick_test ? "sims-quick" : "sims" 
     postfix = "run-$(config.run_id)"
-    save_args = SEDL.dropnames(script_args, (:gpu_id, :is_quick_test, :run_id))
+    save_args = SEDL.dropnames(modified, (:gpu_id, :is_quick_test, :run_id))
     SEDL.data_dir(
         prefix,
-        savename("train_models-$(config.scenario)", save_args; connector="-"),
+        training_args.exp_group,
+        savename(SEDL.filename(config.scenario), save_args; connector="-"),
         postfix,
     )
 end

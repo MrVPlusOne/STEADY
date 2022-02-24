@@ -1,4 +1,5 @@
 using Base: @kwdef
+using Serialization
 
 abstract type DataSource end
 
@@ -57,11 +58,13 @@ function data_from_source(
     )
 end
 
-function data_from_source(sce::SEDL.Scenario, src::SeparateData, tconf::TensorConfig; obs_model)
+function data_from_source(
+    sce::SEDL.Scenario, src::SeparateData, tconf::TensorConfig; obs_model
+)
     (; train_data_dir, valid_data_dir, test_data_dir) = src
 
     map((test=test_data_dir, valid=valid_data_dir, train=train_data_dir)) do path
-        data = SEDL.Dataset.read_data_from_csv(sce, path, tconf)
+        data, _ = SEDL.Dataset.read_data_from_csv(sce, path, tconf)
         observations = (x -> rand(obs_model(x))).(data.states)
         Δt = tconf(data.times[2] - data.times[1])
         merge(data, (; observations, Δt))
@@ -76,7 +79,7 @@ function data_from_source(
 
     rng = Random.MersenneTwister(shuffle_seed)
 
-    (; n_trajs, times, states, controls) = SEDL.Dataset.read_data_from_csv(
+    (; n_trajs, times, states, controls), _ = SEDL.Dataset.read_data_from_csv(
         sce, data_dir, tconf
     )
     ids = Random.shuffle(rng, 1:n_trajs)
