@@ -70,9 +70,14 @@ end
 
 function with_alert(task::Function, task_name::String, report_finish=true)
     try
-        local result = task()
+        time_taken = @elapsed begin
+            result = task()
+        end
+        time_hours = time_taken / 3600
+        msg = "(GPU=$(Main.GPU_ID), time_taken=$(time_hours)hours) $task_name finished."
+        println(msg)
         if report_finish
-            alert("(GPU=$(Main.GPU_ID)) $task_name finished.")
+            alert(msg)
         end
         result
     catch e
