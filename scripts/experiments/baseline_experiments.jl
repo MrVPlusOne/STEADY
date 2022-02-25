@@ -4,9 +4,10 @@ using DataFrames
 SEDL.should_check_finite[] = false
 
 with_alert("baseline_experiments.jl") do
-    result_name = "hovercraft160"
+    result_name = "alpha_truck"
+    group_name = "comparisons"
 
-    result_dir = joinpath("results/comparisons/$result_name")
+    result_dir = joinpath("reports/$group_name/$result_name")
     if ispath(result_dir)
         error("\"$result_dir\" already exists")
     end
@@ -19,17 +20,21 @@ with_alert("baseline_experiments.jl") do
         # you can find the available args inside `train_models.jl`.
         local script_args = (;
             # is_quick_test=true,
-            scenario=SEDL.HovercraftScenario(),
-            # scenario=SEDL.RealCarScenario("ut_automata"),
-            # scenario=SEDL.RealCarScenario("alpha_truck"),
-            n_train_ex=160,
+            # scenario=SEDL.HovercraftScenario(160),
+            scenario=SEDL.RealCarScenario("alpha_truck"),
             gpu_id=Main.GPU_ID, # set this in the REPL before running the script
+            exp_group=group_name,
+            # :log_obs seeem to be a poor metric for :SVI
+            validation_metric=(train_method == :SVI ? :RMSE : :log_obs),
             train_method,
         )
         local perfs = train_multiple_times(script_args, 3).test_performance
 
         local measure = map(SEDL.to_measurement, perfs)
-        local best = (; log_obs=maximum(perfs.log_obs), RMSE=minimum(perfs.RMSE))
+        local max_metrics = (; log_obs=maximum(perfs.log_obs))
+        local min_metrics = map(minimum, SEDL.dropnames(perfs, :log_obs))
+        local best = merge(max_metrics, min_metrics)
+
         push!(perf_measure, merge((; method=train_method), measure))
         push!(perf_best, merge((; method=train_method), best))
 

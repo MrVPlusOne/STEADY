@@ -21,13 +21,11 @@ Default_Training_Args = (;
     σ_bearing=5°,
     use_fixed_variance=false,
     train_method=:EM, # see `AllTrainingMethods`.
-    n_train_ex=16,  # number of training trajectories when using simulation data
-    validation_metric=:RMSE,  # :RMSE or :log_obs
+    validation_metric=:log_obs,  # :RMSE or :log_obs
     lr=1e-4,
     max_obs_weight=1.0,
     use_obs_weight_schedule=true, # whether to increase obs_weight from 0 to max_obs_weight over time
     max_train_steps=40_000,
-    exp_name=nothing,
     n_particles=20_000,  # how many particles to use for the EM training.
     h_dim=64,
     run_id=1,
@@ -103,13 +101,11 @@ end
 function get_save_dir(training_args::NamedTuple)
     modified = get_modified_training_args(training_args)
     config = merge(Default_Training_Args, modified)
-    prefix = config.is_quick_test ? "sims-quick" : "sims" 
-    postfix = "run-$(config.run_id)"
-    save_args = SEDL.dropnames(modified, (:gpu_id, :is_quick_test, :run_id))
+    save_args = SEDL.dropnames(modified, (:gpu_id, :is_quick_test, :run_id, :exp_group))
     SEDL.data_dir(
-        prefix,
+        config.is_quick_test ? "sims-quick" : "sims",
         training_args.exp_group,
         savename(SEDL.filename(config.scenario), save_args; connector="-"),
-        postfix,
+        "run-$(config.run_id)",
     )
 end

@@ -26,11 +26,12 @@ include("data_from_source.jl")
 if !isdefined(Main, :script_args)
     # script_args can be used to override the default config parameters.
     script_args = (
-        is_quick_test=false,
+        is_quick_test=true,
         gpu_id=Main.GPU_ID,
-        # scenario=SEDL.RealCarScenario("alpha_truck"),
-        scenario=SEDL.HovercraftScenario(16),
+        scenario=SEDL.RealCarScenario("alpha_truck"),
+        # scenario=SEDL.HovercraftScenario(16),
         # use_simple_obs_model=true,
+        # σ_bearing=1°,
         train_method=:EM,
     )
 end
@@ -53,7 +54,6 @@ training_args = merge(Default_Training_Args, modified_args)
     max_obs_weight,
     use_obs_weight_schedule,
     max_train_steps,
-    exp_name,
     n_particles,
     h_dim,
     run_id,
@@ -273,19 +273,40 @@ function plot_core_io(
     plot_batched_series(data.times[1:(end - 1)], series; truth, plot_args...)
 end
 
-function posterior_metrics(
-    motion_model, data; n_repeats=1, obs_frames=1:10:length(data.times), n_particles=100_000
+function evaluate_motion_model(
+    motion_model,
+    data;
+    skip_fw=false,
+    n_repeats=1,
+    obs_frames=1:10:length(data.times),
+    n_particles=100_000,
 )
-    rows = @showprogress 0.1 "posterior_metrics" map(1:n_repeats) do _
-        SEDL.estimate_posterior_quality(
+    showprogress = n_repeats > 1
+    prog = Progress(n_repeats; desc="posterior_metrics", enabled=showprogress)
+    post_metrics = map(1:n_repeats) do _
+        r = SEDL.estimate_posterior_quality(
             motion_model, logpdf_obs, data; n_particles, obs_frames, state_L2_loss
         )
+        next!(prog)
+        r
     end
-    if n_repeats == 1
-        rows[1]
+    post_metrics = SEDL.named_tuple_reduce(post_metrics, mean)
+
+    result = if skip_fw
+        post_metrics
     else
-        SEDL.named_tuple_reduce(rows, mean)
+        fw_metrics = SEDL.estimate_forward_prediction_error(
+            motion_model,
+            data_test;
+            state_L2_loss,
+            n_rollouts=n_particles ÷ 100,
+            showprogress,
+        )
+        merge(post_metrics, fw_metrics)
     end
+
+    GC.gc(false)
+    result
 end
 
 function save_model_weights!()
@@ -320,7 +341,7 @@ function save_best_model(
     es::SEDL.EarlyStopping, metrics::NamedTuple, model_info::NamedTuple
 )
     loss = if validation_metric == :RMSE
-        metrics.RMSE
+        metrics.total
     elseif validation_metric == :log_obs
         -metrics.log_obs
     else
@@ -405,7 +426,9 @@ function em_callback(
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1 || r.step == n_steps
-            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            valid_metrics = evaluate_motion_model(
+                learned_motion_model, data_valid; skip_fw=true
+            )
             to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
 
             push!(training_curve, (; r.step, r.training_time, valid_metrics...))
@@ -582,7 +605,9 @@ function supervised_callback(
 
         # Compute test log_obs and plot a few trajectories.
         if r.step % test_every == 1 || r.step == n_steps
-            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            valid_metrics = evaluate_motion_model(
+                learned_motion_model, data_valid; skip_fw=true
+            )
             to_stop = save_best_model(early_stopping, valid_metrics, (step=r.step,))
 
             Base.with_logger(logger) do
@@ -592,7 +617,9 @@ function supervised_callback(
             to_stop = (; should_stop=false)
         end
         if r.step % plot_every == 1
-            test_metrics = posterior_metrics(learned_motion_model, data_test)
+            test_metrics = evaluate_motion_model(
+                learned_motion_model, data_test; skip_fw=true
+            )
 
             Base.with_logger(logger) do
                 @info("testing", test_metrics..., log_step_increment = 0)
@@ -767,7 +794,9 @@ function vi_callback(
                 @info "testing" elbo = test_elbo log_step_increment = 0
             end
 
-            valid_metrics = posterior_metrics(learned_motion_model, data_valid)
+            valid_metrics = evaluate_motion_model(
+                learned_motion_model, data_valid; skip_fw=true
+            )
             to_stop = save_best_model(early_stopping, valid_metrics, (; r.step))
 
             Base.with_logger(logger) do
@@ -869,20 +898,14 @@ plot_core_io(
     title="IO Open-loop prediction ($train_method learned)",
 ) |> display
 
-function evaluate_model(motion_model, data_test)
-    n_repeats = is_quick_test ? 3 : 10
-    n_particles = is_quick_test ? 10_000 : 100_000
-    post_metrics = posterior_metrics(motion_model, data_test; n_repeats, n_particles)
-    pred_error = SEDL.estimate_forward_prediction_error(
-        motion_model, data_test; state_L2_loss, showprogress=true
-    )
-    merge(post_metrics, (; open_loop=pred_error))
-end
-
 println("Testing dynamics model final performance...")
-exp_name = isnothing(exp_name) ? string(train_method) : exp_name
-test_performance = evaluate_model(learned_motion_model, data_test)
-valid_performance = evaluate_model(learned_motion_model, data_valid)
+exp_name = string(train_method)
+test_performance = evaluate_motion_model(
+    learned_motion_model, data_test; n_repeats=5, n_particles=100_000
+)
+valid_performance = evaluate_motion_model(
+    learned_motion_model, data_valid; n_repeats=5, n_particles=100_000
+)
 perf_table = DataFrame([
     (; name=exp_name, test_performance...),
     (; name="(valid) $exp_name", valid_performance...),

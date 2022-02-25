@@ -5,7 +5,9 @@ struct HovercraftScenario <: Scenario
     n_train_ex::Int
 end
 
-filename(sce::HovercraftScenario) = string(sce)
+HovercraftScenario(n_train_ex=16) = HovercraftScenario(n_train_ex)
+
+filename(sce::HovercraftScenario) = "Hovercraft($(sce.n_train_ex))"
 
 function batched_sketch(::HovercraftScenario)
     control_vars = (; ul=1, ur=1)  # thrust left and thrust right

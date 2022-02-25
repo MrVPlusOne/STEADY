@@ -60,7 +60,7 @@ end
 
 function landmarks_from_tensor(landmark_tensor)::Vector{<:AbsVec{<:Real}}
     @smart_assert ndims(landmark_tensor) == 3
-    n = size(landmark_tensor,1)
+    n = size(landmark_tensor, 1)
     [landmark_tensor[i, :, 1] for i in 1:n]
 end
 
@@ -188,7 +188,9 @@ struct SE2Distribution{Conf,V,M}
 end
 Flux.@functor SE2Distribution
 
-function SE2Distribution(tconf::TensorConfig, μ::AbsVec=randn(6), Σ::AbsMat=Diagonal(ones(6, 6)))
+function SE2Distribution(
+    tconf::TensorConfig, μ::AbsVec=randn(6), Σ::AbsMat=Diagonal(ones(6, 6))
+)
     @smart_assert size(μ) == (6,)
     @smart_assert size(Σ) == (6, 6)
     μ_param = zeros(6)
@@ -214,12 +216,7 @@ function logpdf(dist::SE2Distribution, state::BatchTuple)
     tconf = state.tconf
     μ = tconf(reshape(dist.normal_layer.μ, 6, 1))
     dθ = @. _restrict_angle(atan(angle_2d[2:2, :], angle_2d[1:1, :]) - μ[3:3, :])
-    diff = vcat(
-        pos .- μ[1:2, :],
-        dθ,
-        vel .- μ[4:5, :],
-        ω .- μ[6:6, :],
-    ) |> Flux.cpu
+    diff = vcat(pos .- μ[1:2, :], dθ, vel .- μ[4:5, :], ω .- μ[6:6, :]) |> Flux.cpu
     logpdf(MvNormal(cov(dist.normal_layer)), diff) |> tconf
 end
 
@@ -353,24 +350,18 @@ function angle_diff(θ1::AbstractArray, θ2::AbstractArray)
     angle_diff_scalar.(θ1, θ2)
 end
 
-function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple; include_velocity=true)
-    if include_velocity
-        map((
-            (state1.val.pos .- state2.val.pos) .^ 2,
-            (state1.val.vel .- state2.val.vel) .^ 2,
-            angle_2d_diff(state1.val, state2.val) .^ 2,
-            (state1.val.ω .- state2.val.ω) .^ 2,
-        )) do diff
-            sum(diff; dims=1)
-        end |> sum
-    else
-        map((
-            (state1.val.pos .- state2.val.pos) .^ 2,
-            angle_2d_diff(state1.val, state2.val) .^ 2,
-        )) do diff
-            sum(diff; dims=1)
-        end |> sum
+function L2_in_SE2_batched(state1::BatchTuple, state2::BatchTuple)
+    v1, v2 = state1.val, state2.val
+    (location, velocity, angle, ω) = map((
+        (v1.pos .- v2.pos) .^ 2,
+        (v1.vel .- v2.vel) .^ 2,
+        angle_2d_diff(v1, v2) .^ 2,
+        (v1.ω .- v2.ω) .^ 2,
+    )) do diff
+        sum(diff; dims=1)
     end
+    total = location + velocity + angle + ω
+    (; total, location, velocity, angle, ω)
 end
 
 """
@@ -629,16 +620,26 @@ function estimate_forward_prediction_error(
     T = length(data.times)
     prog = Progress(n_ex * T; desc="estimate_prediction_quality", enabled=showprogress)
 
-    map(1:n_ex) do sample_id
-        map(1:T-steps_ahead) do t1
+    errors = []
+    foreach(1:n_ex) do sample_id
+        foreach(1:(T - steps_ahead)) do t1
             x = repeat(data.states[t1][sample_id], n_rollouts)
             for dt in 1:steps_ahead
-                x = rand(motion_model(x, data.controls[t1+dt-1][sample_id], Δt=data.Δt))
+                x =
+                    motion_model(
+                        x, data.controls[t1 + dt - 1][sample_id], data.Δt
+                    ).next_state
             end
+            x̂ = data.states[t1 + steps_ahead][sample_id]
             next!(prog)
-            state_L2_loss(x, data.states[t1+steps_ahead][sample_id]) |> mean
-        end |> mean
-    end |> mean |> sqrt
+            push!(errors, map(mean, state_L2_loss(x, x̂)))
+        end
+    end
+    metrics = named_tuple_reduce(errors, sqrt ∘ mean)
+    renamed = map(keys(metrics), values(metrics)) do k, v
+        Symbol(:fw_, k) => v
+    end
+    (; renamed...)
 end
 
 """
@@ -648,7 +649,7 @@ against the ground truth.
 Returns (; log_obs, RMSE)
 """
 function estimate_posterior_quality(
-    motion_model,
+    motion_model::BatchedMotionModel,
     logpdf_obs,
     data;
     state_L2_loss,
@@ -660,34 +661,26 @@ function estimate_posterior_quality(
     n_ex = data.states[1].batch_size
     prog = Progress(n_ex; desc="estimate_posterior_quality", enabled=showprogress)
     metric_rows = map(1:n_ex) do sample_id
-        observations=getindex.(data.observations, sample_id)
+        observations = getindex.(data.observations, sample_id)
+        controls = getindex.(data.controls, sample_id)
+
         pf_result = SEDL.batched_particle_filter(
             repeat(data.states[1][sample_id], n_particles),
-            (;
-                data.times,
-                obs_frames,
-                controls=getindex.(data.controls, sample_id),
-                observations,
-            );
+            (; data.times, obs_frames, controls, observations);
             motion_model,
             showprogress=false,
             logpdf_obs,
         )
-        post_traj = SEDL.batched_trajectories(pf_result, 1000)
+        n_trajs = 1000
+        post_traj = SEDL.batched_trajectories(pf_result, n_trajs)
         true_traj = getindex.(data.states, sample_id)
-        local RMSE::Real =
-            map(1:length(true_traj), true_traj, post_traj) do t, x1, x2
-                state_L2_loss(x1, x2; include_velocity=true) |> mean
-            end |> mean |> sqrt
-        local post_log_obs::Real = let
-            lps = map(obs_frames) do t
-                logpdf_obs(post_traj[t], observations[t])
-            end |> sum 
-            @smart_assert size(lps, 1) == 1
-            CUDA.@allowscalar logsumexp(lps, dims=2)[1] - log(length(lps))
+        losses = map(true_traj, post_traj) do x1, x2
+            map(mean, state_L2_loss(x1, x2))
         end
+        loss_metrics = named_tuple_reduce(losses, sqrt ∘ mean)
+
         next!(prog)
-        (; pf_result.log_obs, post_log_obs, RMSE)
+        (; pf_result.log_obs, loss_metrics...)
     end
     named_tuple_reduce(metric_rows, mean)
 end
