@@ -34,13 +34,14 @@ let result_dir = joinpath("reports/$exp_group")
         @unzip_named (xs, :step), (times, :training_time), (ys, :total) = curve
         label="n_particle=$(n_particle/1000)K"
         times = times .- times[1] # remove the initialization time.
-        ids = filter(i -> 20_000 <= xs[i] <= 45_000, eachindex(xs))
-        plot!(step_plt, xs[ids], ys[ids]; xlabel="step", ylabel="RMSE", label)
-        plot!(time_plt, times, ys; xlabel="training time (s)", ylabel="RMSE", label)
+        ids = filter(i -> 3_000 <= xs[i] <= 30_000, eachindex(xs))
+        tids = filter(i -> 400 <= times[i] <= 5000, eachindex(xs))
+        plot!(step_plt, xs[ids], ys[ids]; xlabel="step", ylabel="State Estimation Error", label)
+        plot!(time_plt, times[tids], ys[tids]; xlabel="training time (s)", ylabel="State Estimation Error", label)
         CSV.write(joinpath(result_dir, "$label.csv"), DataFrame(curve))
     end
-    savefig(step_plt, joinpath(result_dir, "perf_vs_step.png"))
-    savefig(time_plt, joinpath(result_dir, "perf_vs_time.png"))
+    savefig(step_plt, joinpath(result_dir, "perf_vs_step.pdf"))
+    savefig(time_plt, joinpath(result_dir, "perf_vs_time.pdf"))
 end
 
 alert("particle_variation.jl finished.")

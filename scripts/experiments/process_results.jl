@@ -86,10 +86,10 @@ end
 
 function print_baseline_tables(backend=:text)
     data_paths = [
-        ("Hover", "results/comparisons/hovercraft/"),
-        ("Hover160", "results/comparisons/hovercraft160/"),
-        # ("Car", "results/comparisons/ut_automata/"),
-        ("Truck", "results/comparisons/alpha_truck/"),
+        ("Hover", "reports/comparisons/hovercraft/"),
+        ("Hover160", "reports/comparisons/hovercraft160/"),
+        # ("Car", "reports/comparisons/ut_automata/"),
+        ("Truck", "reports/comparisons/alpha_truck/"),
     ]
     scenarios = getindex.(data_paths, 1)
     best_tables = map(data_paths) do (_, path)
