@@ -4,7 +4,7 @@ using DataFrames
 SEDL.should_check_finite[] = false
 
 with_alert("obs_noise_variation.jl") do
-    σ_deg = 20
+    σ_deg = 20.0
     group_name = "obs_noise_variation"
     result_name = "$(σ_deg)°"
     println("Starting experiment: $result_name...")
@@ -17,7 +17,7 @@ with_alert("obs_noise_variation.jl") do
     perf_best = []
     perf_measure = []
 
-    for train_method in [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :SVI]
+    for train_method in [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :EM_NS, :SVI]
         # you can find the available args inside `train_models.jl`.
         local script_args = (;
             # is_quick_test=true,

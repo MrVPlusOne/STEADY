@@ -52,7 +52,6 @@ training_args = merge(Default_Training_Args, modified_args)
     validation_metric,
     lr,
     max_obs_weight,
-    use_obs_weight_schedule,
     max_train_steps,
     n_particles,
     h_dim,
@@ -502,15 +501,16 @@ function em_callback(
     end
 end
 
-if !load_trained && (train_method == :EM)
+if !load_trained && (train_method == :EM || train_method == :EM_NS)
     training_curve = []
 
     with_alert("EM training", false) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
         es = SEDL.EarlyStopping(; patience=30)
-        obs_weight_schedule = if use_obs_weight_schedule
+        obs_weight_schedule = if train_method == :EM
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
         else
+            @smart_assert train_method == :EM_NS
             step -> max_obs_weight
         end
         @info "Training the dynamics using EM"
@@ -540,11 +540,8 @@ if !load_trained && (train_method == :EM_SLAM)
     with_alert("EM_SLAM training", false) do
         n_steps = is_quick_test ? 3 : max_train_steps + 1
         es = SEDL.EarlyStopping(; patience=30)
-        obs_weight_schedule = if use_obs_weight_schedule
+        obs_weight_schedule =
             step -> linear(1e-3, 1.0)(min(1.0, step / n_steps)) * max_obs_weight
-        else
-            step -> max_obs_weight
-        end
 
         @smart_assert !use_simple_obs_model "Cannot use simple obs model with EM_SLAM"
 

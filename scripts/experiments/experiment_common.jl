@@ -45,6 +45,7 @@ AllTrainingMethods = [
     :SVI,
     # Simultaneous state estimation and dynamics learning using EM.
     :EM,
+    :EM_NS,  # EM with no obs_w scheduling.
     # Simultaneous SLAM and dynamics learning using EM.
     :EM_SLAM,
 ]

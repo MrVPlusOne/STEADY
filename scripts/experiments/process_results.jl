@@ -99,59 +99,43 @@ function print_baseline_tables(backend=:text)
         CSV.read(joinpath(path, "average.csv"), DataFrame)
     end
 
-    println("==== State Estimation RMSE (average) ====")
-    show_baseline_comparison(scenarios, avg_tables, "RMSE"; backend)
+    # println("==== State Estimation RMSE (average) ====")
+    # show_baseline_comparison(scenarios, avg_tables, "RMSE"; backend)
     println("==== State Estimation RMSE (best) ====")
-    show_baseline_comparison(scenarios, best_tables, "RMSE"; backend)
+    show_baseline_comparison(scenarios, best_tables, "total"; backend)
+    println("==== State Estimation location RMSE (best) ====")
+    show_baseline_comparison(scenarios, best_tables, "location"; backend)
 
-    println("==== Observation Log Probability (average) ====")
-    show_baseline_comparison(
-        scenarios, avg_tables, "log_obs"; lower_is_better=false, backend
-    )
-    println("==== Observation Log Probability (best) ====")
-    show_baseline_comparison(
-        scenarios, best_tables, "log_obs"; lower_is_better=false, backend
-    )
+    println("==== Forward Prediction RMSE (best) ====")
+    show_baseline_comparison(scenarios, avg_tables, "fw_total"; backend)
+
+    println("==== Forward Prediction location RMSE (best) ====")
+    show_baseline_comparison(scenarios, avg_tables, "fw_location"; backend)
 end
 
-function print_perf_vs_noise(backend=:text)
-    table = CSV.read("results/obs_noise_variation.csv", DataFrame)
-    RMSE = parse_measurement_mean.(table[:, "RMSE"])
-    open_loop = parse_measurement_mean.(table[:, "open_loop"])
-    σs = map(table[:, "name"]) do name
-        split(name, "=")[2]
-    end
-    println("==== Performance vs. observation noise ====")
-    pretty_table(
-        [σs RMSE open_loop];
-        header=["σ_bearing", "state est.", "forward pred."],
-        alignment=:l,
-        backend,
-    )
-end
 
 function plot_perf_vs_noise(; plot_args...)
     data_dirs = map([1.25, 2.5, 5.0, 10.0, 20.0]) do deg
-        deg => "results/vary_obs_noise/$(deg)°"
+        deg => "reports/obs_noise_variation/$(deg)°"
     end
 
     xs = getindex.(data_dirs, 1)
     ys_val = map(data_dirs) do (_, dir)
         table = CSV.read(joinpath(dir, "average.csv"), DataFrame)
         methods = table[:, "method"]
-        RMSE = getproperty.(parse_measurement.(table[:, "RMSE"]), :val)
+        RMSE = getproperty.(parse_measurement.(table[:, "fw_total"]), :val)
         Dict(zip(methods, RMSE))
     end
     ys_err = map(data_dirs) do (_, dir)
         table = CSV.read(joinpath(dir, "average.csv"), DataFrame)
         methods = table[:, "method"]
-        RMSE = getproperty.(parse_measurement.(table[:, "RMSE"]), :err)
+        RMSE = getproperty.(parse_measurement.(table[:, "fw_total"]), :err)
         Dict(zip(methods, RMSE))
     end
 
     plt = plot(;
         xlabel="bearing σ (in degree)",
-        ylabel="Posterior RMSE",
+        ylabel="Forward Prediction Error",
         legend=:topleft,
         plot_args...,
     )
@@ -164,25 +148,46 @@ function plot_perf_vs_noise(; plot_args...)
         else
             []
         end
-        plot!(
-            xs,
-            ys;
-            label=method,
-            markershape=:auto,
-            markersize=3,
-            ribbon,
-            extra_args...,
-        )
+        plot!(xs, ys; label=method, markershape=:auto, markersize=3, ribbon, extra_args...)
     end
     plt
+end
+
+function plot_training_curve_vs_particles(; plt_args...)
+    time_plt = plot(; plt_args...)
+    particle_sizes = [200, 2_000, 20_000, 200_000]
+    for n_particle in particle_sizes
+        label = "n_particle=$(n_particle/1000)K"
+        curve = CSV.read(joinpath("reports/vary_particle_size/", "$label.csv"), DataFrame)
+        xs = curve[:, :step]
+        times = curve[:, :training_time]
+        ys = curve[:, :total]
+        times = times .- times[1] # remove the initialization time.
+        # ids = filter(i -> 3_000 <= xs[i] <= 30_000, eachindex(xs))
+        tids = filter(i -> 400 <= times[i] <= 5000, eachindex(xs))
+        plot!(
+            time_plt,
+            times[tids],
+            ys[tids];
+            xlabel="training time (s)",
+            ylabel="State Estimation Error",
+            label,
+        )
+    end
+    time_plt
 end
 ##-----------------------------------------------------------
 print_baseline_tables()
 print_baseline_tables(:latex)
-print_perf_vs_noise()
-let plt = plot_perf_vs_noise(; size=(450, 300), xticks=[1.25, 2.5, 5, 10, 20])
+let xticks=[1.25, 2.5, 5, 10, 20]
+    plt = plot_perf_vs_noise(; size=(450, 300), xticks=(xticks, map(string, xticks)), xscale=:log)
     display(plt)
-    savefig(plt, "results/vary_obs_noise/vary_obs_noise.pdf")
+    savefig(plt, "reports/obs_noise_variation/vary_obs_noise.pdf")
 end
 
-StatsPlots.plotattr(:Series)
+let plt = plot_training_curve_vs_particles(;
+        legend=:topright, size=(450, 300), xticks=[400, 1000, 2000, 3000, 4000, 5000]
+    )
+    display(plt)
+    savefig(plt, "reports/vary_particle_size/vary_particle_size.pdf")
+end
