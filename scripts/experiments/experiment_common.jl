@@ -58,7 +58,7 @@ function train_multiple_times(run_args, n_repeats)
     valid_perfs = []
     test_perfs = []
     for i in 1:n_repeats
-        args = merge(run_args, (; run_id = i))
+        args = merge(run_args, (; run_id=i))
         @eval(Main, script_args = $args)
         dynamic_include("../train_models.jl")
         push!(valid_perfs, Main.valid_performance)
@@ -107,7 +107,9 @@ end
 function get_save_dir(training_args::NamedTuple)
     modified = get_modified_training_args(training_args)
     config = merge(Default_Training_Args, modified)
-    save_args = SEDL.dropnames(modified, (:gpu_id, :is_quick_test, :run_id, :exp_group))
+    save_args = SEDL.dropnames(
+        modified, (:gpu_id, :is_quick_test, :run_id, :exp_group, :load_trained)
+    )
     SEDL.data_dir(
         config.is_quick_test ? "sims-quick" : "sims",
         training_args.exp_group,

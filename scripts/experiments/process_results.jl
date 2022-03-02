@@ -4,6 +4,7 @@ using CSV
 using Measurements
 using SmartAsserts
 using StatsPlots
+using Printf
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 MethodRenamingTable = [
@@ -15,11 +16,11 @@ MethodRenamingTable = [
 
 MethodsOfInterest = [
     "Handwritten",
-    "FitTV",
     "FitHand",
+    "FitTV",
     "SVI",
     "EM",
-    # "FitTruth",
+    "FitTruth",
 ]
 
 function show_baseline_comparison(
@@ -30,12 +31,20 @@ function show_baseline_comparison(
     backend,
     drop_uncertainty=true,
     lower_is_better=true,
+    number_format="%.3f",
 )
     @assert drop_uncertainty "current only drop_uncertainty=true is supported"
 
     sce_results = map(tables) do table
         # get the column corresponding to the metric
-        scores = parse_measurement_mean.(table[:, metric])
+        scores = if metric == "pose" || metric == "fw_pose"
+            prefix = metric == "pose" ? "" : "fw_"
+            error_loc = parse_measurement_mean.(table[:, "$(prefix)location"])
+            error_angle = parse_measurement_mean.(table[:, "$(prefix)angle"])
+            @. sqrt(error_loc ^ 2 + error_angle ^ 2)
+        else
+            parse_measurement_mean.(table[:, metric])
+        end
         keys = replace(table[:, "method"], MethodRenamingTable...)
         d = Dict(zip(keys, scores))
         [get(d, k, missing) for k in method_names]
@@ -43,9 +52,9 @@ function show_baseline_comparison(
 
     best_ids = map(enumerate(sce_results)) do (col, scores)
         if lower_is_better
-            _, row = findmin(replace(scores, missing => Inf))
+            _, row = findmin(replace(scores[1:end-1], missing => Inf))
         else
-            _, row = findmax(replace(scores, missing => -Inf))
+            _, row = findmax(replace(scores[1:end-1], missing => -Inf))
         end
         (row, col)
     end
@@ -56,7 +65,11 @@ function show_baseline_comparison(
     end
 
     table_header = ["method vs. data"; scenarios]
-    table_data = hcat(method_names, sce_results...)
+    fmt = Printf.Format(number_format)
+    number_strings = map(sce_results) do nums 
+        [n isa Number ? Printf.format(fmt, n) : string(n) for n in nums]
+    end
+    table_data = hcat(method_names, number_strings...)
     pretty_table(
         table_data; backend, header=table_header, highlighters=hl_best, alignment=:l
     )
@@ -84,7 +97,7 @@ function parse_measurement_mean(n::AbstractFloat)
     convert(Float64, n)
 end
 
-function print_baseline_tables(backend=:text)
+function print_baseline_tables(; backend=:text, aggregate="average")
     data_paths = [
         ("Hover", "reports/comparisons/hovercraft/"),
         ("Hover160", "reports/comparisons/hovercraft160/"),
@@ -92,25 +105,25 @@ function print_baseline_tables(backend=:text)
         ("Truck", "reports/comparisons/alpha_truck/"),
     ]
     scenarios = getindex.(data_paths, 1)
-    best_tables = map(data_paths) do (_, path)
-        CSV.read(joinpath(path, "best.csv"), DataFrame)
-    end
-    avg_tables = map(data_paths) do (_, path)
-        CSV.read(joinpath(path, "average.csv"), DataFrame)
+    tables = map(data_paths) do (_, path)
+        CSV.read(joinpath(path, "$aggregate.csv"), DataFrame)
     end
 
     # println("==== State Estimation RMSE (average) ====")
     # show_baseline_comparison(scenarios, avg_tables, "RMSE"; backend)
-    println("==== State Estimation RMSE (best) ====")
-    show_baseline_comparison(scenarios, best_tables, "total"; backend)
-    println("==== State Estimation location RMSE (best) ====")
-    show_baseline_comparison(scenarios, best_tables, "location"; backend)
+    # println("==== State Estimation RMSE ($aggregate) ====")
+    # show_baseline_comparison(scenarios, tables, "total"; backend)
+    println("==== State Estimation location RMSE ($aggregate) ====")
+    show_baseline_comparison(scenarios, tables, "location"; backend)
+    println("==== State Estimation orientation RMSE ($aggregate) ====")
+    show_baseline_comparison(scenarios, tables, "angle"; backend)
 
-    println("==== Forward Prediction RMSE (best) ====")
-    show_baseline_comparison(scenarios, avg_tables, "fw_total"; backend)
-
-    println("==== Forward Prediction location RMSE (best) ====")
-    show_baseline_comparison(scenarios, avg_tables, "fw_location"; backend)
+    # println("==== Forward Prediction RMSE ($aggregate) ====")
+    # show_baseline_comparison(scenarios, tables, "fw_total"; backend)
+    println("==== Forward Prediction location RMSE ($aggregate) ====")
+    show_baseline_comparison(scenarios, tables, "fw_location"; backend)
+    println("==== Forward Prediction orientation RMSE ($aggregate) ====")
+    show_baseline_comparison(scenarios, tables, "fw_angle"; backend)
 end
 
 
@@ -140,7 +153,8 @@ function plot_perf_vs_noise(; plot_args...)
         plot_args...,
     )
 
-    for method in [MethodsOfInterest; "FitTruth"]
+    methods = insert!(copy(MethodsOfInterest), length(MethodsOfInterest), "EM_NS")
+    for method in methods
         ys = [get(d, method, missing) for d in ys_val]
         ribbon = [get(d, method, missing) for d in ys_err]
         extra_args = if method == "FitTruth"
@@ -177,10 +191,10 @@ function plot_training_curve_vs_particles(; plt_args...)
     time_plt
 end
 ##-----------------------------------------------------------
-print_baseline_tables()
-print_baseline_tables(:latex)
+print_baseline_tables(aggregate="best")
+print_baseline_tables(aggregate="best", backend=:latex)
 let xticks=[1.25, 2.5, 5, 10, 20]
-    plt = plot_perf_vs_noise(; size=(450, 300), xticks=(xticks, map(string, xticks)), xscale=:log)
+    plt = plot_perf_vs_noise(; legend=:top, size=(500, 350), xticks=(xticks, map(string, xticks)), xscale=:log)
     display(plt)
     savefig(plt, "reports/obs_noise_variation/vary_obs_noise.pdf")
 end

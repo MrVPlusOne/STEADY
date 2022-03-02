@@ -5,7 +5,7 @@ SEDL.should_check_finite[] = false
 
 with_alert("baseline_experiments.jl") do
     # result_name = "hovercraft"
-    result_name = "alpha_truck"
+    result_name = "alpha_truck-SVI"
     group_name = "comparisons"
 
     result_dir = joinpath("reports/$group_name/$result_name")
@@ -17,7 +17,7 @@ with_alert("baseline_experiments.jl") do
     perf_best = []
     perf_measure = []
 
-    for train_method in [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :SVI]
+    for train_method in [:SVI] # [:Handwritten, :FitHand, :FitTV, :FitTruth, :EM, :SVI]
         # you can find the available args inside `train_models.jl`.
         local script_args = (;
             # is_quick_test=true,

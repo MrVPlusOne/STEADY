@@ -596,6 +596,7 @@ function train_VI!(
         )
 
         steps_trained += 1
+        GC.gc(false)
         callback(callback_args).should_stop && break
     end
     @info "Training finished ($steps_trained / $n_steps steps trained)."

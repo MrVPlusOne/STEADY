@@ -431,6 +431,7 @@ function plot_batched_series(
     truth::Union{Nothing,TimeSeries{<:BatchTuple}}=nothing,
     plot_width=600,
     quantile_spread=0.25,
+    component_names=nothing,
     plot_args...,
 )
     @smart_assert 0 <= quantile_spread <= 0.5
@@ -454,16 +455,21 @@ function plot_batched_series(
         sp = plot()
         for d in 1:n_dims
             local ys = (b -> b.val[k][d, :]).(series)
+            comp_name = if component_names === nothing
+                "$k[$d]"
+            else
+                component_names[k][d]
+            end
             plot_data!(
                 ys;
                 linecolor=d,
                 fillcolor=d,
                 fillalpha=0.4,
                 line=:dot,
-                label="$k[$d] (median)",
+                label="$comp_name (median)",
             )
             truth === nothing || plot_data!(
-                (b -> b.val[k][d, :]).(truth); linecolor=d, label="$k[$d] (truth)"
+                (b -> b.val[k][d, :]).(truth); linecolor=d, label="$comp_name (truth)"
             )
         end
         push!(subplots, sp)
@@ -541,13 +547,13 @@ end
 Currently, this is only supported on CPUs due to the underlying Distributions.jl's 
 implementation.
 """
-struct MvNormalLayer{V<:AbsVec, M<:AbsMat}
+struct MvNormalLayer{V<:AbsVec,M<:AbsMat}
     μ::V
     U::M  # used as an upper-triangular matrix (the Cholesky decomposition of Σ)
 end
 Flux.@functor MvNormalLayer
 
-function Statistics.cov(layer::MvNormalLayer) 
+function Statistics.cov(layer::MvNormalLayer)
     # generate a mask that is 1 for all upper-triangular elements
     U = UpperTriangular(layer.U)
     PDMat(Cholesky(U))
@@ -599,5 +605,5 @@ regular_params(tp::Union{Tuple,NamedTuple}) = Iterators.flatten(map(regular_para
 regular_params(::Union{Function,BatchNorm,Nothing}) = tuple()
 
 # fix Flux Params
-Base.in(k::Flux.Params, v::Base.KeySet{Any, <:IdDict}) = 
+Base.in(k::Flux.Params, v::Base.KeySet{Any,<:IdDict}) =
     get(v.dict, k, Base.secret_table_token) !== Base.secret_table_token

@@ -1,0 +1,2 @@
+method,log_obs,total,location,velocity,angle,ω,fw_total,fw_location,fw_velocity,fw_angle,fw_ω
+SVI,-21.0 ± 38.0,1.11 ± 0.48,0.82 ± 0.39,0.61 ± 0.24,0.16 ± 0.061,0.29 ± 0.13,1.06 ± 0.52,0.45 ± 0.19,0.82 ± 0.4,0.24 ± 0.15,0.42 ± 0.24
