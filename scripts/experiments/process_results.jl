@@ -5,6 +5,7 @@ using Measurements
 using SmartAsserts
 using StatsPlots
 using Printf
+using Statistics: mean
 StatsPlots.default(; dpi=300, legend=:outerbottom)
 
 MethodRenamingTable = [
@@ -153,16 +154,25 @@ function plot_perf_vs_noise(; plot_args...)
         plot_args...,
     )
 
-    methods = insert!(copy(MethodsOfInterest), length(MethodsOfInterest), "EM_NS")
+    methods = insert!(copy(MethodsOfInterest), length(MethodsOfInterest)-1, "EM_NS")
+    method_rename = Dict("EM" => "STEADY", "EM_NS" => "STEADY-")
     for method in methods
-        ys = [get(d, method, missing) for d in ys_val]
-        ribbon = [get(d, method, missing) for d in ys_err]
+        if method in ["FitTruth", "Handwritten"]
+            # average the results for these noise-independent baselines
+            y = mean([get(d, method, missing) for d in ys_val])
+            ys = fill(y, length(ys_val))
+            ribbon = nothing
+        else
+            ys = [get(d, method, missing) for d in ys_val]
+            ribbon = [get(d, method, missing) for d in ys_err]
+        end
         extra_args = if method == "FitTruth"
             [:linestyle => :dash, :markershape => :none]
         else
             []
         end
-        plot!(xs, ys; label=method, markershape=:auto, markersize=3, ribbon, extra_args...)
+        label = get(method_rename, method, method)
+        plot!(xs, ys; label, markershape=:auto, markersize=3, ribbon, extra_args...)
     end
     plt
 end
@@ -200,7 +210,7 @@ let xticks=[1.25, 2.5, 5, 10, 20]
 end
 
 let plt = plot_training_curve_vs_particles(;
-        legend=:topright, size=(450, 300), xticks=[400, 1000, 2000, 3000, 4000, 5000]
+        legend=:topright, size=(450, 300), xticks=[400, 1000, 2000, 3000, 4000]
     )
     display(plt)
     savefig(plt, "reports/vary_particle_size/vary_particle_size.pdf")
