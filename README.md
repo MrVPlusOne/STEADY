@@ -1,6 +1,10 @@
 # STEADY
 
+_Learning stochastic dynamical systems from noisy and indirect obseravtions._
+![STEADY Workflow](STEADY_workflow.png)
+
 This repo contains the source code for the paper [STEADY: Simultaneous State Estimation and Dynamics Learning from Indirect Observations](https://arxiv.org/abs/2203.01299). 
+
 
 ## Installing project dependencies
 This project is written in [Julia](https://julialang.org/) and is tested on both MacOS and Ubuntu. We provide the script [install_linux.py](install_linux.py) to automatically install the binary dependencies on Linux.
