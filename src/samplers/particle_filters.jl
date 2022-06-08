@@ -16,6 +16,10 @@ function systematic_resample!(indices, weights::AbsVec, bins_buffer::AbsVec)
     return indices
 end
 
+"""
+Sampling n indices according to their weights. 
+See https://youtu.be/tvNPidFMY20 for an explanation of the algorithm.
+"""
 function systematic_resample(weights::AbstractArray{N}, n_samples::Integer) where {N}
     if !isfinite(weights)
         @error "Weights must be finite." weights
@@ -36,7 +40,6 @@ function forward_filter(
     n_particles;
     resample_threshold::Float64=0.5,
     score_f=logpdf,
-    use_auxiliary_proposal::Bool=false,
     showprogress=true,
     cache::Dict=Dict(),
     check_finite::Bool=false,
@@ -59,11 +62,6 @@ function forward_filter(
     weights = exp.(log_weights)
     log_obs::Float64 = 0.0  # estimation of the log observation likelihood
     bins_buffer = zeros(Float64, N) # used for systematic resampling
-    if use_auxiliary_proposal
-        aux_weights = zeros(Float64, N)
-        aux_log_weights = zeros(Float64, N)
-        aux_indices = collect(1:N)
-    end
 
     progress = Progress(T; desc="forward_filter", output=stdout, enabled=showprogress)
     for t in 1:T
@@ -102,25 +100,10 @@ function forward_filter(
         if t < T
             Δt = times[t + 1] - times[t]
             u = controls[t]
-            if use_auxiliary_proposal && (t + 1) in obs_frames
-                # use the mean of the dynamics to predict observation likelihood and 
-                # resample particles accordingly
-                @inbounds for i in 1:N
-                    μ = mean(motion_model(particles[i, t], u, Δt))
-                    aux_log_weights[i] = score_f(obs_model(μ), observations[t + 1])
-                end
-                aux_log_weights .-= logsumexp(aux_log_weights)
-                aux_weights .= exp.(aux_log_weights)
-                aux_indices .= 1:N
-                systematic_resample!(aux_indices, aux_weights, bins_buffer)
-                ancestors[:, t] = ancestors[aux_indices, t]
-                particles[:, t] = particles[aux_indices, t]
-                log_weights .-= @views aux_log_weights[aux_indices]
-            end
 
-            @views sample_particles_batch!(
-                particles[:, t + 1], particles[:, t], motion_model, u, Δt; cache
-            )
+            for i in 1:N
+                particles[i, t + 1] = rand(motion_model(particles[i, t], u, Δt))
+            end
         end
         next!(progress)
     end
@@ -129,12 +112,6 @@ function forward_filter(
     (; particles, weights, log_weights, ancestors, log_obs)
 end
 
-function sample_particles_batch!(output, input, motion_model, u, Δt; cache)
-    N = size(input, 1)
-    @inbounds for i in 1:N
-        output[i] = rand(motion_model(input[i], u, Δt))
-    end
-end
 
 """
 Sample smooting trajecotries by tracking the ancestors of a particle filter.
@@ -150,7 +127,7 @@ function filter_smoother(
     showprogress=true,
     cache::Dict=Dict(),
 )
-    (; particles, weights, log_weights, ancestors, log_obs) = forward_filter(
+    (; particles, weights, ancestors, log_obs) = forward_filter(
         system,
         obs_data,
         n_particles;
