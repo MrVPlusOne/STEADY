@@ -199,8 +199,8 @@ obs_frames = eachindex(data_train.times)
 
 let
     plot()
-    SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
-    SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+    SEDL.plot_2d_landmarks!(landmarks, "truth"; color=3)
+    SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=2)
 end |> displaysave("truth.png")
 
 SEDL.plot_batched_series(
@@ -438,7 +438,7 @@ function em_callback(
 
             # plot 2d trajectories
             scenario_plt = plot()
-            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
+            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=3)
             if landmark_est !== nothing
                 SEDL.plot_2d_landmarks!(
                     SEDL.landmarks_from_tensor(landmark_est),
@@ -456,12 +456,12 @@ function em_callback(
             end
 
             let pf_trajs = SEDL.sample_posterior_pf(
-                    learned_motion_model, logpdf_obs_est, data_train, 1; obs_frames
+                    learned_motion_model, logpdf_obs_est, data_train, 1; obs_frames, n_trajs=500,
                 )
-                SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=1)
+                SEDL.plot_2d_trajectories!(pf_trajs, "posterior"; linecolor=1, linealpha=0.02)
             end
             SEDL.plot_2d_trajectories!(
-                getindex.(data_train.states, 1), "truth"; linecolor=3
+                getindex.(data_train.states, 1), "truth"; linecolor=2
             )
 
 
@@ -571,8 +571,8 @@ if !load_trained && (train_method == :EM_SLAM)
 
         landmark_plt = let
             plot()
-            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=2)
-            SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=1)
+            SEDL.plot_2d_landmarks!(landmarks, "truth"; color=3)
+            SEDL.plot_2d_trajectories!(data_train.states, "truth"; linecolor=2)
             SEDL.plot_2d_landmarks!(
                 SEDL.landmarks_from_tensor(landmark_guess),
                 "estimated";

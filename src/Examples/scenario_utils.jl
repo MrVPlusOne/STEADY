@@ -457,8 +457,7 @@ function plot_2d_scenario_old!(
     end
 end
 
-function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=1)
-    linealpha = 1.0 / sqrt(length(trajectories))
+function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; linecolor=1, linealpha=1)
     xs, ys = Float64[], Float64[]
     for tr in trajectories
         @unzip tr_xs, tr_ys = map(x -> x.pos, tr)
@@ -472,10 +471,8 @@ function plot_2d_trajectories!(trajectories::AbsVec{<:AbsVec}, name::String; lin
 end
 
 function plot_2d_trajectories!(
-    trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1
+    trajectories::AbsVec{<:BatchTuple}, name::String; linecolor=1, linealpha=1
 )
-    n_trajs = trajectories[1].batch_size
-    linealpha = min(1.0 / sqrt(length(n_trajs)), 1.0)
     pos_seq = (x -> Flux.cpu(x.val.pos)).(trajectories)
     end_marker = fill(convert(eltype(pos_seq[1]), NaN), size(pos_seq[1]))
     push!(pos_seq, end_marker)
@@ -486,7 +483,7 @@ function plot_2d_trajectories!(
     plot!(xs, ys; label="Position ($name)", linecolor, linealpha, aspect_ratio=1.0)
 end
 
-function plot_2d_landmarks!(landmarks::AbsVec{<:AbsVec}, name::String; color=2, plt_args...)
+function plot_2d_landmarks!(landmarks::AbsVec{<:AbsVec}, name::String; color=3, plt_args...)
     @unzip xs, ys = Flux.cpu(landmarks)
     scatter!(xs, ys; label="Landmarks ($name)", color, plt_args...)
 end
