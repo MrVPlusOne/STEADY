@@ -213,6 +213,39 @@ SEDL.plot_batched_series(
     data_train.times, getindex.(data_train.observations, 1); title="Observations"
 ) |> displaysave("observations.png")
 ##-----------------------------------------------------------
+# save data as csv
+
+function batch_series_to_matrix(series)
+    out = []
+    for i in 1:series[1].batch_size
+        for t in 1:length(series)
+            row = reduce(vcat, values(series[t][i].val))'
+            push!(out, row)
+        end
+    end
+    return Array(reduce(vcat, out))
+end
+
+
+function as_text(io, matrix, headers)
+    join(io, headers, ",")
+    print(io, "\n")
+    for row in eachrow(matrix)
+        join(io, map(string, row), ",")
+        print(io, "\n")
+    end
+end
+
+out_dir = mkpath("Sindy_data")
+for (name, series) in [("train", data_train), ("valid", data_valid), ("test", data_test)]
+    b1 = batch_series_to_matrix(series.states)
+    b2 = batch_series_to_matrix(series.controls)
+    b_all = [b1;;b2]
+    open(joinpath(out_dir, "series_$name.csv"), "w") do io
+        as_text(io, b_all, ["pos_x", "pos_y", "angle_x", "angle_y", "vel_x", "vel_y", "ω", "twist_linear", "twist_angular"])
+    end
+end
+##-----------------------------------------------------------
 # utilities
 function copy_model(model)
     if use_gpu
