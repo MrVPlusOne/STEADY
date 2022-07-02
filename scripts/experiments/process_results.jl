@@ -177,28 +177,35 @@ function plot_perf_vs_noise(; plot_args...)
     plt
 end
 
-function plot_training_curve_vs_particles(; plt_args...)
-    time_plt = plot(; plt_args...)
+function plot_training_curve_vs_particles(; x_is_time=true, plt_args...)
+    plt = plot(; plt_args...)
     particle_sizes = [200, 2_000, 20_000, 200_000]
     for n_particle in particle_sizes
         label = "n_particle=$(n_particle/1000)K"
         curve = CSV.read(joinpath("reports/vary_particle_size/", "$label.csv"), DataFrame)
-        xs = curve[:, :step]
+        steps = curve[:, :step]
         times = curve[:, :training_time]
         ys = curve[:, :total]
-        times = times .- times[1] # remove the initialization time.
-        # ids = filter(i -> 3_000 <= xs[i] <= 30_000, eachindex(xs))
-        tids = filter(i -> 400 <= times[i] <= 5000, eachindex(xs))
+        if x_is_time
+            times = times .- times[1] # remove the initialization time.
+            ids = filter(i -> 400 <= times[i] <= 5000, eachindex(steps))
+            xs = times[ids]
+            xlabel="training time (s)"
+        else
+            ids = filter(i -> 3_000 <= steps[i] <= 30_000, eachindex(steps))
+            xs = steps[ids]
+            xlabel="training steps"
+        end
         plot!(
-            time_plt,
-            times[tids],
-            ys[tids];
-            xlabel="training time (s)",
+            plt,
+            xs,
+            ys[ids];
+            xlabel,
             ylabel="State Estimation Error",
             label,
         )
     end
-    time_plt
+    plt
 end
 ##-----------------------------------------------------------
 print_baseline_tables(aggregate="best")
@@ -210,6 +217,7 @@ let xticks=[1.25, 2.5, 5, 10, 20]
 end
 
 let plt = plot_training_curve_vs_particles(;
+        x_is_time=true,
         legend=:topright, size=(450, 300), xticks=[400, 1000, 2000, 3000, 4000]
     )
     display(plt)
