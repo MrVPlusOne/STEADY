@@ -437,7 +437,7 @@ function em_callback(
             end
 
             # plot 2d trajectories
-            scenario_plt = plot()
+            scenario_plt = plot(title="Iteration $(r.step)")
             SEDL.plot_2d_landmarks!(landmarks, "truth"; color=3)
             if landmark_est !== nothing
                 SEDL.plot_2d_landmarks!(
