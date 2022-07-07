@@ -1,7 +1,7 @@
 # STEADY
 
 _Learning stochastic dynamical systems from noisy and indirect obseravtions._
-![STEADY Workflow](STEADY_workflow.png)
+![STEADY Animation](STEADY.gif)
 
 This repo contains the source code for the paper [STEADY: Simultaneous State Estimation and Dynamics Learning from Indirect Observations](https://arxiv.org/abs/2203.01299). 
 
@@ -27,7 +27,7 @@ script_args = (
     gpu_id=0,
 )
 ```
-This specifies that we want to train on the ["alpha_truck" dataset](datasets/alpha_truck/) using expectation-maximization (i.e., the STEADY algorithm). `gpu_id=0` means that we want to use the first available GPU (set this to `nothing` if train on CPU). You can find the fully list of configurable parameters along with their acceptable values [here](https://github.com/MrVPlusOne/STEADY/blob/master/scripts/experiments/experiment_common.jl#L13).
+This specifies that we want to train on the ["alpha_truck" dataset](datasets/alpha_truck/) using expectation-maximization (i.e., the STEADY algorithm). `gpu_id=0` means that we want to use the first available GPU (set this to `nothing` if trained on CPU). You can find the full list of configurable parameters along with their acceptable values [here](https://github.com/MrVPlusOne/STEADY/blob/master/scripts/experiments/experiment_common.jl#L13).
 
 We can then start the training with:
 ```julia
@@ -35,7 +35,7 @@ include("scripts/turn_off_displays.jl"); # this is only needed when a plot pane 
 include("scripts/train_models.jl") # this starts the training
 ```
 
-We also produce the following scripts to reproduce our paper results:
+We also provide the following scripts to reproduce our paper results:
 
 - [baseline_experiments.jl](scripts/experiments/baseline_experiments.jl): Corresponding to the "Main results" Section of the paper.
 - [obs_noise_variation.jl](scripts/experiments/obs_noise_variation.jl): The "Impact of Observation Noise" Section.
