@@ -43,6 +43,3 @@ We also provide the following scripts to reproduce our paper results:
 - [obs_noise_variation.jl](scripts/experiments/obs_noise_variation.jl): The "Impact of Observation Noise" Section.
 - [particle_variation.jl](scripts/experiments/particle_variation.jl): The "Impact of Particle Quantity" Section.
 
-
-## A step-by-step tutorial
-Coming soon!
